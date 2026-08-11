@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <!-- Copy this file to "Directory.Build.props" (same folder) and edit both paths below.
+         This file is intentionally NOT committed as-is because the paths are machine-specific. -->
+
+    <!-- Folder containing the Unturned SERVER's managed assemblies, e.g.:
+         Windows: C:\SteamCMD\unturned\Unturned_Headless_Data\Managed
+         Linux:   ~/steamcmd/unturned/Unturned_Headless_Data/Managed
+         (Folder name varies slightly by branch; look for Assembly-CSharp.dll inside it.) -->
+    <UnturnedManagedPath>C:\PATH\TO\Unturned_Headless_Data\Managed</UnturnedManagedPath>
+
+    <!-- Folder containing RocketMod's own assemblies (Rocket.API.dll, Rocket.Core.dll,
+         Rocket.Unturned.dll), typically alongside the server's Rocket install. -->
+    <RocketModPath>C:\PATH\TO\Rocket</RocketModPath>
+  </PropertyGroup>
+</Project>

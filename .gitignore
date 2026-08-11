@@ -1,0 +1,19 @@
+# Unturned dedicated server install (~2GB, installed via SteamCMD - not source)
+DedicatedServer/
+
+# Build output
+bin/
+obj/
+
+# Machine-specific reference paths; copy Directory.Build.props.example instead
+Directory.Build.props
+
+# Editor / OS
+.vs/
+.idea/
+*.user
+*.swp
+.DS_Store
+
+# Claude Code transient state
+.claude/scheduled_tasks.lock

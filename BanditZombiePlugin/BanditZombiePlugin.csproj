@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- RocketMod builds targeting current Unturned typically use net48. If your RocketMod/
+         Unturned install uses a different target framework, change this to match. -->
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>BanditZombiePlugin</AssemblyName>
+    <RootNamespace>BanditZombiePlugin</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <!-- Reference paths come from Directory.Build.props, which is NOT checked in (machine-specific).
+       Copy Directory.Build.props.example to Directory.Build.props and fill in your local paths. -->
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(UnturnedManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(UnturnedManagedPath)\com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SDG.NetTransport">
+      <HintPath>$(UnturnedManagedPath)\SDG.NetTransport.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SDG.NetPak.Runtime">
+      <HintPath>$(UnturnedManagedPath)\SDG.NetPak.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(UnturnedManagedPath)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(UnturnedManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(UnturnedManagedPath)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Reference Include="Rocket.API">
+      <HintPath>$(RocketModPath)\Rocket.API.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Rocket.Core">
+      <HintPath>$(RocketModPath)\Rocket.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Rocket.Unturned">
+      <HintPath>$(RocketModPath)\Rocket.Unturned.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
