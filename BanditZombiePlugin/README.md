@@ -60,6 +60,15 @@ produced a silent failure rather than an error:
    `NonPublic` alone silently returns null.
 8. **Bots are kicked after ~30s** by `Provider.KickClientsWithBadConnection` unless
    `SteamPlayer.timeLastPacketWasReceivedFromClient` is refreshed, since they never receive packets.
+9. **RocketMod's global event handlers assume every player is one it set up.** Rocket subscribes to
+   statics like `PlayerLife.OnTellHealth_Global`, which fire for *every* player, then opens each
+   handler with an unguarded `GetComponent<UnturnedPlayerEvents>()`. Rocket only attaches that
+   component from its `Provider.onServerConnected` hook, which a bot never triggers - so every time
+   a bot was shot, starved or grew thirsty the log filled with `NullReferenceException`, and the
+   throw unwound back through `PlayerLife.doDamage` into `UseableGun.ballistics`, skipping whatever
+   vanilla did after telling health. Fixed by attaching the same three components Rocket does
+   (`UnturnedPlayerFeatures`, `UnturnedPlayerMovement`, `UnturnedPlayerEvents`). Note this also
+   makes a bot spawn raise Rocket's `OnPlayerConnected` for other plugins.
 
 ## Why not zombies?
 
@@ -102,12 +111,33 @@ Developed against Unturned 3.26.3.8 with RocketModFix 4.23.1.
 | `FireIntervalSeconds` | `0.6` | One trigger pull per interval. |
 | `AimToleranceDegrees` | `10` | Won't fire until aimed this close. |
 | `FireRange` | `50` | See the range limitation below. |
+| `AimHitChance` | `0.3` | Roughly the fraction of shots that land. `1` restores perfect aim. |
+| `AimTargetRadius` / `AimTargetHalfHeight` | `0.35` / `0.8` | Ellipse standing in for the player's hitboxes, used to solve for the aim error. |
+| `AimMaxErrorDegrees` | `8` | Caps the error, so the bot doesn't flail at point-blank range. |
+| `AimWobbleIntervalSeconds` | `0.35` | How often the aim re-drifts between shots. |
+| `AimWobbleSmoothingSeconds` | `0.15` | Larger is a lazier sway; `0` snaps. |
+| `RequireLineOfSight` | `true` | Bot won't target or shoot through walls, rocks or vehicles. |
+
+### Accuracy
+
+The bot's aim error is drawn in **metres at the target's range** and then converted to an angle, so
+the hit rate holds steady with distance instead of the bot being lethal up close and hopeless far
+out. Each axis' standard deviation is scaled by that axis' half-extent, which puts the miss (in
+target-widths) on a circular unit Gaussian, so `P(hit) = 1 - exp(-1 / 2s²)` and `AimHitChance` is
+met at `s = 1 / sqrt(-2 ln(1 - p))`. A fresh sample is drawn the instant the trigger is pulled, so
+shots are independent; the drift between shots is just cosmetic sway.
+
+Measured against the ellipse, that lands on 30% from about 10m out. Closer in, the
+`AimMaxErrorDegrees` clamp takes over and the bot gets deadlier - ~43% at 5m, ~54% at 3m.
 
 ## Known limitations
 
 - **~50m effective range.** With Ballistics enabled the server only accepts a hit report within
   roughly `ballisticTravel * (steps + 1 + SAMPLES) + 4` (≈54m for the Eaglefire) of the bullet at
   report time. Longer range would mean delaying the hit report as the bullet travels.
+- **Line of sight is eye-to-eye.** A target whose head is behind cover reads as hidden even if a
+  leg is exposed, and vice versa - the bot won't shoot at a sliver of a player it can technically
+  see. Mirrors what vanilla sentry guns do.
 - **Bots are stationary** - they turn and shoot but never move. Movement would require
   reproducing client-side movement prediction so `clientPosition` matches the server.
 - **Bots consume player slots** and appear in the player list and server browser count.

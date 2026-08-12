@@ -38,6 +38,13 @@ namespace BanditZombiePlugin.FakePlayer
         public float AimToleranceDegrees = 10f;
         public float FireRange = 50f;
         public bool InfiniteAmmo = true;
+        public float AimHitChance = 0.3f;
+        public float AimTargetRadius = 0.35f;
+        public float AimTargetHalfHeight = 0.8f;
+        public float AimMaxErrorDegrees = 8f;
+        public float AimWobbleIntervalSeconds = 0.35f;
+        public float AimWobbleSmoothingSeconds = 0.15f;
+        public bool RequireLineOfSight = true;
 
         // input_x/input_y are decoded as ((analog >> 4) & 0xF) - 1 and (analog & 0xF) - 1, so the
         // neutral "no movement" value is 0x11, NOT 0. Sending 0 would make the bot walk backwards.
@@ -45,6 +52,11 @@ namespace BanditZombiePlugin.FakePlayer
 
         private const byte AmmoStateIndex = 10;   // PlayerEquipment.state[10] == rounds in magazine
         private const byte FiremodeStateIndex = 11; // PlayerEquipment.state[11] == EFiremode
+
+        // Pull the line-of-sight rays up slightly short of the endpoints, so a ray that starts or
+        // ends flush against a surface doesn't report that surface as cover. Same 0.025 vanilla
+        // InteractableSentry.ScanForTargets uses.
+        private const float LineOfSightSkinWidth = 0.025f;
 
         private static readonly FieldInfo ServersidePacketsField =
             typeof(PlayerInput).GetField("serversidePackets", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -73,6 +85,16 @@ namespace BanditZombiePlugin.FakePlayer
         private bool _triggerHeld;
         private bool _aimingActive;
         private float _nextEquipAttemptTime;
+
+        // Aim error, in degrees, added on top of the tracked aim when the packet is built. Kept
+        // separate from _currentYaw/_currentPitch on purpose: those keep tracking the target dead
+        // on, so IsAimedAtTarget() still answers "have I finished turning onto him" rather than
+        // "did this particular shot happen to be wobbled back on target".
+        private float _aimErrorYaw;
+        private float _aimErrorPitch;
+        private float _aimErrorYawTarget;
+        private float _aimErrorPitchTarget;
+        private float _nextWobbleSampleTime;
 
         private void Start()
         {
@@ -126,6 +148,7 @@ namespace BanditZombiePlugin.FakePlayer
 
             EnsureGunEquipped();
             AimAtTarget(elapsed);
+            UpdateAimWobble(elapsed);
             // Order matters: DecideAttackInput() consumes the trigger state for this packet.
             EAttackInputFlags secondary = DecideAimInput();
             EAttackInputFlags primary = DecideAttackInput();
@@ -154,6 +177,83 @@ namespace BanditZombiePlugin.FakePlayer
 
             _currentYaw = Mathf.MoveTowardsAngle(_currentYaw, desiredYaw, TurnSpeedDegreesPerSecond * elapsed);
             _currentPitch = Mathf.MoveTowards(_currentPitch, desiredPitch, TurnSpeedDegreesPerSecond * elapsed);
+        }
+
+        /// <summary>
+        /// Keeps the aim gently sliding around the target between shots instead of sitting welded
+        /// to its centre. This is cosmetic - the sample that decides whether a shot lands is drawn
+        /// fresh in DecideAttackInput() at the moment the trigger is pulled - but without it the
+        /// bot would only ever twitch once per shot.
+        /// </summary>
+        private void UpdateAimWobble(float elapsed)
+        {
+            if (_target == null)
+            {
+                _aimErrorYaw = _aimErrorYawTarget = 0f;
+                _aimErrorPitch = _aimErrorPitchTarget = 0f;
+                return;
+            }
+
+            if (Time.time >= _nextWobbleSampleTime)
+            {
+                _nextWobbleSampleTime = Time.time + Mathf.Max(AimWobbleIntervalSeconds, 0.01f);
+                SampleAimError(out _aimErrorYawTarget, out _aimErrorPitchTarget);
+            }
+
+            // Exponential approach, so the sway is the same shape whatever the packet rate is.
+            float t = AimWobbleSmoothingSeconds > 0.0001f
+                ? 1f - Mathf.Exp(-elapsed / AimWobbleSmoothingSeconds)
+                : 1f;
+            _aimErrorYaw = Mathf.Lerp(_aimErrorYaw, _aimErrorYawTarget, t);
+            _aimErrorPitch = Mathf.Lerp(_aimErrorPitch, _aimErrorPitchTarget, t);
+        }
+
+        /// <summary>
+        /// Draws how far off the target's centre this shot should go.
+        ///
+        /// The miss is picked in metres at the target's range - a lateral and a vertical offset,
+        /// each normally distributed - and only then converted to an angle. That way the hit rate
+        /// doesn't change with distance: a 0.5m miss is a miss whether it happens at 5m or at 50m,
+        /// whereas a fixed angular spread would make the bot lethal up close and useless far away.
+        ///
+        /// Scaling each axis' standard deviation by that axis' half-extent puts the miss, measured
+        /// in target-widths, on a circular unit Gaussian - so P(inside the target ellipse) is
+        /// 1 - exp(-1 / 2s^2), and the configured hit chance p is hit at s = 1 / sqrt(-2 ln(1-p)).
+        /// </summary>
+        private void SampleAimError(out float yawError, out float pitchError)
+        {
+            yawError = 0f;
+            pitchError = 0f;
+
+            float hitChance = Mathf.Clamp(AimHitChance, 0f, 0.999f);
+            if (hitChance >= 0.999f || AimTargetRadius <= 0f || _target == null)
+            {
+                return; // configured back into a perfect aimbot
+            }
+
+            float scale = 1f / Mathf.Sqrt(-2f * Mathf.Log(1f - hitChance));
+
+            // Clamped because at arm's length the angle subtended by a torso-width miss explodes;
+            // AimMaxErrorDegrees catches the same case from the other side.
+            float distance = Mathf.Max((TargetAimPoint - EyePosition).magnitude, 1f);
+
+            yawError = ErrorDegrees(NextGaussian() * AimTargetRadius * scale, distance);
+            pitchError = ErrorDegrees(NextGaussian() * AimTargetHalfHeight * scale, distance);
+        }
+
+        private float ErrorDegrees(float offsetMetres, float distance)
+        {
+            float degrees = Mathf.Atan2(offsetMetres, distance) * Mathf.Rad2Deg;
+            return Mathf.Clamp(degrees, -AimMaxErrorDegrees, AimMaxErrorDegrees);
+        }
+
+        /// <summary>Box-Muller: turns two uniforms into a standard normal sample.</summary>
+        private static float NextGaussian()
+        {
+            // Random.value is inclusive of 0 and Log(0) is -Infinity, hence the floor.
+            float u1 = Mathf.Max(UnityEngine.Random.value, 1e-6f);
+            float u2 = UnityEngine.Random.value;
+            return Mathf.Sqrt(-2f * Mathf.Log(u1)) * Mathf.Cos(2f * Mathf.PI * u2);
         }
 
         /// <summary>
@@ -190,7 +290,23 @@ namespace BanditZombiePlugin.FakePlayer
                 return EAttackInputFlags.None;
             }
 
+            // Re-checked here and not just at scan time: the target can step behind cover in the
+            // half second between scans, and this is the last moment before the round goes out.
+            if (!HasLineOfSight(_target))
+            {
+                return EAttackInputFlags.None;
+            }
+
             TopUpAmmoIfNeeded();
+
+            // Draw this shot's miss now rather than reusing whatever the sway happens to be sitting
+            // on, so every shot is an independent draw and the hit rate actually comes out at
+            // AimHitChance. Snapping the current error too keeps the packet we are about to build,
+            // its hit raycast and the replicated aim all pointing the same way.
+            SampleAimError(out _aimErrorYawTarget, out _aimErrorPitchTarget);
+            _aimErrorYaw = _aimErrorYawTarget;
+            _aimErrorPitch = _aimErrorPitchTarget;
+            _nextWobbleSampleTime = Time.time + Mathf.Max(AimWobbleIntervalSeconds, 0.01f);
 
             _nextFireTime = Time.time + FireIntervalSeconds;
             _triggerHeld = true;
@@ -221,6 +337,88 @@ namespace BanditZombiePlugin.FakePlayer
             }
 
             return EAttackInputFlags.None;
+        }
+
+        /// <summary>
+        /// Where the bot's shots actually leave from - PlayerLook.aim is the same transform
+        /// UseableGun fires along, so line-of-sight tests agree with where the bullet can reach.
+        /// Falls back to a nominal eye height if look isn't wired up yet.
+        /// </summary>
+        private Vector3 EyePosition
+        {
+            get
+            {
+                return Self != null && Self.look != null && Self.look.aim != null
+                    ? Self.look.aim.position
+                    : transform.position + Vector3.up * 1.5f;
+            }
+        }
+
+        private Vector3 TargetAimPoint
+        {
+            get
+            {
+                if (_target == null)
+                {
+                    return EyePosition;
+                }
+
+                return _target.look != null && _target.look.aim != null
+                    ? _target.look.aim.position
+                    : _target.transform.position + Vector3.up * 1.5f;
+            }
+        }
+
+        /// <summary>
+        /// True when nothing solid sits between the bot's eye and the target's.
+        ///
+        /// This mirrors what vanilla InteractableSentry.ScanForTargets() does, including the second
+        /// backwards ray: a single outbound ray misses geometry whose colliders only face the other
+        /// way, so a sentry - and now the bot - fires the return trip from just short of the target
+        /// as well. BLOCK_SENTRY covers terrain, objects, barricades, structures and vehicles;
+        /// neither mask contains the player layers, so bodies never count as cover for each other.
+        /// </summary>
+        private bool HasLineOfSight(Player candidate)
+        {
+            if (!RequireLineOfSight)
+            {
+                return true;
+            }
+
+            if (candidate == null)
+            {
+                return false;
+            }
+
+            Vector3 origin = EyePosition;
+            Vector3 aimPoint = candidate.look != null && candidate.look.aim != null
+                ? candidate.look.aim.position
+                : candidate.transform.position + Vector3.up * 1.5f;
+
+            Vector3 toTarget = aimPoint - origin;
+            float distance = toTarget.magnitude;
+            if (distance <= LineOfSightSkinWidth)
+            {
+                return true; // practically inside each other; nothing can fit in between
+            }
+
+            Vector3 direction = toTarget / distance;
+            float rayLength = distance - LineOfSightSkinWidth;
+
+            RaycastHit hit;
+            if (Physics.Raycast(new Ray(origin, direction), out hit, rayLength, RayMasks.BLOCK_SENTRY)
+                && hit.transform != null && hit.transform != transform)
+            {
+                return false;
+            }
+
+            if (Physics.Raycast(new Ray(origin + direction * rayLength, -direction), out hit, rayLength, RayMasks.DAMAGE_SERVER)
+                && hit.transform != null && hit.transform != transform)
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private bool IsTargetInRange()
@@ -350,8 +548,11 @@ namespace BanditZombiePlugin.FakePlayer
 
             // Server-created bullets (fire() for a non-local player) get no spread - they travel
             // straight along the aim direction - so this raycast matches the bullet exactly.
+            // It must use the packet's own yaw/pitch, aim error and all: those are the angles
+            // PlayerLook will be simulated to, so a wobbled shot reports the hit it really made
+            // (often nothing, which is the point) instead of the one it was aiming for.
             Vector3 origin = Self.look.aim.position;
-            Vector3 direction = Quaternion.Euler(_currentPitch - 90f, _currentYaw, 0f) * Vector3.forward;
+            Vector3 direction = Quaternion.Euler(packet.pitch - 90f, packet.yaw, 0f) * Vector3.forward;
 
             RaycastInfo raycastInfo = DamageTool.raycast(new Ray(origin, direction), FireRange, RayMasks.DAMAGE_CLIENT, Self);
             if (Self.input.isRaycastInvalid(raycastInfo))
@@ -379,8 +580,8 @@ namespace BanditZombiePlugin.FakePlayer
             {
                 analog = AnalogNeutral,
                 clientPosition = transform.position,
-                yaw = _currentYaw,
-                pitch = _currentPitch,
+                yaw = _currentYaw + _aimErrorYaw,
+                pitch = Mathf.Clamp(_currentPitch + _aimErrorPitch, 0f, 180f),
                 keys = 0,
                 primaryAttack = primaryAttack,
                 secondaryAttack = secondaryAttack,
@@ -417,11 +618,21 @@ namespace BanditZombiePlugin.FakePlayer
                 }
 
                 float distanceSq = (candidate.transform.position - transform.position).sqrMagnitude;
-                if (distanceSq < nearestDistanceSq)
+                if (distanceSq >= nearestDistanceSq)
                 {
-                    nearest = candidate;
-                    nearestDistanceSq = distanceSq;
+                    continue;
                 }
+
+                // Last, because it is the only test here that costs raycasts: a player the bot
+                // cannot see is not a target, so it locks onto the nearest *visible* player rather
+                // than tracking the nearest one through a wall and waiting for them to step out.
+                if (!HasLineOfSight(candidate))
+                {
+                    continue;
+                }
+
+                nearest = candidate;
+                nearestDistanceSq = distanceSq;
             }
 
             return nearest;

@@ -146,6 +146,8 @@ namespace BanditZombiePlugin.FakePlayer
             // Player that nobody else's client ever renders.
             PlayerJoinBroadcaster.AnnounceNewPlayerToExistingClients(steamPlayer);
 
+            AttachRocketPlayerComponents(steamPlayer.player);
+
             BanditZombieConfiguration config = BanditZombiePlugin.Instance.Configuration.Instance;
             if (config.GiveGun)
             {
@@ -161,9 +163,63 @@ namespace BanditZombiePlugin.FakePlayer
             controller.AimToleranceDegrees = config.AimToleranceDegrees;
             controller.FireRange = config.FireRange;
             controller.InfiniteAmmo = config.InfiniteAmmo;
+            controller.AimHitChance = config.AimHitChance;
+            controller.AimTargetRadius = config.AimTargetRadius;
+            controller.AimTargetHalfHeight = config.AimTargetHalfHeight;
+            controller.AimMaxErrorDegrees = config.AimMaxErrorDegrees;
+            controller.AimWobbleIntervalSeconds = config.AimWobbleIntervalSeconds;
+            controller.AimWobbleSmoothingSeconds = config.AimWobbleSmoothingSeconds;
+            controller.RequireLineOfSight = config.RequireLineOfSight;
 
             SpawnedBotSteamIds.Add(fakeSteamId.m_SteamID);
             return steamPlayer.player;
+        }
+
+        /// <summary>
+        /// Gives the bot the three per-player components RocketMod attaches to everyone who joins.
+        ///
+        /// Rocket hooks Provider.onServerConnected and does exactly this - TryAddComponent of
+        /// UnturnedPlayerFeatures, UnturnedPlayerMovement and UnturnedPlayerEvents - but a bot is
+        /// never accepted through Provider, so that hook never fires for one. Meanwhile Rocket
+        /// subscribes its handlers to the *global* statics (PlayerLife.OnTellHealth_Global and
+        /// friends), which fire for every player alive on the server, bot or not. Those handlers
+        /// open with an unguarded GetComponent&lt;UnturnedPlayerEvents&gt;(), so every time a bot
+        /// got shot, starved or grew thirsty the server logged a NullReferenceException out of
+        /// Rocket - and, because the throw unwound back through PlayerLife.doDamage into
+        /// UseableGun.ballistics, whatever vanilla meant to do after telling health was skipped.
+        ///
+        /// Attaching the components makes those lookups succeed and the bot a first-class Rocket
+        /// player. Side effect, and the reason this is worth knowing about: UnturnedPlayerEvents'
+        /// own Start() raises Rocket's OnPlayerConnected for the bot, so other plugins will see a
+        /// bot spawn as a player join.
+        /// </summary>
+        private static void AttachRocketPlayerComponents(Player player)
+        {
+            try
+            {
+                GameObject gameObject = player.gameObject;
+
+                if (gameObject.GetComponent<Rocket.Unturned.Player.UnturnedPlayerFeatures>() == null)
+                {
+                    gameObject.AddComponent<Rocket.Unturned.Player.UnturnedPlayerFeatures>();
+                }
+
+                if (gameObject.GetComponent<Rocket.Unturned.UnturnedPlayerMovement>() == null)
+                {
+                    gameObject.AddComponent<Rocket.Unturned.UnturnedPlayerMovement>();
+                }
+
+                if (gameObject.GetComponent<Rocket.Unturned.Events.UnturnedPlayerEvents>() == null)
+                {
+                    gameObject.AddComponent<Rocket.Unturned.Events.UnturnedPlayerEvents>();
+                }
+            }
+            catch (System.Exception e)
+            {
+                // Not fatal - the bot works without these, it just makes Rocket's global event
+                // handlers throw on it. Better a spammy log than no bot.
+                Logger.LogError($"[BanditZombie] Could not attach RocketMod's player components to the bot; expect NullReferenceExceptions from Rocket's event handlers. {e}");
+            }
         }
 
         /// <summary>
