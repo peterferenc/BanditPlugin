@@ -5,7 +5,7 @@ using Rocket.Unturned.Player;
 using SDG.Unturned;
 using UnityEngine;
 
-namespace BanditZombiePlugin.Commands
+namespace BanditPlugin.Commands
 {
     /// <summary>
     /// "/bandit" - spawns a stationary fake-player bot a short distance in front of the caller
@@ -18,7 +18,7 @@ namespace BanditZombiePlugin.Commands
         public string Help => "Spawns a stationary bandit bot that turns to face the nearest player.";
         public string Syntax => string.Empty;
         public List<string> Aliases => new List<string>();
-        public List<string> Permissions => new List<string> { "banditzombie.spawn" };
+        public List<string> Permissions => new List<string> { "bandit.spawn" };
 
         public void Execute(IRocketPlayer caller, string[] command)
         {

@@ -5,7 +5,7 @@ using Steamworks;
 using UnityEngine;
 using Logger = Rocket.Core.Logging.Logger;
 
-namespace BanditZombiePlugin.FakePlayer
+namespace BanditPlugin.FakePlayer
 {
     /// <summary>
     /// Spawns a bot as a real Player entity (not a Zombie) using a fabricated, never-connected
@@ -69,7 +69,7 @@ namespace BanditZombiePlugin.FakePlayer
             if (SendInitialPlayerStateMethod == null) missing.Add("Player.SendInitialPlayerState(SteamPlayer)");
             if (missing.Count > 0)
             {
-                Logger.LogError($"[BanditZombie] Could not reflect Provider/Player members needed to spawn a fake player: {string.Join(", ", missing)}. The game version may have changed internal method names/signatures.");
+                Logger.LogError($"[Bandit] Could not reflect Provider/Player members needed to spawn a fake player: {string.Join(", ", missing)}. The game version may have changed internal method names/signatures.");
                 return null;
             }
 
@@ -127,13 +127,13 @@ namespace BanditZombiePlugin.FakePlayer
             }
             catch (TargetInvocationException e)
             {
-                Logger.LogError($"[BanditZombie] Provider.addPlayer threw while spawning fake player: {e.InnerException}");
+                Logger.LogError($"[Bandit] Provider.addPlayer threw while spawning fake player: {e.InnerException}");
                 return null;
             }
 
             if (steamPlayer?.player == null)
             {
-                Logger.LogError("[BanditZombie] Provider.addPlayer did not return a usable SteamPlayer/Player.");
+                Logger.LogError("[Bandit] Provider.addPlayer did not return a usable SteamPlayer/Player.");
                 return null;
             }
 
@@ -148,7 +148,7 @@ namespace BanditZombiePlugin.FakePlayer
 
             AttachRocketPlayerComponents(steamPlayer.player);
 
-            BanditZombieConfiguration config = BanditZombiePlugin.Instance.Configuration.Instance;
+            BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
             if (config.GiveGun)
             {
                 GiveAndEquipGun(steamPlayer.player, config);
@@ -218,7 +218,7 @@ namespace BanditZombiePlugin.FakePlayer
             {
                 // Not fatal - the bot works without these, it just makes Rocket's global event
                 // handlers throw on it. Better a spammy log than no bot.
-                Logger.LogError($"[BanditZombie] Could not attach RocketMod's player components to the bot; expect NullReferenceExceptions from Rocket's event handlers. {e}");
+                Logger.LogError($"[Bandit] Could not attach RocketMod's player components to the bot; expect NullReferenceExceptions from Rocket's event handlers. {e}");
             }
         }
 
@@ -231,7 +231,7 @@ namespace BanditZombiePlugin.FakePlayer
         /// Note the Dummy project has no equip support at all - "todo: simulate useable" - so this
         /// path is not borrowed from it.)
         /// </summary>
-        private static void GiveAndEquipGun(Player player, BanditZombieConfiguration config)
+        private static void GiveAndEquipGun(Player player, BanditConfiguration config)
         {
             ItemAsset gunAsset = null;
 
@@ -247,7 +247,7 @@ namespace BanditZombiePlugin.FakePlayer
 
             if (gunAsset == null)
             {
-                Logger.LogError($"[BanditZombie] Could not resolve a gun asset from GUID '{config.GunAssetGuid}' or legacy ID {config.GunAssetLegacyId}; bot will spawn empty-handed.");
+                Logger.LogError($"[Bandit] Could not resolve a gun asset from GUID '{config.GunAssetGuid}' or legacy ID {config.GunAssetLegacyId}; bot will spawn empty-handed.");
                 return;
             }
 

@@ -4,8 +4,8 @@
     <!-- RocketMod builds targeting current Unturned typically use net48. If your RocketMod/
          Unturned install uses a different target framework, change this to match. -->
     <TargetFramework>net48</TargetFramework>
-    <AssemblyName>BanditZombiePlugin</AssemblyName>
-    <RootNamespace>BanditZombiePlugin</RootNamespace>
+    <AssemblyName>BanditPlugin</AssemblyName>
+    <RootNamespace>BanditPlugin</RootNamespace>
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

@@ -6,7 +6,7 @@ using SDG.NetTransport;
 using SDG.Unturned;
 using Logger = Rocket.Core.Logging.Logger;
 
-namespace BanditZombiePlugin.FakePlayer
+namespace BanditPlugin.FakePlayer
 {
     /// <summary>
     /// Replicates the two broadcast steps that Provider's real remote-player join path
@@ -72,7 +72,7 @@ namespace BanditZombiePlugin.FakePlayer
             string missingMembers = DescribeMissingMembers();
             if (missingMembers.Length > 0)
             {
-                Logger.LogError($"[BanditZombie] Could not reflect the player-join broadcast members needed to make the bot visible: {missingMembers}. The game version may have changed internal names/signatures.");
+                Logger.LogError($"[Bandit] Could not reflect the player-join broadcast members needed to make the bot visible: {missingMembers}. The game version may have changed internal names/signatures.");
                 return;
             }
 

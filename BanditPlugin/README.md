@@ -1,17 +1,17 @@
-# BanditZombiePlugin
+# BanditPlugin
 
 A RocketMod plugin for Unturned that spawns AI "bandit" bots: they appear as real player
 characters, hold an Eaglefire, continuously turn to face the nearest player, and shoot at them.
 
-Despite the project name (which started life as a zombie-based experiment), bots are **fake
-players**, not zombies. See "Why not zombies?" below.
+The project started life as a zombie-based experiment, but bots are **fake players**, not
+zombies. See "Why not zombies?" below.
 
 ## Commands
 
 | Command | Permission | Description |
 |---|---|---|
-| `/bandit` | `banditzombie.spawn` | Spawns a bandit where you're looking, facing you. |
-| `/banditclear` (alias `/clearbandits`) | `banditzombie.spawn` | Removes all spawned bandits. |
+| `/bandit` | `bandit.spawn` | Spawns a bandit where you're looking, facing you. |
+| `/banditclear` (alias `/clearbandits`) | `bandit.spawn` | Removes all spawned bandits. |
 
 Use `/banditclear` before disconnecting - bots occupy player slots, and their presence affects
 the client-side exit timer.
@@ -91,13 +91,13 @@ heavily-exercised path in the game.
 1. Copy `Directory.Build.props.example` to `Directory.Build.props` and set:
    - `UnturnedManagedPath` - the server's `Unturned_Headless_Data/Managed` folder.
    - `RocketModPath` - the folder with `Rocket.API.dll`, `Rocket.Core.dll`, `Rocket.Unturned.dll`.
-2. `dotnet build BanditZombiePlugin.csproj -c Release`
+2. `dotnet build BanditPlugin.csproj -c Release`
 
 ## Install
 
-1. Copy `bin/Release/BanditZombiePlugin.dll` into the server's `Rocket/Plugins/` folder.
-2. Start once to generate `BanditZombiePlugin.configuration.xml`.
-3. Grant `banditzombie.spawn` to a group in `Rocket/Permissions.config.xml`.
+1. Copy `bin/Release/BanditPlugin.dll` into the server's `Rocket/Plugins/` folder.
+2. Start once to generate `BanditPlugin.configuration.xml`.
+3. Grant `bandit.spawn` to a group in `Rocket/Permissions.config.xml`.
 
 Developed against Unturned 3.26.3.8 with RocketModFix 4.23.1.
 

@@ -2,7 +2,7 @@ using System;
 using System.Net;
 using SDG.NetTransport;
 
-namespace BanditZombiePlugin.FakePlayer
+namespace BanditPlugin.FakePlayer
 {
     /// <summary>
     /// Minimal no-op ITransportConnection so Provider.addPlayer() has something non-null to register

@@ -1,8 +1,8 @@
 using Rocket.API;
 
-namespace BanditZombiePlugin
+namespace BanditPlugin
 {
-    public class BanditZombieConfiguration : IRocketPluginConfiguration
+    public class BanditConfiguration : IRocketPluginConfiguration
     {
         /// <summary>
         /// GUID of the item the bot spawns holding. Defaults to the Eaglefire, read straight out of

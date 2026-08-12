@@ -4,7 +4,7 @@ using SDG.Unturned;
 using UnityEngine;
 using Logger = Rocket.Core.Logging.Logger;
 
-namespace BanditZombiePlugin.FakePlayer
+namespace BanditPlugin.FakePlayer
 {
     /// <summary>
     /// Drives the bot by feeding it fabricated input packets, exactly like a real client would.
@@ -102,7 +102,7 @@ namespace BanditZombiePlugin.FakePlayer
 
             if (ServersidePacketsField == null)
             {
-                Logger.LogError("[BanditZombie] Could not reflect PlayerInput.serversidePackets - the bot cannot be driven. Game version may have changed.");
+                Logger.LogError("[Bandit] Could not reflect PlayerInput.serversidePackets - the bot cannot be driven. Game version may have changed.");
                 enabled = false;
                 return;
             }
@@ -110,7 +110,7 @@ namespace BanditZombiePlugin.FakePlayer
             _serversidePackets = ServersidePacketsField.GetValue(Self.input) as Queue<PlayerInputPacket>;
             if (_serversidePackets == null)
             {
-                Logger.LogError("[BanditZombie] PlayerInput.serversidePackets was not a Queue<PlayerInputPacket>; the bot cannot be driven.");
+                Logger.LogError("[Bandit] PlayerInput.serversidePackets was not a Queue<PlayerInputPacket>; the bot cannot be driven.");
                 enabled = false;
             }
         }
@@ -495,13 +495,13 @@ namespace BanditZombiePlugin.FakePlayer
                 return;
             }
 
-            state[AmmoStateIndex] = BanditZombiePlugin.Instance.Configuration.Instance.MagazineCapacity;
+            state[AmmoStateIndex] = BanditPlugin.Instance.Configuration.Instance.MagazineCapacity;
 
             // The equipped UseableGun works off its own cached copy, so the state byte alone is not
             // enough - it would keep believing the magazine is empty.
             if (UseableGunAmmoField != null && Self.equipment.useable is UseableGun gun)
             {
-                UseableGunAmmoField.SetValue(gun, BanditZombiePlugin.Instance.Configuration.Instance.MagazineCapacity);
+                UseableGunAmmoField.SetValue(gun, BanditPlugin.Instance.Configuration.Instance.MagazineCapacity);
             }
         }
 

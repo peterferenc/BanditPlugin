@@ -3,7 +3,7 @@ using Rocket.API;
 using Rocket.Unturned.Chat;
 using UnityEngine;
 
-namespace BanditZombiePlugin.Commands
+namespace BanditPlugin.Commands
 {
     /// <summary>
     /// "/banditclear" - removes every bot this plugin spawned, freeing the player slots they hold
@@ -16,7 +16,7 @@ namespace BanditZombiePlugin.Commands
         public string Help => "Removes all spawned bandit bots.";
         public string Syntax => string.Empty;
         public List<string> Aliases => new List<string> { "clearbandits" };
-        public List<string> Permissions => new List<string> { "banditzombie.spawn" };
+        public List<string> Permissions => new List<string> { "bandit.spawn" };
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
@@ -28,7 +28,7 @@ namespace BanditZombiePlugin.Commands
             }
             else
             {
-                Rocket.Core.Logging.Logger.Log($"[BanditZombie] Removed {removed} bandit(s).");
+                Rocket.Core.Logging.Logger.Log($"[Bandit] Removed {removed} bandit(s).");
             }
         }
     }
