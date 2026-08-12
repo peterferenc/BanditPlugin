@@ -85,8 +85,34 @@ namespace BanditPlugin.Navigation
         /// <summary>Eye height used for the standing visibility test. Roughly PlayerLook.aim.</summary>
         private const float StandingEyeHeight = 1.65f;
 
-        /// <summary>Eye height while crouched.</summary>
-        private const float CrouchEyeHeight = 0.95f;
+        /// <summary>
+        /// Eye height used for the peek test. Unlike the body samples this really is one point:
+        /// peeking is about whether the bot's *aim origin* can see the target, and that is a
+        /// single place - the same one its bullets leave from.
+        /// </summary>
+        private const float PeekEyeHeight = StandingEyeHeight;
+
+        /// <summary>
+        /// Half the shoulder width. The body samples are spread this far either side of centre,
+        /// perpendicular to the threat, because that is the silhouette a shooter actually sees.
+        /// </summary>
+        private const float ShoulderHalfWidth = 0.22f;
+
+        /// <summary>Heights sampled down the body when standing: eye, chest, waist, knees.</summary>
+        private static readonly float[] StandingSampleHeights = { 1.65f, 1.35f, 1.0f, 0.55f };
+
+        /// <summary>The same, crouched - the whole body is inside 1.2m (PlayerMovement.HEIGHT_CROUCH).</summary>
+        private static readonly float[] CrouchSampleHeights = { 0.95f, 0.8f, 0.6f, 0.3f };
+
+        /// <summary>Offsets tried when nudging a chosen spot deeper into cover, nearest first.</summary>
+        private static readonly float[] RefinementDistances = { 0.4f, 0.8f, 1.2f };
+
+        /// <summary>
+        /// Offsets tried when the bot is hit *while hidden* and wants to pull further in. Longer
+        /// than the refinement steps: the spot already passed the body test, so if shots are still
+        /// landing the margin needs to grow by more than a shuffle.
+        /// </summary>
+        private static readonly float[] PullDeeperDistances = { 0.5f, 1f, 1.5f, 2f, 2.5f };
 
         /// <summary>How far to the side a "peek" step is.</summary>
         private const float PeekOffset = 0.9f;
@@ -220,8 +246,20 @@ namespace BanditPlugin.Navigation
                 }
             }
 
+            if (!found)
+            {
+                return false;
+            }
+
+            // Tighten the winner before committing to it. Scoring picks the best of what the
+            // candidate generator happened to produce, and "best" is not the same as "actually
+            // hidden" - the generator stands the bot a fixed distance behind whatever the probe
+            // ray hit, which is a guess at where the shadow of that object is.
+            RefineSpot(ref best, selfPosition, threatEye, minimumThreatDistance,
+                preferredThreatDistance, preferHidden);
+
             // "The best spot is the one I'm already standing on" is not a move order.
-            return found && (best.Position - selfPosition).sqrMagnitude > 1f;
+            return (best.Position - selfPosition).sqrMagnitude > 1f;
         }
 
         /// <summary>
@@ -231,7 +269,157 @@ namespace BanditPlugin.Navigation
         /// </summary>
         public static bool IsCoveredFrom(Vector3 ground, Vector3 threatEye)
         {
-            return !IsVisible(threatEye, ground + Vector3.up * CrouchEyeHeight);
+            return IsBodyHidden(threatEye, ground, crouched: true, out _);
+        }
+
+        /// <summary>
+        /// Nudges a chosen spot until the whole body is hidden, or gives up and keeps the best it
+        /// managed.
+        ///
+        /// A spot only has to hide a *crouching* body to be accepted, which is the honest minimum -
+        /// but it leaves the bot ducking behind a trunk with its shoulder out the side, which is
+        /// what "it thinks it's covered but it ain't" looks like from the other end of the rifle.
+        /// Here the spot is walked outwards in a ring of small steps and re-tested standing, taking
+        /// the first offset that hides the bot completely on its feet.
+        ///
+        /// Steps run nearest-first and are tried away from the threat before sideways, so the
+        /// correction is the smallest one that works - deeper into the shadow, or shuffled along
+        /// the wall - rather than a jump to somewhere unrelated. The umbra behind an object widens
+        /// with distance from it, so backing off is a genuine fix and not just a heuristic.
+        /// </summary>
+        private static void RefineSpot(
+            ref BanditCoverSpot spot,
+            Vector3 selfPosition,
+            Vector3 threatEye,
+            float minimumThreatDistance,
+            float preferredThreatDistance,
+            bool preferHidden)
+        {
+            // Already hidden standing up - nothing to fix, and the peek cycle handles the rest.
+            if (!spot.RequiresCrouch)
+            {
+                return;
+            }
+
+            if (TryStepDeeper(spot.Position, selfPosition, threatEye, RefinementDistances,
+                    requirePeek: spot.CanPeek, minimumThreatDistance, preferredThreatDistance,
+                    preferHidden, out BanditCoverSpot tightened))
+            {
+                spot = tightened;
+            }
+        }
+
+        /// <summary>
+        /// Pulls further into cover after being shot while hidden.
+        ///
+        /// A spot that passed the body test and is still taking rounds means the model is wrong
+        /// somewhere it cannot see: the shooter has shifted to an angle the once-a-second
+        /// revalidation hasn't caught yet, or the twelve-sample silhouette has a gap the bullet
+        /// found - an arm past the shoulder line, or the space between two sample heights. Rather
+        /// than reason about which, the answer is the same: increase the margin. Backing away
+        /// widens the umbra behind whatever is doing the hiding.
+        ///
+        /// Tries to keep a firing angle first and settles for pure concealment if it can't - being
+        /// shot is the one situation where hiding properly beats being able to shoot back.
+        /// </summary>
+        public static bool TryPullDeeper(
+            BanditCoverSpot current,
+            Vector3 threatEye,
+            float minimumThreatDistance,
+            float preferredThreatDistance,
+            out BanditCoverSpot deeper)
+        {
+            if (TryStepDeeper(current.Position, current.Position, threatEye, PullDeeperDistances,
+                    requirePeek: true, minimumThreatDistance, preferredThreatDistance,
+                    preferHidden: true, out deeper))
+            {
+                return true;
+            }
+
+            return TryStepDeeper(current.Position, current.Position, threatEye, PullDeeperDistances,
+                requirePeek: false, minimumThreatDistance, preferredThreatDistance,
+                preferHidden: true, out deeper);
+        }
+
+        /// <summary>
+        /// Walks outward from a spot in a ring of steps and returns the first offset that hides the
+        /// bot completely *standing up*, never moving closer to the threat.
+        ///
+        /// Ordered nearest-first, and away from the threat before sideways, so the accepted
+        /// correction is the smallest one that works - deeper into the shadow, or shuffled along
+        /// the cover face - rather than a jump to somewhere unrelated.
+        /// </summary>
+        private static bool TryStepDeeper(
+            Vector3 origin,
+            Vector3 selfPosition,
+            Vector3 threatEye,
+            float[] distances,
+            bool requirePeek,
+            float minimumThreatDistance,
+            float preferredThreatDistance,
+            bool preferHidden,
+            out BanditCoverSpot result)
+        {
+            result = default;
+
+            Vector3 toThreat = Flatten(threatEye - origin);
+            if (toThreat.sqrMagnitude < 0.0001f)
+            {
+                return false;
+            }
+            float originThreatDistance = toThreat.magnitude;
+            toThreat.Normalize();
+
+            Vector3 away = -toThreat;
+            Vector3 lateral = Vector3.Cross(Vector3.up, toThreat);
+
+            Vector3[] directions =
+            {
+                away,
+                (away + lateral).normalized,
+                (away - lateral).normalized,
+                lateral,
+                -lateral
+            };
+
+            BanditCoverSearchStats scratch = default;
+
+            foreach (float distance in distances)
+            {
+                foreach (Vector3 direction in directions)
+                {
+                    Vector3 probe = origin + direction * distance;
+
+                    if (FlatDistance(probe, threatEye) < originThreatDistance - 0.05f)
+                    {
+                        continue; // never "hide" by walking towards the gun
+                    }
+
+                    if (!TryEvaluate(probe, selfPosition, threatEye, minimumThreatDistance,
+                            preferredThreatDistance, preferHidden, out BanditCoverSpot candidate,
+                            ref scratch, out _))
+                    {
+                        continue;
+                    }
+
+                    // Standing exposure is the thing being fixed; a spot that only hides a crouch
+                    // is no improvement on the one already being stood in.
+                    if (candidate.RequiresCrouch)
+                    {
+                        continue;
+                    }
+
+                    if (requirePeek && !candidate.CanPeek)
+                    {
+                        continue;
+                    }
+
+                    result = candidate;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static void CollectCandidates(Vector3 selfPosition, Vector3 threatEye, float searchRadius, int ringSamples)
@@ -357,8 +545,8 @@ namespace BanditPlugin.Navigation
                 return false;
             }
 
-            // Crouched and still visible means this isn't cover at all.
-            if (IsVisible(threatEye, ground + Vector3.up * CrouchEyeHeight))
+            // Any part of a crouching body still visible means this isn't cover at all.
+            if (!IsBodyHidden(threatEye, ground, crouched: true, out _))
             {
                 stats.RejectedNotCover++;
                 outcome = BanditCoverOutcome.StillVisible;
@@ -367,7 +555,7 @@ namespace BanditPlugin.Navigation
 
             outcome = BanditCoverOutcome.Viable;
 
-            bool exposedWhenStanding = IsVisible(threatEye, ground + Vector3.up * StandingEyeHeight);
+            bool exposedWhenStanding = !IsBodyHidden(threatEye, ground, crouched: false, out _);
 
             Vector3 toThreat = Flatten(threatEye - ground).normalized;
             Vector3 lateral = Vector3.Cross(Vector3.up, toThreat);
@@ -380,7 +568,7 @@ namespace BanditPlugin.Navigation
                 {
                     continue;
                 }
-                if (IsVisible(threatEye, peekGround + Vector3.up * StandingEyeHeight))
+                if (IsVisible(threatEye, peekGround + Vector3.up * PeekEyeHeight))
                 {
                     canPeek = true;
                     peekPosition = peekGround;
@@ -459,6 +647,45 @@ namespace BanditPlugin.Navigation
                 radius,
                 RayMasks.BLOCK_COLLISION,
                 QueryTriggerInteraction.Ignore);
+        }
+
+        /// <summary>
+        /// Whether any part of a player standing (or crouching) at <paramref name="ground"/> can be
+        /// seen from <paramref name="threatEye"/>.
+        ///
+        /// This is the difference between cover that works and cover that only looks like it does.
+        /// Testing a single eye-height point says "hidden" for a spot where the shoulders, chest
+        /// and knees are all hanging out in the open - the bot ducks behind a trunk narrower than
+        /// it is, is quite happy, and gets shot in the arm. So the silhouette is sampled instead:
+        /// four heights down the body, each at the centre and both shoulders, spread perpendicular
+        /// to the threat because that is the width a shooter actually sees.
+        ///
+        /// Every sample must be blocked. <paramref name="exposedSamples"/> reports how many were
+        /// not, which is what the refinement pass uses to tell "nearly hidden" from "in the open".
+        /// </summary>
+        private static bool IsBodyHidden(Vector3 threatEye, Vector3 ground, bool crouched, out int exposedSamples)
+        {
+            exposedSamples = 0;
+
+            Vector3 toThreat = Flatten(threatEye - ground);
+            Vector3 lateral = toThreat.sqrMagnitude > 0.0001f
+                ? Vector3.Cross(Vector3.up, toThreat.normalized) * ShoulderHalfWidth
+                : Vector3.right * ShoulderHalfWidth;
+
+            float[] heights = crouched ? CrouchSampleHeights : StandingSampleHeights;
+
+            foreach (float height in heights)
+            {
+                Vector3 centre = ground + Vector3.up * height;
+                if (IsVisible(threatEye, centre)
+                    || IsVisible(threatEye, centre + lateral)
+                    || IsVisible(threatEye, centre - lateral))
+                {
+                    exposedSamples++;
+                }
+            }
+
+            return exposedSamples == 0;
         }
 
         /// <summary>

@@ -89,8 +89,13 @@ namespace BanditPlugin.FakePlayer
         private float _lastDamagedTime = float.MinValue;
         private Vector3? _lastThreatPoint;
 
+        /// <summary>Minimum gap between "I'm being shot, pull in further" adjustments.</summary>
+        private const float CoverAdjustIntervalSeconds = 1.5f;
+
         private BanditCoverSpot _coverSpot;
         private bool _hasCover;
+        private bool _coverBreached;
+        private float _nextCoverAdjustTime;
         private bool _peeking;
         private float _coverPhaseUntil;
         private float _nextCoverSearchTime;
@@ -169,6 +174,17 @@ namespace BanditPlugin.FakePlayer
 
             // Being shot is reason enough to stop looking for a *better* spot and take any spot.
             _nextCoverSearchTime = Mathf.Min(_nextCoverSearchTime, Time.time + 0.25f);
+
+            // Taking rounds while supposedly hidden means this spot isn't as good as the body test
+            // believed - pull further in. Hits taken mid-peek don't count: exposing yourself to
+            // shoot is the whole point of a peek, and panicking every time one lands would stop the
+            // bot ever firing.
+            // Navigator.HasDestination means it is still running to the spot - getting shot on the
+            // way says nothing about whether the spot is any good.
+            if (_hasCover && !_peeking && !Navigator.HasDestination)
+            {
+                _coverBreached = true;
+            }
         }
 
         public void Tick(float deltaTime, Player target)
@@ -272,6 +288,7 @@ namespace BanditPlugin.FakePlayer
 
             _coverSpot = spot;
             _hasCover = true;
+            _coverBreached = false;
             _peeking = false;
             _coverPhaseUntil = 0f;
             Navigator.SetDestination(spot.Position);
@@ -385,6 +402,18 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
+            if (_coverBreached && Time.time >= _nextCoverAdjustTime)
+            {
+                _nextCoverAdjustTime = Time.time + CoverAdjustIntervalSeconds;
+                _coverBreached = false;
+                PullDeeperIntoCover();
+
+                if (!_hasCover)
+                {
+                    return; // nowhere better here; the next search picks a different spot entirely
+                }
+            }
+
             // Set before the walking branch returns, so the bot is already leaning out as it steps
             // to the peek position rather than snapping into the lean once it stops.
             ApplyPeekLean();
@@ -417,6 +446,31 @@ namespace BanditPlugin.FakePlayer
 
             // Crouch cover is the good case: down is safe, up is a firing position, no walking.
             WantsCrouch = _coverSpot.RequiresCrouch && !_peeking;
+        }
+
+        /// <summary>
+        /// Shuffles further into the current cover after being shot behind it, or abandons the
+        /// spot when there is nothing better within a couple of metres - at which point dropping
+        /// _hasCover lets the ordinary search go and find somewhere else entirely.
+        /// </summary>
+        private void PullDeeperIntoCover()
+        {
+            if (BanditCoverFinder.TryPullDeeper(_coverSpot, ThreatEye(),
+                    _config.CoverMinimumThreatDistance, _config.PreferredEngagementRange,
+                    out BanditCoverSpot deeper))
+            {
+                _coverSpot = deeper;
+
+                // Back down and stay down for a moment: popping up on schedule right after being
+                // hit is how a bot walks into the second shot.
+                _peeking = false;
+                _coverPhaseUntil = Time.time + _config.CoverHideSeconds;
+                Navigator.SetDestination(deeper.Position, 0.35f);
+                return;
+            }
+
+            _hasCover = false;
+            _nextCoverSearchTime = Time.time; // search again immediately rather than in three seconds
         }
 
         /// <summary>
