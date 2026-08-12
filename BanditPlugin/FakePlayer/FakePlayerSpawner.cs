@@ -172,7 +172,74 @@ namespace BanditPlugin.FakePlayer
             controller.RequireLineOfSight = config.RequireLineOfSight;
 
             SpawnedBotSteamIds.Add(fakeSteamId.m_SteamID);
+            LastSpawnedController = controller;
             return steamPlayer.player;
+        }
+
+        /// <summary>
+        /// The bot most recently spawned, or null if it has since been removed or killed. Commands
+        /// that act on "the bandit" use this. Validated on read rather than cleared on despawn,
+        /// because a bot can also leave via a kick or a server-side death we don't hook.
+        /// </summary>
+        public static BanditBotController LastSpawnedController
+        {
+            get => _lastSpawnedController != null && _lastSpawnedController.Self != null
+                ? _lastSpawnedController
+                : null;
+            private set => _lastSpawnedController = value;
+        }
+
+        private static BanditBotController _lastSpawnedController;
+
+        /// <summary>
+        /// Removes one bot - used when a killed bandit's despawn timer runs out. Same kick path as
+        /// RemoveAllBots, but also drops the SteamID so the bot stops being counted as live.
+        /// </summary>
+        public static void DespawnBot(SteamPlayer steamPlayer)
+        {
+            if (steamPlayer == null || ReferenceEquals(steamPlayer.playerID, null))
+            {
+                return;
+            }
+
+            ulong steamId = steamPlayer.playerID.steamID.m_SteamID;
+            if (!SpawnedBotSteamIds.Remove(steamId))
+            {
+                return; // not ours, or already removed
+            }
+
+            Provider.kick(steamPlayer.playerID.steamID, "bandit killed");
+        }
+
+        /// <summary>
+        /// Every live bot's controller. Walks Provider.clients rather than keeping a list, so a bot
+        /// that was kicked or otherwise removed can't linger as a stale reference.
+        /// </summary>
+        public static System.Collections.Generic.List<BanditBotController> GetActiveControllers()
+        {
+            System.Collections.Generic.List<BanditBotController> controllers =
+                new System.Collections.Generic.List<BanditBotController>();
+
+            foreach (SteamPlayer client in Provider.clients)
+            {
+                if (client?.player == null || ReferenceEquals(client.playerID, null))
+                {
+                    continue;
+                }
+
+                if (!SpawnedBotSteamIds.Contains(client.playerID.steamID.m_SteamID))
+                {
+                    continue;
+                }
+
+                BanditBotController controller = client.player.GetComponent<BanditBotController>();
+                if (controller != null)
+                {
+                    controllers.Add(controller);
+                }
+            }
+
+            return controllers;
         }
 
         /// <summary>

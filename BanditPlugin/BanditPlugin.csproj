@@ -19,6 +19,18 @@
       <HintPath>$(UnturnedManagedPath)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="AstarPathfindingProject">
+      <HintPath>$(UnturnedManagedPath)\AstarPathfindingProject.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Drawing">
+      <HintPath>$(UnturnedManagedPath)\Drawing.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="PackageTools">
+      <HintPath>$(UnturnedManagedPath)\PackageTools.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="com.rlabrecque.steamworks.net">
       <HintPath>$(UnturnedManagedPath)\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>

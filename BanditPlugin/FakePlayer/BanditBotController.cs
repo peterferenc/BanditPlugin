@@ -32,6 +32,21 @@ namespace BanditPlugin.FakePlayer
         public Player Self { get; set; }
         public SteamPlayer SteamPlayerToKeepAlive { get; set; }
 
+        /// <summary>Decides where the bot wants to walk. Created in Start, once Self is set.</summary>
+        public BanditBrain Brain { get; private set; }
+
+        /// <summary>Whoever the bot is currently shooting at, or null.</summary>
+        public Player CurrentTarget => _target;
+
+        /// <summary>
+        /// Weapons tight: the bot still acquires and tracks targets, and still takes cover from
+        /// them, but never pulls the trigger or shoulders the rifle. Toggled by /banditstop and
+        /// /banditshoot. Dropping aim-down-sights matters as well as the trigger - vanilla
+        /// PlayerStance refuses to sprint while aiming, so a bot told to hold fire can actually
+        /// run somewhere.
+        /// </summary>
+        public bool HoldFire { get; set; }
+
         public float TurnSpeedDegreesPerSecond = 180f;
         public float ScanIntervalSeconds = 0.5f;
         public float FireIntervalSeconds = 0.6f;
@@ -49,6 +64,17 @@ namespace BanditPlugin.FakePlayer
         // input_x/input_y are decoded as ((analog >> 4) & 0xF) - 1 and (analog & 0xF) - 1, so the
         // neutral "no movement" value is 0x11, NOT 0. Sending 0 would make the bot walk backwards.
         private const byte AnalogNeutral = 0x11;
+
+        // PlayerInput reconstructs its key array as (packet.keys & (1 << index)) != 0.
+        private const ushort KeyJump = 1 << 0;
+        private const ushort KeyCrouch = 1 << 3;
+        private const ushort KeySprint = 1 << 5;
+        private const ushort KeyLeanLeft = 1 << 6;
+        private const ushort KeyLeanRight = 1 << 7;
+
+        // sin(22.5 degrees). input_x/input_y are only ever -1, 0 or 1, so a desired direction has
+        // to be quantised onto the eight compass points; this is the sector boundary between them.
+        private const float OctantThreshold = 0.3827f;
 
         private const byte AmmoStateIndex = 10;   // PlayerEquipment.state[10] == rounds in magazine
         private const byte FiremodeStateIndex = 11; // PlayerEquipment.state[11] == EFiremode
@@ -85,6 +111,7 @@ namespace BanditPlugin.FakePlayer
         private bool _triggerHeld;
         private bool _aimingActive;
         private float _nextEquipAttemptTime;
+        private float _diedAtTime;
 
         // Aim error, in degrees, added on top of the tracked aim when the packet is built. Kept
         // separate from _currentYaw/_currentPitch on purpose: those keep tracking the target dead
@@ -112,7 +139,19 @@ namespace BanditPlugin.FakePlayer
             {
                 Logger.LogError("[Bandit] PlayerInput.serversidePackets was not a Queue<PlayerInputPacket>; the bot cannot be driven.");
                 enabled = false;
+                return;
             }
+
+            Brain = new BanditBrain(this, Self);
+        }
+
+        /// <summary>
+        /// Routed here from the DamageTool hook in BanditPlugin, so a bot that gets shot by
+        /// someone it never saw still knows roughly where the shot came from.
+        /// </summary>
+        public void NotifyDamaged(Vector3 shotDirection)
+        {
+            Brain?.NotifyDamaged(shotDirection);
         }
 
         private void Update()
@@ -128,6 +167,11 @@ namespace BanditPlugin.FakePlayer
             if (SteamPlayerToKeepAlive != null)
             {
                 SteamPlayerToKeepAlive.timeLastPacketWasReceivedFromClient = Time.realtimeSinceStartup;
+            }
+
+            if (HandleDeath())
+            {
+                return;
             }
 
             if (Time.time >= _nextScanTime)
@@ -147,6 +191,11 @@ namespace BanditPlugin.FakePlayer
             _packetAccumulator = 0f;
 
             EnsureGunEquipped();
+
+            // Before aiming, because with no target to lock onto the bot faces wherever the brain
+            // is walking - and because the analog byte built below is relative to that facing.
+            Brain?.Tick(elapsed, _target);
+
             AimAtTarget(elapsed);
             UpdateAimWobble(elapsed);
             // Order matters: DecideAttackInput() consumes the trigger state for this packet.
@@ -155,10 +204,50 @@ namespace BanditPlugin.FakePlayer
             EnqueueInputPacket(primary, secondary);
         }
 
+        /// <summary>
+        /// Removes the bot a few seconds after it is killed, and stops driving it in the meantime.
+        ///
+        /// A real player's corpse goes away when they press respawn. A bot has no client to press
+        /// anything, so a killed bandit lies there indefinitely, still holding a player slot and
+        /// still counted by /banditclear - which is why killing one never cleared it. Returns true
+        /// while dead, so the caller stops building input packets for a corpse.
+        /// </summary>
+        private bool HandleDeath()
+        {
+            if (Self.life == null || !Self.life.isDead)
+            {
+                _diedAtTime = 0f;
+                return false;
+            }
+
+            float despawnDelay = BanditPlugin.Instance.Configuration.Instance.DespawnSecondsAfterDeath;
+            if (despawnDelay < 0f)
+            {
+                return true; // configured to leave the body for /banditclear
+            }
+
+            if (_diedAtTime <= 0f)
+            {
+                _diedAtTime = Time.time;
+                return true;
+            }
+
+            if (Time.time - _diedAtTime >= despawnDelay)
+            {
+                // Disable first: Provider.kick tears the player down, and this component must not
+                // run another Update against a half-removed player.
+                enabled = false;
+                FakePlayerSpawner.DespawnBot(SteamPlayerToKeepAlive);
+            }
+
+            return true;
+        }
+
         private void AimAtTarget(float elapsed)
         {
             if (_target == null)
             {
+                TurnTowardsTravelDirection(elapsed);
                 return;
             }
 
@@ -177,6 +266,98 @@ namespace BanditPlugin.FakePlayer
 
             _currentYaw = Mathf.MoveTowardsAngle(_currentYaw, desiredYaw, TurnSpeedDegreesPerSecond * elapsed);
             _currentPitch = Mathf.MoveTowards(_currentPitch, desiredPitch, TurnSpeedDegreesPerSecond * elapsed);
+        }
+
+        /// <summary>
+        /// With nobody to shoot at, the body turns to face wherever the brain is heading.
+        ///
+        /// This is not just cosmetic. Movement is body-relative - PlayerMovement does
+        /// "transform.rotation * move.normalized * speed", and the body yaw is the packet's yaw -
+        /// so a bot that never turns can only ever strafe along the eight compass points around
+        /// its spawn facing. Turning onto the travel direction is what lets it hold a line down a
+        /// road, and the pitch is levelled off so it isn't walking around staring at the sky.
+        /// </summary>
+        private void TurnTowardsTravelDirection(float elapsed)
+        {
+            if (Brain == null || !Brain.DesiredFacing.HasValue)
+            {
+                return;
+            }
+
+            _currentYaw = Mathf.MoveTowardsAngle(_currentYaw, Brain.DesiredFacing.Value, TurnSpeedDegreesPerSecond * elapsed);
+            _currentPitch = Mathf.MoveTowards(_currentPitch, 90f, TurnSpeedDegreesPerSecond * elapsed);
+        }
+
+        /// <summary>
+        /// Turns the brain's desired world direction into the packet's analog byte.
+        ///
+        /// The direction has to be expressed in the *body's* frame, and the body yaw is whatever
+        /// this packet says it is - PlayerInput calls look.simulate (which assigns
+        /// transform.localRotation from the yaw) immediately before movement.simulate reads it.
+        /// So the same yaw that is about to be written into the packet is the one to un-rotate by,
+        /// aim error included: that error is small next to a 45-degree movement sector, but using
+        /// a different angle here than the packet carries would make the bot drift off its line.
+        ///
+        /// The result is that an engaged bandit strafes and backpedals with its gun still on the
+        /// target, and only turns its body when it has nobody to shoot at.
+        /// </summary>
+        private byte BuildAnalog(float packetYaw)
+        {
+            if (Brain == null)
+            {
+                return AnalogNeutral;
+            }
+
+            Vector3 direction = Brain.MoveDirection;
+            if (direction.sqrMagnitude < 0.0001f)
+            {
+                return AnalogNeutral;
+            }
+
+            Vector3 local = Quaternion.Euler(0f, -packetYaw, 0f) * direction.normalized;
+            int inputX = Mathf.Abs(local.x) > OctantThreshold ? (local.x > 0f ? 1 : -1) : 0;
+            int inputY = Mathf.Abs(local.z) > OctantThreshold ? (local.z > 0f ? 1 : -1) : 0;
+
+            if (inputX == 0 && inputY == 0)
+            {
+                return AnalogNeutral;
+            }
+
+            return (byte)(((inputX + 1) << 4) | (inputY + 1));
+        }
+
+        private ushort BuildKeys()
+        {
+            if (Brain == null)
+            {
+                return 0;
+            }
+
+            ushort keys = 0;
+            if (Brain.WantsJump)
+            {
+                keys |= KeyJump;
+            }
+            if (Brain.WantsCrouch)
+            {
+                keys |= KeyCrouch;
+            }
+            // Vanilla PlayerStance refuses to sprint while aiming down sights, out of stamina or
+            // standing still, so this is a request rather than a command - which is what we want.
+            if (Brain.WantsSprint)
+            {
+                keys |= KeySprint;
+            }
+            // PlayerAnimator treats both-at-once as neutral, so these must stay mutually exclusive.
+            if (Brain.WantsLeanLeft && !Brain.WantsLeanRight)
+            {
+                keys |= KeyLeanLeft;
+            }
+            else if (Brain.WantsLeanRight && !Brain.WantsLeanLeft)
+            {
+                keys |= KeyLeanRight;
+            }
+            return keys;
         }
 
         /// <summary>
@@ -271,6 +452,11 @@ namespace BanditPlugin.FakePlayer
                 return EAttackInputFlags.Stop;
             }
 
+            if (HoldFire)
+            {
+                return EAttackInputFlags.None;
+            }
+
             // Must come before anything else that can pull the trigger. PlayerEquipment.simulate
             // routes primary attacks to simulate_PunchInput whenever there is no valid useable, so
             // firing during the equip animation makes the bot throw punches instead of shooting.
@@ -322,7 +508,7 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private EAttackInputFlags DecideAimInput()
         {
-            bool wantsToAim = IsGunReady() && _target != null && !_target.life.isDead && IsTargetInRange();
+            bool wantsToAim = !HoldFire && IsGunReady() && _target != null && !_target.life.isDead && IsTargetInRange();
 
             if (wantsToAim && !_aimingActive)
             {
@@ -378,6 +564,12 @@ namespace BanditPlugin.FakePlayer
         /// as well. BLOCK_SENTRY covers terrain, objects, barricades, structures and vehicles;
         /// neither mask contains the player layers, so bodies never count as cover for each other.
         /// </summary>
+        /// <summary>Exposed for the brain, so "am I exposed" means the same as "can I be shot".</summary>
+        public bool HasLineOfSightTo(Player candidate)
+        {
+            return HasLineOfSight(candidate);
+        }
+
         private bool HasLineOfSight(Player candidate)
         {
             if (!RequireLineOfSight)
@@ -576,13 +768,20 @@ namespace BanditPlugin.FakePlayer
 
         private void EnqueueInputPacket(EAttackInputFlags primaryAttack, EAttackInputFlags secondaryAttack)
         {
+            float packetYaw = _currentYaw + _aimErrorYaw;
+
             WalkingPlayerInputPacket packet = new WalkingPlayerInputPacket
             {
-                analog = AnalogNeutral,
+                analog = BuildAnalog(packetYaw),
+
+                // Only used to decide whether the server sends the owner a mispredict correction
+                // or a good-input ack. A moving bot will mismatch by one tick's worth of travel
+                // every packet, so it takes the mispredict branch - which costs one unreliable
+                // RPC into a FakeTransportConnection that throws it away.
                 clientPosition = transform.position,
-                yaw = _currentYaw + _aimErrorYaw,
+                yaw = packetYaw,
                 pitch = Mathf.Clamp(_currentPitch + _aimErrorPitch, 0f, 180f),
-                keys = 0,
+                keys = BuildKeys(),
                 primaryAttack = primaryAttack,
                 secondaryAttack = secondaryAttack,
                 recov = Self.input.recov,
