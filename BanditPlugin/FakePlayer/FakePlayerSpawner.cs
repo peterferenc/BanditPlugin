@@ -56,9 +56,6 @@ namespace BanditPlugin.FakePlayer
         public static readonly System.Collections.Generic.HashSet<ulong> SpawnedBotSteamIds =
             new System.Collections.Generic.HashSet<ulong>();
 
-        private const byte AmmoStateIndex = 10;     // PlayerEquipment.state[10] == rounds in magazine
-        private const byte FiremodeStateIndex = 11; // PlayerEquipment.state[11] == EFiremode
-
         public static Player Spawn(Vector3 position, float angleDegrees, string displayName)
         {
             System.Collections.Generic.List<string> missing = new System.Collections.Generic.List<string>();
@@ -149,10 +146,9 @@ namespace BanditPlugin.FakePlayer
             AttachRocketPlayerComponents(steamPlayer.player);
 
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
-            if (config.GiveGun)
-            {
-                GiveAndEquipGun(steamPlayer.player, config);
-            }
+            BanditLoadoutApplier.Result loadout = config.ApplyLoadout
+                ? BanditLoadoutApplier.Apply(steamPlayer.player, config.Loadout)
+                : default(BanditLoadoutApplier.Result);
 
             BanditBotController controller = steamPlayer.player.gameObject.AddComponent<BanditBotController>();
             controller.Self = steamPlayer.player;
@@ -163,7 +159,11 @@ namespace BanditPlugin.FakePlayer
             controller.AimToleranceDegrees = config.AimToleranceDegrees;
             controller.FireRange = config.FireRange;
             controller.InfiniteAmmo = config.InfiniteAmmo;
-            controller.AimHitChance = config.AimHitChance;
+            controller.HasPrimaryWeapon = loadout.HasPrimaryWeapon;
+            controller.HasSecondaryWeapon = loadout.HasSecondaryWeapon;
+            controller.SecondaryWeaponRange = config.SecondaryWeaponRange;
+            controller.PrimaryAimHitChance = ResolveHitChance(config.Loadout?.PrimaryWeapon, config.AimHitChance);
+            controller.SecondaryAimHitChance = ResolveHitChance(config.Loadout?.SecondaryWeapon, config.AimHitChance);
             controller.AimTargetRadius = config.AimTargetRadius;
             controller.AimTargetHalfHeight = config.AimTargetHalfHeight;
             controller.AimMaxErrorDegrees = config.AimMaxErrorDegrees;
@@ -290,48 +290,13 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// PlayerInventory.forceAddItem(item, auto: true) routes a primary-slot weapon through
-        /// tryAddItemEquip, which calls PlayerEquipment.ServerEquip - and ServerEquip replicates to
-        /// everyone via SendEquip.InvokeAndLoopback(... GatherRemoteClientConnections() ...). So the
-        /// gun becomes visible in the bot's hands to other players with no manual networking.
-        /// (Verified by decompiling PlayerInventory/PlayerEquipment from the real Assembly-CSharp.dll.
-        /// Note the Dummy project has no equip support at all - "todo: simulate useable" - so this
-        /// path is not borrowed from it.)
+        /// A weapon's own hit chance if it sets one, otherwise the global figure. Kept here rather
+        /// than in the loadout applier because it is the only part of a loadout entry the bot's
+        /// combat code cares about, and the controller wants it resolved once at spawn.
         /// </summary>
-        private static void GiveAndEquipGun(Player player, BanditConfiguration config)
+        private static float ResolveHitChance(BanditWeapon weapon, float fallback)
         {
-            ItemAsset gunAsset = null;
-
-            if (System.Guid.TryParse(config.GunAssetGuid, out System.Guid gunGuid) && gunGuid != System.Guid.Empty)
-            {
-                gunAsset = Assets.find(gunGuid) as ItemAsset;
-            }
-
-            if (gunAsset == null && config.GunAssetLegacyId != 0)
-            {
-                gunAsset = Assets.find(EAssetType.ITEM, config.GunAssetLegacyId) as ItemAsset;
-            }
-
-            if (gunAsset == null)
-            {
-                Logger.LogError($"[Bandit] Could not resolve a gun asset from GUID '{config.GunAssetGuid}' or legacy ID {config.GunAssetLegacyId}; bot will spawn empty-handed.");
-                return;
-            }
-
-            Item gun = new Item(gunAsset.id, true);
-
-            // UseableGun.equip() caches ammo from state[10] and firemode from state[11], so both
-            // have to be right BEFORE the item is equipped. Firemode especially: startPrimary()
-            // refuses to fire while it's SAFETY (0), which is a plausible default - so set it
-            // explicitly. Doing it here (rather than simulating a firemode-toggle keypress) is
-            // deterministic, and the state bytes ride along to every client in the SendEquip call.
-            if (gun.state != null && gun.state.Length > FiremodeStateIndex)
-            {
-                gun.state[AmmoStateIndex] = config.MagazineCapacity;
-                gun.state[FiremodeStateIndex] = (byte)EFiremode.SEMI;
-            }
-
-            player.inventory.forceAddItem(gun, true);
+            return weapon != null && weapon.AimHitChance >= 0f ? weapon.AimHitChance : fallback;
         }
 
         /// <summary>

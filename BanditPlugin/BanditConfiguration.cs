@@ -5,22 +5,29 @@ namespace BanditPlugin
     public class BanditConfiguration : IRocketPluginConfiguration
     {
         /// <summary>
-        /// GUID of the item the bot spawns holding. Defaults to the Eaglefire, read straight out of
-        /// Bundles/Items/Guns/Eaglefire/Eaglefire.dat on this server install.
-        /// A GUID is used rather than a name because Assets.find(EAssetType.ITEM, name) is
-        /// case-sensitive and the asset is actually named "Eaglefire", not "EagleFire".
+        /// Master switch for the loadout below. Off spawns bandits naked and empty-handed.
         /// </summary>
-        public string GunAssetGuid = "b03d581a5c1a490f995f8deba57b0f17";
+        public bool ApplyLoadout = true;
 
-        /// <summary>Legacy numeric ID fallback, used only if the GUID above doesn't resolve.</summary>
-        public ushort GunAssetLegacyId = 4;
+        /// <summary>
+        /// What every bandit spawns wearing and carrying. See BanditLoadout for the slot list and
+        /// a table of GUIDs read out of this server's own Bundles folder.
+        /// </summary>
+        public BanditLoadout Loadout = new BanditLoadout();
 
-        public bool GiveGun = true;
+        /// <summary>
+        /// Distance at which a bandit carrying a secondary swaps to it, so a sidearm gets used at
+        /// room distance and the rifle everywhere else. It swaps back a few metres further out than
+        /// it swaps in, so a target hovering on the boundary doesn't make the bot spend the fight
+        /// changing weapons. 0 (the default) keeps the primary out at all ranges.
+        /// </summary>
+        public float SecondaryWeaponRange = 0f;
 
-        /// <summary>Rounds loaded, and refilled to when InfiniteAmmo is on. Eaglefire's default
-        /// magazine (Military_30) holds 30.</summary>
-        public byte MagazineCapacity = 30;
-
+        /// <summary>
+        /// Refill the magazine whenever it runs dry. The bot has no client to press reload, so
+        /// without this it fires one magazine and then stands there. Refills to the capacity of the
+        /// magazine actually attached to whichever gun is in its hands.
+        /// </summary>
         public bool InfiniteAmmo = true;
 
         public float TurnSpeedDegreesPerSecond = 180f;
@@ -34,6 +41,9 @@ namespace BanditPlugin
         /// roughly the bot's hit rate. The aim error needed for this is derived from the distance
         /// to the target, so the bot is no more accurate up close than it is far away in hitbox
         /// terms. 1 restores the old perfect aimbot.
+        ///
+        /// Either weapon in the loadout can override this for as long as it is the one in the bot's
+        /// hands, via BanditWeapon.AimHitChance.
         /// </summary>
         public float AimHitChance = 0.3f;
 
@@ -165,10 +175,9 @@ namespace BanditPlugin
 
         public void LoadDefaults()
         {
-            GunAssetGuid = "b03d581a5c1a490f995f8deba57b0f17";
-            GunAssetLegacyId = 4;
-            GiveGun = true;
-            MagazineCapacity = 30;
+            ApplyLoadout = true;
+            Loadout = new BanditLoadout();
+            SecondaryWeaponRange = 0f;
             InfiniteAmmo = true;
             TurnSpeedDegreesPerSecond = 180f;
             ScanIntervalSeconds = 0.5f;

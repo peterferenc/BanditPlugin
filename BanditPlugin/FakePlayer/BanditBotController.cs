@@ -53,7 +53,11 @@ namespace BanditPlugin.FakePlayer
         public float AimToleranceDegrees = 10f;
         public float FireRange = 50f;
         public bool InfiniteAmmo = true;
-        public float AimHitChance = 0.3f;
+        public bool HasPrimaryWeapon = true;
+        public bool HasSecondaryWeapon;
+        public float SecondaryWeaponRange;
+        public float PrimaryAimHitChance = 0.3f;
+        public float SecondaryAimHitChance = 0.3f;
         public float AimTargetRadius = 0.35f;
         public float AimTargetHalfHeight = 0.8f;
         public float AimMaxErrorDegrees = 8f;
@@ -83,6 +87,15 @@ namespace BanditPlugin.FakePlayer
         // ends flush against a surface doesn't report that surface as cover. Same 0.025 vanilla
         // InteractableSentry.ScanForTargets uses.
         private const float LineOfSightSkinWidth = 0.025f;
+
+        // The bot swaps to its sidearm at SecondaryWeaponRange and back to the rifle this much
+        // further out, so a target loitering on the boundary doesn't make it swap every time it
+        // takes a step. Any hysteresis band wider than a stride does the job; four metres is one.
+        private const float WeaponSwitchHysteresisMetres = 4f;
+
+        // ServerEquip is a request, not a command - it no-ops while the player is busy, dead or
+        // mid-equip-animation - so equipping is retried on this interval rather than assumed.
+        private const float EquipRetryIntervalSeconds = 0.5f;
 
         private static readonly FieldInfo ServersidePacketsField =
             typeof(PlayerInput).GetField("serversidePackets", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -190,7 +203,7 @@ namespace BanditPlugin.FakePlayer
             float elapsed = _packetAccumulator;
             _packetAccumulator = 0f;
 
-            EnsureGunEquipped();
+            MaintainEquippedWeapon();
 
             // Before aiming, because with no target to lock onto the bot faces wherever the brain
             // is walking - and because the analog byte built below is relative to that facing.
@@ -406,7 +419,7 @@ namespace BanditPlugin.FakePlayer
             yawError = 0f;
             pitchError = 0f;
 
-            float hitChance = Mathf.Clamp(AimHitChance, 0f, 0.999f);
+            float hitChance = Mathf.Clamp(ActiveAimHitChance, 0f, 0.999f);
             if (hitChance >= 0.999f || AimTargetRadius <= 0f || _target == null)
             {
                 return; // configured back into a perfect aimbot
@@ -687,25 +700,52 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            state[AmmoStateIndex] = BanditPlugin.Instance.Configuration.Instance.MagazineCapacity;
+            // Taken from the gun in hand rather than one configured number, because the bot can be
+            // holding a rifle one moment and a sidearm the next.
+            byte capacity = BanditLoadoutApplier.ResolveMagazineCapacity(
+                Self.equipment.asset as ItemGunAsset, state);
+            if (capacity == 0)
+            {
+                return;
+            }
+
+            state[AmmoStateIndex] = capacity;
 
             // The equipped UseableGun works off its own cached copy, so the state byte alone is not
             // enough - it would keep believing the magazine is empty.
             if (UseableGunAmmoField != null && Self.equipment.useable is UseableGun gun)
             {
-                UseableGunAmmoField.SetValue(gun, BanditPlugin.Instance.Configuration.Instance.MagazineCapacity);
+                UseableGunAmmoField.SetValue(gun, capacity);
             }
         }
 
         /// <summary>
-        /// PlayerEquipment.ServerEquip() silently does nothing if the player is momentarily not in
-        /// an equippable state (life.isDead, !canEquip, isBusy). Right after spawn that is a race,
-        /// which is why some bots ended up standing around holding nothing: the rifle went into
-        /// their inventory but the equip call was dropped. Retry until it actually takes.
+        /// Keeps the weapon the bot wants in its hands actually in its hands.
+        ///
+        /// This covers two jobs. The first is the original one: PlayerEquipment.ServerEquip()
+        /// silently does nothing if the player is momentarily not in an equippable state
+        /// (life.isDead, !canEquip, isBusy, mid-equip-animation). Right after spawn that is a race,
+        /// which is why some bots ended up standing around holding nothing - the rifle went into
+        /// their inventory but the equip call was dropped - so it is retried until it takes.
+        ///
+        /// The second is swapping between the primary and secondary slots as the range to the
+        /// target changes. Both are the same operation, hence one method: ask for the slot we want,
+        /// and ask again shortly if the request didn't stick.
         /// </summary>
-        private void EnsureGunEquipped()
+        private void MaintainEquippedWeapon()
         {
-            if (Self.equipment == null || Self.equipment.HasValidUseable || Self.life == null || Self.life.isDead)
+            if (Self.equipment == null || Self.inventory == null || Self.life == null || Self.life.isDead)
+            {
+                return;
+            }
+
+            byte desiredPage = ChooseWeaponPage();
+
+            // Careful: ServerEquip(page, x, y) with the page already equipped is vanilla's *dequip*
+            // request, so this must only fire when the bot is holding nothing or holding the wrong
+            // weapon - otherwise it would put the gun away every time it was called.
+            bool holdingSomething = Self.equipment.HasValidUseable;
+            if (holdingSomething && Self.equipment.equippedPage == desiredPage)
             {
                 return;
             }
@@ -714,14 +754,95 @@ namespace BanditPlugin.FakePlayer
             {
                 return;
             }
-            _nextEquipAttemptTime = Time.time + 0.5f;
 
-            // forceAddItem(..., auto: true) routes primary weapons into page 0 slot (0,0).
-            if (Self.inventory != null && Self.inventory.getItemCount(0) > 0)
+            // The preconditions ServerEquip checks before doing anything. Tested here as well so a
+            // request vanilla was always going to drop - mid-shot, mid-equip - neither burns a
+            // retry interval nor resets the aim state below on a swap that never happened.
+            if (Self.equipment.isBusy
+                || !Self.equipment.canEquip
+                || (holdingSomething && !Self.equipment.IsEquipAnimationFinished))
             {
-                Self.equipment.ServerEquip(0, 0, 0);
+                return;
+            }
+
+            if (Self.inventory.getItemCount(desiredPage) == 0)
+            {
+                return;
+            }
+
+            _nextEquipAttemptTime = Time.time + EquipRetryIntervalSeconds;
+
+            // A swap dequips whatever was in hand, which drops aim-down-sights and any half-pulled
+            // trigger with it. Without clearing these the bot would still believe it was shouldered
+            // and would never send the Start that shoulders the new weapon.
+            _aimingActive = false;
+            _triggerHeld = false;
+
+            Self.equipment.ServerEquip(desiredPage, 0, 0);
+        }
+
+        /// <summary>
+        /// Which equipment slot the bot wants out. The rifle, unless it has a sidearm and the
+        /// target has closed to within SecondaryWeaponRange - measured with a hysteresis band so
+        /// the bot doesn't spend a fight at that exact distance swapping weapons instead of
+        /// shooting.
+        /// </summary>
+        private byte ChooseWeaponPage()
+        {
+            if (!HasSecondaryWeapon)
+            {
+                return BanditLoadoutApplier.PrimarySlotPage;
+            }
+
+            if (!HasPrimaryWeapon)
+            {
+                return BanditLoadoutApplier.SecondarySlotPage;
+            }
+
+            if (SecondaryWeaponRange <= 0f || _target == null || _target.life.isDead)
+            {
+                return BanditLoadoutApplier.PrimarySlotPage;
+            }
+
+            float threshold = IsHoldingSecondary
+                ? SecondaryWeaponRange + WeaponSwitchHysteresisMetres
+                : SecondaryWeaponRange;
+
+            return (TargetAimPoint - EyePosition).magnitude <= threshold
+                ? BanditLoadoutApplier.SecondarySlotPage
+                : BanditLoadoutApplier.PrimarySlotPage;
+        }
+
+        /// <summary>What is actually in the bot's hands right now, for /banditstatus - the only way
+        /// to see from in-game whether a loadout applied and whether the sidearm swap is firing.</summary>
+        public string EquippedWeaponName
+        {
+            get
+            {
+                if (Self == null || Self.equipment == null || !Self.equipment.HasValidUseable || Self.equipment.asset == null)
+                {
+                    return "nothing";
+                }
+
+                return Self.equipment.asset.FriendlyName;
             }
         }
+
+        private bool IsHoldingSecondary
+        {
+            get
+            {
+                return Self.equipment != null
+                    && Self.equipment.HasValidUseable
+                    && Self.equipment.equippedPage == BanditLoadoutApplier.SecondarySlotPage;
+            }
+        }
+
+        /// <summary>
+        /// Hit chance of whatever is currently in the bot's hands, so a sidearm can be made
+        /// scrappier than the rifle without touching the rest of the aim model.
+        /// </summary>
+        private float ActiveAimHitChance => IsHoldingSecondary ? SecondaryAimHitChance : PrimaryAimHitChance;
 
         /// <summary>
         /// Raycasts along the direction this packet is about to aim in, and injects the hit into
