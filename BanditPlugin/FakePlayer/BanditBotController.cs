@@ -58,6 +58,13 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private bool WeaponDown => Brain != null && Brain.WantsWeaponDown;
 
+        /// <summary>
+        /// True from the moment a gesture is ordered until the bot has finished playing it, i.e.
+        /// while it is putting its weapon away, waving, and before MaintainEquippedWeapon is allowed
+        /// to pull the gun back out. Used to hold the bot still and keep it from shooting mid-wave.
+        /// </summary>
+        public bool IsGesturing => _gesturePhase != GesturePhase.None;
+
         public float TurnSpeedDegreesPerSecond = 180f;
         public float ScanIntervalSeconds = 0.5f;
         public float FireIntervalSeconds = 0.6f;
@@ -108,6 +115,21 @@ namespace BanditPlugin.FakePlayer
         // mid-equip-animation - so equipping is retried on this interval rather than assumed.
         private const float EquipRetryIntervalSeconds = 0.5f;
 
+        // ServerEquip(255, ...) is vanilla's "put whatever is in hand away" request - the same one
+        // pressing the dequip key sends - and it goes through the same isBusy/canEquip gate as any
+        // other equip, so it is retried like one.
+        private const byte DequipPage = byte.MaxValue;
+
+        // Give up trying to holster after this long and play the gesture anyway. Something has to
+        // bound it: a bot that is permanently isBusy would otherwise sit in the holstering phase
+        // forever, with its weapon suppressed and its feet nailed down, and never wave.
+        private const float GestureHolsterTimeoutSeconds = 2f;
+
+        // How long the bot stands empty-handed before re-arming. The clip length only exists inside
+        // the client's animation bundle - the server has no CharacterAnimator to measure
+        // Gesture_Wave with - so this is a fixed span comfortably longer than the animation.
+        private const float GestureHoldSeconds = 2.5f;
+
         private static readonly FieldInfo ServersidePacketsField =
             typeof(PlayerInput).GetField("serversidePackets", BindingFlags.NonPublic | BindingFlags.Instance);
 
@@ -136,6 +158,19 @@ namespace BanditPlugin.FakePlayer
         private bool _aimingActive;
         private float _nextEquipAttemptTime;
         private float _diedAtTime;
+
+        /// <summary>Where a one-off gesture has got to. See TickGesture().</summary>
+        private enum GesturePhase
+        {
+            None,
+            Holstering,
+            Playing
+        }
+
+        private GesturePhase _gesturePhase;
+        private EPlayerGesture _pendingGesture;
+        private Player _gestureLookAt;
+        private float _gesturePhaseDeadline;
 
         // Aim error, in degrees, added on top of the tracked aim when the packet is built. Kept
         // separate from _currentYaw/_currentPitch on purpose: those keep tracking the target dead
@@ -214,6 +249,9 @@ namespace BanditPlugin.FakePlayer
             float elapsed = _packetAccumulator;
             _packetAccumulator = 0f;
 
+            // Before MaintainEquippedWeapon, which is the thing being suppressed while a gesture
+            // runs - so the tick that ends the gesture is also the tick the rifle comes back out.
+            TickGesture();
             MaintainEquippedWeapon();
 
             // Before aiming, because with no target to lock onto the bot faces wherever the brain
@@ -244,6 +282,10 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
+            // A corpse is done gesturing. Left set, this would suppress the weapon and the feet of
+            // whatever the bot does next, since TickGesture never runs while dead.
+            CancelGesture();
+
             float despawnDelay = BanditPlugin.Instance.Configuration.Instance.DespawnSecondsAfterDeath;
             if (despawnDelay < 0f)
             {
@@ -267,16 +309,115 @@ namespace BanditPlugin.FakePlayer
             return true;
         }
 
+        /// <summary>
+        /// Orders a one-off gesture: the bot puts its weapon away, plays the animation, then arms
+        /// itself again. Returns false if it is dead or already mid-gesture.
+        ///
+        /// Weapon first because vanilla will not let a player gesture with something in their hands
+        /// (PlayerAnimator.ReceiveGestureRequest drops any request while HasValidUseable), so a bot
+        /// that waved with its rifle out would be doing something no player can do. It is also the
+        /// only way the wave reads as friendly rather than as a bandit pointing a gun at you.
+        /// </summary>
+        /// <param name="lookAt">Who to turn and face while gesturing, or null to keep the current facing.</param>
+        public bool TryPlayGesture(EPlayerGesture gesture, Player lookAt)
+        {
+            if (Self == null || Self.life == null || Self.life.isDead || IsGesturing)
+            {
+                return false;
+            }
+
+            _pendingGesture = gesture;
+            _gestureLookAt = lookAt;
+            _gesturePhase = GesturePhase.Holstering;
+            _gesturePhaseDeadline = Time.time + GestureHolsterTimeoutSeconds;
+
+            // The weapon is about to leave the bot's hands, taking aim-down-sights and any
+            // half-pulled trigger with it - same reset the weapon swap in MaintainEquippedWeapon
+            // does, and for the same reason.
+            _aimingActive = false;
+            _triggerHeld = false;
+            return true;
+        }
+
+        private void CancelGesture()
+        {
+            _gesturePhase = GesturePhase.None;
+            _gestureLookAt = null;
+        }
+
+        /// <summary>
+        /// Walks an ordered gesture through its two phases: get the weapon put away, then play the
+        /// animation and stand empty-handed long enough for it to finish.
+        ///
+        /// Re-arming is not a phase of its own - clearing IsGesturing is enough, because
+        /// MaintainEquippedWeapon runs immediately afterwards and its whole job is to put the
+        /// wanted weapon back in the bot's hands, retries included.
+        /// </summary>
+        private void TickGesture()
+        {
+            switch (_gesturePhase)
+            {
+                case GesturePhase.None:
+                    return;
+
+                case GesturePhase.Holstering:
+                    if (Self.equipment != null && Self.equipment.HasValidUseable
+                        && Time.time < _gesturePhaseDeadline)
+                    {
+                        RequestHolster();
+                        return;
+                    }
+
+                    // sendGesture rather than the RPC a client would send: the server-side branch
+                    // broadcasts the animation to everyone (loopback included) without re-checking
+                    // the equipment and stance conditions a real client is held to, which is what
+                    // lets the gesture still play in the timeout case above.
+                    Self.animator?.sendGesture(_pendingGesture, true);
+                    _gesturePhase = GesturePhase.Playing;
+                    _gesturePhaseDeadline = Time.time + GestureHoldSeconds;
+                    return;
+
+                case GesturePhase.Playing:
+                    if (Time.time >= _gesturePhaseDeadline)
+                    {
+                        CancelGesture();
+                    }
+                    return;
+            }
+        }
+
+        private void RequestHolster()
+        {
+            if (Time.time < _nextEquipAttemptTime)
+            {
+                return;
+            }
+
+            if (Self.equipment.isBusy || !Self.equipment.canEquip || !Self.equipment.IsEquipAnimationFinished)
+            {
+                return; // vanilla would drop the request; don't burn a retry interval on it
+            }
+
+            _nextEquipAttemptTime = Time.time + EquipRetryIntervalSeconds;
+            Self.equipment.ServerEquip(DequipPage, 0, 0);
+        }
+
         private void AimAtTarget(float elapsed)
         {
-            if (_target == null)
+            // A gesture aimed at somebody outranks the combat target: the whole point of /banditwave
+            // is that the bandit turns and waves at *you*, even if someone else is closer.
+            Player lookAt = IsGesturing && _gestureLookAt != null && _gestureLookAt.life != null && !_gestureLookAt.life.isDead
+                ? _gestureLookAt
+                : _target;
+
+            if (lookAt == null)
             {
                 TurnTowardsTravelDirection(elapsed);
                 return;
             }
 
             Vector3 eye = transform.position + Vector3.up * 1.5f;
-            Vector3 toTarget = (_target.transform.position + Vector3.up * 1.5f) - eye;
+            Vector3 toTarget = (lookAt.transform.position + Vector3.up * 1.5f) - eye;
             if (toTarget.sqrMagnitude < 0.0001f)
             {
                 return;
@@ -327,7 +468,9 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private byte BuildAnalog(float packetYaw)
         {
-            if (Brain == null)
+            // Stand still to gesture. The brain keeps its destination, so a bandit waved at
+            // mid-patrol carries on walking the route the moment the wave is over.
+            if (Brain == null || IsGesturing)
             {
                 return AnalogNeutral;
             }
@@ -352,7 +495,9 @@ namespace BanditPlugin.FakePlayer
 
         private ushort BuildKeys()
         {
-            if (Brain == null)
+            // No sprinting, ducking or leaning through a gesture - and standing upright matters,
+            // because vanilla refuses the request outright from a prone player.
+            if (Brain == null || IsGesturing)
             {
                 return 0;
             }
@@ -392,7 +537,9 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private void UpdateAimWobble(float elapsed)
         {
-            if (_target == null)
+            // Nothing to wobble around while gesturing: the aim is pointed at whoever is being
+            // waved at, not at a target being shot, and shooting error has no business moving it.
+            if (_target == null || IsGesturing)
             {
                 _aimErrorYaw = _aimErrorYawTarget = 0f;
                 _aimErrorPitch = _aimErrorPitchTarget = 0f;
@@ -476,7 +623,7 @@ namespace BanditPlugin.FakePlayer
                 return EAttackInputFlags.Stop;
             }
 
-            if (HoldFire || WeaponDown)
+            if (HoldFire || WeaponDown || IsGesturing)
             {
                 return EAttackInputFlags.None;
             }
@@ -532,7 +679,7 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private EAttackInputFlags DecideAimInput()
         {
-            bool wantsToAim = !HoldFire && !WeaponDown && IsGunReady()
+            bool wantsToAim = !HoldFire && !WeaponDown && !IsGesturing && IsGunReady()
                 && _target != null && !_target.life.isDead && IsTargetInRange();
 
             if (wantsToAim && !_aimingActive)
@@ -747,6 +894,14 @@ namespace BanditPlugin.FakePlayer
         private void MaintainEquippedWeapon()
         {
             if (Self.equipment == null || Self.inventory == null || Self.life == null || Self.life.isDead)
+            {
+                return;
+            }
+
+            // A gesture is holding the bot's hands empty on purpose; this method exists to fill
+            // them, so it has to stand down until the gesture is over or it would re-equip the
+            // rifle on the very next tick and the wave would never play.
+            if (IsGesturing)
             {
                 return;
             }
