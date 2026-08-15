@@ -53,6 +53,21 @@ namespace BanditPlugin.FakePlayer
         public float? DesiredFacing { get; private set; }
 
         public bool PatrolEnabled { get; private set; }
+
+        /// <summary>
+        /// Whether this bandit looks for cover at all. Off at spawn by default, so a fresh bandit
+        /// stands where you put it; /bandit cover start turns it on. Per-bandit rather than a
+        /// config-wide switch because it is a standing order you give in the field.
+        /// </summary>
+        public bool CoverEnabled { get; private set; }
+
+        /// <summary>
+        /// Whether the bandit alternates hiding with exposing itself to shoot once it is in cover.
+        /// Off means it goes to cover and stays down. Also off at spawn by default; /bandit peek
+        /// start turns it on.
+        /// </summary>
+        public bool PeekEnabled { get; private set; }
+
         public BanditNavigator Navigator { get; }
 
         /// <summary>Health below which the bot hides properly instead of looking for a firing angle.</summary>
@@ -119,11 +134,51 @@ namespace BanditPlugin.FakePlayer
                 AllowJumping = _config.AllowJumping
             };
 
+            CoverEnabled = _config.CoverByDefault;
+            PeekEnabled = _config.PeekByDefault;
+
             PatrolEnabled = _config.PatrolByDefault;
             if (PatrolEnabled)
             {
                 RefreshPatrolRoute();
             }
+        }
+
+        /// <summary>
+        /// "/bandit cover start|stop".
+        ///
+        /// Starting clears the search cooldown so the bot looks on the very next tick instead of
+        /// waiting out CoverSearchIntervalSeconds - the command should visibly do something.
+        ///
+        /// Stopping means "stop where you are and stay there", so it drops the cover spot *and*
+        /// every other standing order. Dropping only the cover spot would leave a bandit that had
+        /// been walking to cover carrying on to whatever patrol or /banditgoto it had before, which
+        /// is the opposite of holding position.
+        /// </summary>
+        public void SetCoverEnabled(bool enabled)
+        {
+            CoverEnabled = enabled;
+
+            if (enabled)
+            {
+                _nextCoverSearchTime = 0f;
+                return;
+            }
+
+            _hasCover = false;
+            _peeking = false;
+            _coverBreached = false;
+            _coverPhaseUntil = 0f;
+            StopMoving();
+        }
+
+        /// <summary>
+        /// "/bandit peek start|stop". Only has any visible effect while the bandit is in cover -
+        /// peeking is a thing you do from behind something.
+        /// </summary>
+        public void SetPeekEnabled(bool enabled)
+        {
+            PeekEnabled = enabled;
         }
 
         /// <summary>Sends the bot to a point. Overrides patrol until it arrives or gives up.</summary>
@@ -239,7 +294,7 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private void MaybeTakeCover(Player target)
         {
-            if (!_config.CoverEnabled)
+            if (!CoverEnabled)
             {
                 return;
             }
@@ -414,6 +469,19 @@ namespace BanditPlugin.FakePlayer
                 }
             }
 
+            // Turning peeking off mid-peek pulls the bot straight back in rather than letting the
+            // current peek phase run out, so "/bandit peek stop" reads as immediate instead of
+            // leaving it stood in the open for the rest of CoverPeekSeconds.
+            if (!PeekEnabled && _peeking)
+            {
+                _peeking = false;
+                _coverPhaseUntil = 0f;
+                if (!_coverSpot.RequiresCrouch && _coverSpot.CanPeek)
+                {
+                    Navigator.SetDestination(_coverSpot.Position, 0.35f);
+                }
+            }
+
             // Set before the walking branch returns, so the bot is already leaning out as it steps
             // to the peek position rather than snapping into the lean once it stops.
             ApplyPeekLean();
@@ -429,18 +497,29 @@ namespace BanditPlugin.FakePlayer
 
             if (Time.time >= _coverPhaseUntil)
             {
-                // Alternate hiding and showing yourself. Hurt bots stay down: no peeking until
-                // they have been left alone for a moment.
-                _peeking = !_peeking && !PrefersToHide;
-                _coverPhaseUntil = Time.time + (_peeking ? _config.CoverPeekSeconds : _config.CoverHideSeconds);
-
-                // Hard cover hides the bot standing as well as crouched, so the only way to shoot
-                // from it is to step out to the flank the finder already verified. That step is
-                // under a metre, hence the tight arrive radius - the default would call it done
-                // before the bot moved.
-                if (!_coverSpot.RequiresCrouch && _coverSpot.CanPeek)
+                if (!PeekEnabled)
                 {
-                    Navigator.SetDestination(_peeking ? _coverSpot.PeekPosition : _coverSpot.Position, 0.35f);
+                    // Nothing to alternate with - just keep renewing the hidden phase. Deliberately
+                    // not re-issuing a destination: the bot is already on the spot, and setting one
+                    // every few seconds would reset the navigator's path and stuck tracking for no
+                    // movement at all.
+                    _coverPhaseUntil = Time.time + _config.CoverHideSeconds;
+                }
+                else
+                {
+                    // Alternate hiding and showing yourself. Hurt bots stay down: no peeking until
+                    // they have been left alone for a moment.
+                    _peeking = !_peeking && !PrefersToHide;
+                    _coverPhaseUntil = Time.time + (_peeking ? _config.CoverPeekSeconds : _config.CoverHideSeconds);
+
+                    // Hard cover hides the bot standing as well as crouched, so the only way to
+                    // shoot from it is to step out to the flank the finder already verified. That
+                    // step is under a metre, hence the tight arrive radius - the default would call
+                    // it done before the bot moved.
+                    if (!_coverSpot.RequiresCrouch && _coverSpot.CanPeek)
+                    {
+                        Navigator.SetDestination(_peeking ? _coverSpot.PeekPosition : _coverSpot.Position, 0.35f);
+                    }
                 }
             }
 

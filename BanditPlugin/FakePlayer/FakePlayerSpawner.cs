@@ -159,6 +159,7 @@ namespace BanditPlugin.FakePlayer
             controller.AimToleranceDegrees = config.AimToleranceDegrees;
             controller.FireRange = config.FireRange;
             controller.InfiniteAmmo = config.InfiniteAmmo;
+            controller.HoldFire = config.HoldFireByDefault;
             controller.HasPrimaryWeapon = loadout.HasPrimaryWeapon;
             controller.HasSecondaryWeapon = loadout.HasSecondaryWeapon;
             controller.SecondaryWeaponRange = config.SecondaryWeaponRange;

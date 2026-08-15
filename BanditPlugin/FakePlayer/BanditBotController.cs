@@ -40,8 +40,10 @@ namespace BanditPlugin.FakePlayer
 
         /// <summary>
         /// Weapons tight: the bot still acquires and tracks targets, and still takes cover from
-        /// them, but never pulls the trigger or shoulders the rifle. Toggled by /banditstop and
-        /// /banditshoot. Dropping aim-down-sights matters as well as the trigger - vanilla
+        /// them, but never pulls the trigger or shoulders the rifle. Set at spawn from
+        /// BanditConfiguration.HoldFireByDefault - on by default, so a fresh bandit is harmless
+        /// until told otherwise - and toggled afterwards by /bandit shoot start|stop.
+        /// Dropping aim-down-sights matters as well as the trigger - vanilla
         /// PlayerStance refuses to sprint while aiming, so a bot told to hold fire can actually
         /// run somewhere.
         /// </summary>

@@ -54,8 +54,10 @@ namespace BanditPlugin.Commands
                 Reply(caller,
                     $"#{i + 1}: {brain.State}, target {target}, dest {destination}, " +
                     $"holding {bandit.EquippedWeaponName}, " +
-                    $"moving {(brain.MoveDirection.sqrMagnitude > 0.0001f ? "yes" : "no")}" +
-                    $"{(bandit.HoldFire ? ", holding fire" : string.Empty)}" +
+                    $"moving {(brain.MoveDirection.sqrMagnitude > 0.0001f ? "yes" : "no")}, " +
+                    $"orders [{(bandit.HoldFire ? "hold fire" : "weapons free")}, " +
+                    $"cover {(brain.CoverEnabled ? "on" : "off")}, " +
+                    $"peek {(brain.PeekEnabled ? "on" : "off")}]" +
                     $"{(brain.PatrolEnabled ? ", patrolling" : string.Empty)}",
                     Color.white);
             }

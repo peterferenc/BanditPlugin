@@ -30,6 +30,16 @@ namespace BanditPlugin
         /// </summary>
         public bool InfiniteAmmo = true;
 
+        /// <summary>
+        /// Spawn bandits holding fire, so a new one tracks you, takes cover and walks its route
+        /// without ever pulling the trigger until /bandit shoot start gives it weapons free.
+        ///
+        /// Fire control is per-bandit and applied to whoever is alive when the command runs, so a
+        /// bandit spawned after a /bandit shoot start begins held again - set this false to make
+        /// weapons free the standing default instead. Same for CoverByDefault and PeekByDefault.
+        /// </summary>
+        public bool HoldFireByDefault = true;
+
         public float TurnSpeedDegreesPerSecond = 180f;
         public float ScanIntervalSeconds = 0.5f;
         public float FireIntervalSeconds = 0.6f;
@@ -131,8 +141,20 @@ namespace BanditPlugin
         /// <summary>Range the bot tries to fight at, and scores cover positions against.</summary>
         public float PreferredEngagementRange = 25f;
 
-        /// <summary>Look for cover when a target can see the bot, or when it's being shot.</summary>
-        public bool CoverEnabled = true;
+        /// <summary>
+        /// Spawn bandits already looking for cover when a target can see them or they are being
+        /// shot. Off by default, so a fresh bandit stands where you put it until /bandit cover
+        /// start. Like fire control, this is a per-bandit standing order rather than a global
+        /// switch, so this only sets what a newly spawned one starts with.
+        /// </summary>
+        public bool CoverByDefault = false;
+
+        /// <summary>
+        /// Spawn bandits already peeking - alternating hiding with stepping out to shoot - once
+        /// they are in cover. Off by default; /bandit peek start turns it on. With it off a bandit
+        /// that takes cover goes down and stays down.
+        /// </summary>
+        public bool PeekByDefault = false;
 
         /// <summary>Radius searched for cover around the bot.</summary>
         public float CoverSearchRadius = 18f;
@@ -179,6 +201,7 @@ namespace BanditPlugin
             Loadout = new BanditLoadout();
             SecondaryWeaponRange = 0f;
             InfiniteAmmo = true;
+            HoldFireByDefault = true;
             TurnSpeedDegreesPerSecond = 180f;
             ScanIntervalSeconds = 0.5f;
             FireIntervalSeconds = 0.6f;
@@ -204,7 +227,8 @@ namespace BanditPlugin
             DespawnSecondsAfterDeath = 5f;
             PreferredEngagementRange = 25f;
 
-            CoverEnabled = true;
+            CoverByDefault = false;
+            PeekByDefault = false;
             CoverSearchRadius = 18f;
             CoverSearchIntervalSeconds = 3f;
             CoverRingSamples = 12;
