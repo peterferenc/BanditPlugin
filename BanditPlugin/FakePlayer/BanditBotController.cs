@@ -65,6 +65,10 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public bool IsGesturing => _gesturePhase != GesturePhase.None;
 
+        /// <summary>True while the bot is holding the trigger down through a burst, for
+        /// /banditstatus - the only way to see from in-game that burst fire is really engaging.</summary>
+        public bool IsBursting => _burstTarget > 0;
+
         public float TurnSpeedDegreesPerSecond = 180f;
         public float ScanIntervalSeconds = 0.5f;
         public float FireIntervalSeconds = 0.6f;
@@ -76,6 +80,13 @@ namespace BanditPlugin.FakePlayer
         public float SecondaryWeaponRange;
         public float PrimaryAimHitChance = 0.3f;
         public float SecondaryAimHitChance = 0.3f;
+        public bool BurstFire;
+        public int PrimaryBurstMinRounds = 3;
+        public int PrimaryBurstMaxRounds = 4;
+        public int SecondaryBurstMinRounds = 3;
+        public int SecondaryBurstMaxRounds = 4;
+        public float BurstIntervalSeconds = 1.1f;
+        public float BurstErrorRampPerRound = 0.35f;
         public float AimTargetRadius = 0.35f;
         public float AimTargetHalfHeight = 0.8f;
         public float AimMaxErrorDegrees = 8f;
@@ -100,6 +111,12 @@ namespace BanditPlugin.FakePlayer
 
         private const byte AmmoStateIndex = 10;   // PlayerEquipment.state[10] == rounds in magazine
         private const byte FiremodeStateIndex = 11; // PlayerEquipment.state[11] == EFiremode
+
+        // PlayerInput runs equipment.tock() SAMPLES times per packet at one packet every RATE
+        // seconds, so the clock UseableGun paces its firing against advances this many times a
+        // second. ItemGunAsset states the same figure the other way round - its rounds per second
+        // is 50 / (Firerate + 1) - which is what makes this a constant rather than a derivation.
+        private const float TocksPerSecond = 50f;
 
         // Pull the line-of-sight rays up slightly short of the endpoints, so a ray that starts or
         // ends flush against a surface doesn't report that surface as cover. Same 0.025 vanilla
@@ -158,6 +175,21 @@ namespace BanditPlugin.FakePlayer
         private bool _aimingActive;
         private float _nextEquipAttemptTime;
         private float _diedAtTime;
+
+        // Rounds wanted from the burst in progress, 0 when none is - so this doubles as "the
+        // trigger is currently latched down". _burstRoundsFired counts what has actually left the
+        // barrel, not what we asked for, and _burstDeadline bounds a burst whose rounds never come.
+        private int _burstTarget;
+        private int _burstRoundsFired;
+        private float _burstDeadline;
+
+        // equipment.state[10] as of the previous packet, which is how rounds fired are counted.
+        // -1 means there is no baseline yet, so the next reading must not be treated as a delta.
+        private int _lastObservedAmmo = -1;
+
+        // Hit reports the packet being built needs. Decided by the trigger logic, consumed by
+        // EnqueueInputPacket; see AttachHitReports() for why the count is not always one.
+        private int _hitReportsForThisPacket;
 
         /// <summary>Where a one-off gesture has got to. See TickGesture().</summary>
         private enum GesturePhase
@@ -285,6 +317,10 @@ namespace BanditPlugin.FakePlayer
             // A corpse is done gesturing. Left set, this would suppress the weapon and the feet of
             // whatever the bot does next, since TickGesture never runs while dead.
             CancelGesture();
+
+            // And done shooting. PlayerInput stops simulating a dead player, so the trigger is
+            // already released as far as vanilla is concerned.
+            CancelBurst();
 
             float despawnDelay = BanditPlugin.Instance.Configuration.Instance.DespawnSecondsAfterDeath;
             if (despawnDelay < 0f)
@@ -574,6 +610,15 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private void SampleAimError(out float yawError, out float pitchError)
         {
+            SampleAimError(out yawError, out pitchError, 1f);
+        }
+
+        /// <param name="errorScale">
+        /// Multiplier on the drawn miss distance, used to walk a burst's accuracy off as it climbs.
+        /// 1 is the configured hit chance.
+        /// </param>
+        private void SampleAimError(out float yawError, out float pitchError, float errorScale)
+        {
             yawError = 0f;
             pitchError = 0f;
 
@@ -589,8 +634,8 @@ namespace BanditPlugin.FakePlayer
             // AimMaxErrorDegrees catches the same case from the other side.
             float distance = Mathf.Max((TargetAimPoint - EyePosition).magnitude, 1f);
 
-            yawError = ErrorDegrees(NextGaussian() * AimTargetRadius * scale, distance);
-            pitchError = ErrorDegrees(NextGaussian() * AimTargetHalfHeight * scale, distance);
+            yawError = ErrorDegrees(NextGaussian() * AimTargetRadius * scale * errorScale, distance);
+            pitchError = ErrorDegrees(NextGaussian() * AimTargetHalfHeight * scale * errorScale, distance);
         }
 
         private float ErrorDegrees(float offsetMetres, float distance)
@@ -609,13 +654,31 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Returns the trigger input for this packet. We alternate Start/Stop rather than holding
-        /// the trigger down, so each fire interval is one discrete trigger pull - matching the SEMI
-        /// firemode the bot is given, and behaving sanely if it's switched to AUTO.
+        /// Returns the trigger input for this packet.
+        ///
+        /// Two cadences live behind this. Without BurstFire we alternate Start/Stop, so each fire
+        /// interval is one discrete trigger pull - matching the SEMI firemode the bot is given, and
+        /// behaving sanely if it's switched to AUTO. With BurstFire we instead latch the trigger
+        /// down and leave it down for as many packets as the burst takes, because holding is the
+        /// only way to get rounds out at the gun's own rate: UseableGun sets equipment.isBusy on
+        /// every shot and clears it 150ms later, and startPrimary() refuses while it is set, so
+        /// re-pulling can never beat about four rounds a second however fast the gun is. A latched
+        /// trigger skips startPrimary() entirely from the second round on and goes straight to
+        /// tockShoot(), which paces itself against the asset's own Firerate.
+        ///
         /// PlayerEquipment ignores a Start while already started and a Stop while already stopped,
-        /// so this sequencing is safe.
+        /// so both sequences are safe.
         /// </summary>
         private EAttackInputFlags DecideAttackInput()
+        {
+            // Before anything reads it, and in both modes, so the baseline never goes stale.
+            _burstRoundsFired += ObserveRoundsFired();
+
+            return BurstFire ? DecideBurstAttackInput() : DecideSingleShotAttackInput();
+        }
+
+        /// <summary>One trigger pull per FireIntervalSeconds - the original cadence.</summary>
+        private EAttackInputFlags DecideSingleShotAttackInput()
         {
             if (_triggerHeld)
             {
@@ -623,9 +686,111 @@ namespace BanditPlugin.FakePlayer
                 return EAttackInputFlags.Stop;
             }
 
-            if (HoldFire || WeaponDown || IsGesturing)
+            // Interval first: CanShootThisPacket() ends in a line-of-sight raycast, and there is no
+            // reason to pay for one on the seven packets out of eight that are only waiting.
+            if (Time.time < _nextFireTime || !CanShootThisPacket())
             {
                 return EAttackInputFlags.None;
+            }
+
+            TopUpAmmoIfNeeded();
+            SnapAimErrorForRound(0);
+
+            _nextFireTime = Time.time + FireIntervalSeconds;
+            _triggerHeld = true;
+            _hitReportsForThisPacket = 1;
+            return EAttackInputFlags.Start;
+        }
+
+        /// <summary>
+        /// Holds the trigger down until the configured number of rounds has actually left the
+        /// barrel, then releases for BurstIntervalSeconds.
+        ///
+        /// Rounds are counted rather than predicted, so the burst comes out the right length
+        /// whatever the gun's rate turns out to be and whatever the server's frame time is doing.
+        /// </summary>
+        private EAttackInputFlags DecideBurstAttackInput()
+        {
+            if (_burstTarget > 0)
+            {
+                // Finished, cut short by an order or a target ducking away, or wedged. The deadline
+                // is the one that matters least often and matters most: a burst whose rounds never
+                // arrive - the gun jammed busy, the magazine dry with InfiniteAmmo off - would
+                // otherwise leave the trigger latched down for good.
+                //
+                // CanShootThisPacket() is tested last of the three and only while a burst is
+                // actually running, because it ends in a line-of-sight raycast.
+                if (_burstRoundsFired >= _burstTarget || Time.time >= _burstDeadline || !CanShootThisPacket())
+                {
+                    return ReleaseBurst();
+                }
+
+                // A fresh draw every packet, so each round of the burst is its own hit-or-miss
+                // rather than the whole burst inheriting the first round's luck, and each one is
+                // fired with a little more error than the last.
+                TopUpAmmoIfNeeded();
+                SnapAimErrorForRound(_burstRoundsFired);
+                _hitReportsForThisPacket = PlanHitReportCount();
+
+                // No input at all: the Start that opened the burst is still latched, and repeating
+                // it would be ignored anyway.
+                return EAttackInputFlags.None;
+            }
+
+            if (Time.time < _nextFireTime || !CanShootThisPacket())
+            {
+                return EAttackInputFlags.None;
+            }
+
+            _burstTarget = DrawBurstSize();
+            _burstRoundsFired = 0;
+            _burstDeadline = Time.time + BurstTimeoutSeconds(_burstTarget);
+
+            TopUpAmmoIfNeeded();
+            SnapAimErrorForRound(0);
+            _hitReportsForThisPacket = PlanHitReportCount();
+            return EAttackInputFlags.Start;
+        }
+
+        /// <summary>
+        /// Lets go of the trigger and starts the pause before the next burst. No hit report is
+        /// attached to this packet: stopPrimary() runs before the packet's tocks do, and tock()
+        /// skips tockShoot() entirely once isShooting is clear, so nothing fires on the way out.
+        /// </summary>
+        private EAttackInputFlags ReleaseBurst()
+        {
+            _burstTarget = 0;
+            _burstRoundsFired = 0;
+            _nextFireTime = Time.time + BurstIntervalSeconds;
+            return EAttackInputFlags.Stop;
+        }
+
+        /// <summary>
+        /// Forgets a burst in progress without sending a release, for the cases where vanilla has
+        /// already dropped the trigger for us: equipping a useable resets
+        /// PlayerEquipment.wasUsablePrimaryStarted, and a dead bot is not simulated at all. Sending
+        /// a Stop in those cases would be harmless but meaningless.
+        /// </summary>
+        private void CancelBurst()
+        {
+            _burstTarget = 0;
+            _burstRoundsFired = 0;
+            _lastObservedAmmo = -1;
+            _hitReportsForThisPacket = 0;
+        }
+
+        /// <summary>
+        /// Everything that has to hold before the bot may put a round downrange this packet.
+        ///
+        /// Shared by both cadences, and re-tested every packet of a burst rather than only at the
+        /// pull, so an order to hold fire, a dash to cover or a target stepping behind a wall cuts
+        /// the burst short instead of being noticed a third of a second later.
+        /// </summary>
+        private bool CanShootThisPacket()
+        {
+            if (HoldFire || WeaponDown || IsGesturing)
+            {
+                return false;
             }
 
             // Must come before anything else that can pull the trigger. PlayerEquipment.simulate
@@ -634,41 +799,142 @@ namespace BanditPlugin.FakePlayer
             // simulate_UseableInput also ignores input until IsEquipAnimationFinished.
             if (!IsGunReady())
             {
-                return EAttackInputFlags.None;
+                return false;
             }
 
             if (!IsAimedAtTarget())
             {
-                return EAttackInputFlags.None;
-            }
-
-            if (Time.time < _nextFireTime)
-            {
-                return EAttackInputFlags.None;
+                return false;
             }
 
             // Re-checked here and not just at scan time: the target can step behind cover in the
             // half second between scans, and this is the last moment before the round goes out.
-            if (!HasLineOfSight(_target))
+            return HasLineOfSight(_target);
+        }
+
+        private int DrawBurstSize()
+        {
+            int min = Mathf.Max(1, ActiveBurstMinRounds);
+            int max = Mathf.Max(min, ActiveBurstMaxRounds);
+            return UnityEngine.Random.Range(min, max + 1);
+        }
+
+        /// <summary>
+        /// How long to leave the trigger down before abandoning the rest of a burst.
+        ///
+        /// Deliberately generous - twice as long as the rounds should take - because this is a
+        /// stuck-state backstop rather than part of the cadence. A tight bound would quietly
+        /// shorten bursts whenever the server had a slow frame, which is exactly the kind of thing
+        /// that reads as "the burst size setting doesn't work".
+        /// </summary>
+        private float BurstTimeoutSeconds(int rounds)
+        {
+            return Mathf.Max(0.5f, rounds * SecondsPerRound() * 2f + 0.4f);
+        }
+
+        /// <summary>
+        /// Shortest gap the gun in hand allows between rounds. UseableGun.tockShoot() will not fire
+        /// again until more than Firerate ticks of the equipment clock have passed, and that clock
+        /// runs at TocksPerSecond. Attachments shave a little off Firerate, which is not accounted
+        /// for here - both callers only want an order of magnitude and are lenient in the safe
+        /// direction.
+        /// </summary>
+        private float SecondsPerRound()
+        {
+            ItemGunAsset gun = Self.equipment != null ? Self.equipment.asset as ItemGunAsset : null;
+            int firerate = gun != null ? gun.firerate : 0;
+            return (firerate + 1) / TocksPerSecond;
+        }
+
+        /// <summary>
+        /// How many hit reports the packet being built needs: one for every round that could leave
+        /// the barrel while it is simulated.
+        ///
+        /// The server never raycasts bullets itself. UseableGun.ballistics() pairs each round it
+        /// fired with one InputInfo taken from the packet's queue and silently drops any round it
+        /// cannot pair, so a burst that supplies one report does one round of damage and N-1 rounds
+        /// of noise and muzzle flash. PlayerInput runs SAMPLES tocks per packet and the gun can fire
+        /// on one tock in every Firerate+1 of them, which bounds the count - it is 1 for anything
+        /// from an Eaglefire upwards and only climbs for the handful of guns with a Firerate of 3
+        /// or less.
+        ///
+        /// Supplying too many is harmless: PlayerInput replaces the whole queue with the next
+        /// packet's, so leftovers are discarded rather than banked. Supplying too few silently
+        /// loses damage. The count is still capped at what the burst has left to fire, so a gun
+        /// quick enough to get two rounds off in one packet cannot overrun its configured size.
+        /// </summary>
+        private int PlanHitReportCount()
+        {
+            int samplesPerPacket = (int)PlayerInput.SAMPLES;
+            int ticksPerRound = Mathf.Max(1, Mathf.RoundToInt(SecondsPerRound() * TocksPerSecond));
+            int count = Mathf.Clamp(Mathf.CeilToInt((float)samplesPerPacket / ticksPerRound), 1, samplesPerPacket);
+
+            if (_burstTarget > 0)
             {
-                return EAttackInputFlags.None;
+                count = Mathf.Min(count, Mathf.Max(1, _burstTarget - _burstRoundsFired));
             }
 
-            TopUpAmmoIfNeeded();
+            return count;
+        }
 
-            // Draw this shot's miss now rather than reusing whatever the sway happens to be sitting
-            // on, so every shot is an independent draw and the hit rate actually comes out at
-            // AimHitChance. Snapping the current error too keeps the packet we are about to build,
-            // its hit raycast and the replicated aim all pointing the same way.
-            SampleAimError(out _aimErrorYawTarget, out _aimErrorPitchTarget);
+        /// <summary>
+        /// Rounds that actually left the barrel since the last packet, read off the magazine.
+        ///
+        /// UseableGun.fire() takes the asset's Ammo_Per_Shot off its cached count and writes the
+        /// result straight into equipment.state[10], so the magazine is the one place the server
+        /// records shots the bot never explicitly asked for - which is precisely what a latched
+        /// trigger produces. A reading that went up is a reload or an InfiniteAmmo top-up rather
+        /// than negative shots, so it only re-baselines.
+        /// </summary>
+        private int ObserveRoundsFired()
+        {
+            byte[] state = Self.equipment != null ? Self.equipment.state : null;
+            if (state == null || state.Length <= AmmoStateIndex)
+            {
+                _lastObservedAmmo = -1;
+                return 0;
+            }
+
+            int ammo = state[AmmoStateIndex];
+            int previous = _lastObservedAmmo;
+            _lastObservedAmmo = ammo;
+
+            if (previous < 0 || ammo >= previous)
+            {
+                return 0;
+            }
+
+            ItemGunAsset gun = Self.equipment.asset as ItemGunAsset;
+            int perShot = Mathf.Max(1, gun != null ? gun.ammoPerShot : 1);
+
+            // Rounded up, because a magazine too short to pay a full Ammo_Per_Shot still fires the
+            // shot that empties it.
+            return (previous - ammo + perShot - 1) / perShot;
+        }
+
+        /// <summary>
+        /// Draws this round's miss and snaps the sway onto it, rather than reusing whatever the
+        /// sway happens to be sitting on - so every round is an independent trial and the measured
+        /// hit rate comes out at AimHitChance. Snapping the current error too keeps the packet we
+        /// are about to build, its hit raycast and the replicated aim all pointing the same way.
+        ///
+        /// roundIndex is how far into a burst this round is, which widens the draw: see
+        /// BanditConfiguration.BurstErrorRampPerRound for why a burst should not simply be a
+        /// strictly better single shot.
+        /// </summary>
+        private void SnapAimErrorForRound(int roundIndex)
+        {
+            float errorScale = 1f + Mathf.Max(0f, BurstErrorRampPerRound) * Mathf.Max(0, roundIndex);
+
+            SampleAimError(out _aimErrorYawTarget, out _aimErrorPitchTarget, errorScale);
             _aimErrorYaw = _aimErrorYawTarget;
             _aimErrorPitch = _aimErrorPitchTarget;
             _nextWobbleSampleTime = Time.time + Mathf.Max(AimWobbleIntervalSeconds, 0.01f);
-
-            _nextFireTime = Time.time + FireIntervalSeconds;
-            _triggerHeld = true;
-            return EAttackInputFlags.Start;
         }
+
+        private int ActiveBurstMinRounds => IsHoldingSecondary ? SecondaryBurstMinRounds : PrimaryBurstMinRounds;
+
+        private int ActiveBurstMaxRounds => IsHoldingSecondary ? SecondaryBurstMaxRounds : PrimaryBurstMaxRounds;
 
         /// <summary>
         /// Holds aim-down-sights while a target is in range. Hip-firing an Eaglefire carries a lot
@@ -870,6 +1136,11 @@ namespace BanditPlugin.FakePlayer
 
             state[AmmoStateIndex] = capacity;
 
+            // Re-baseline the round counter in the same breath. ObserveRoundsFired() reads the
+            // magazine before this runs, so without it the rounds fired between the refill and the
+            // next packet would be attributed to a magazine that no longer exists and lost.
+            _lastObservedAmmo = capacity;
+
             // The equipped UseableGun works off its own cached copy, so the state byte alone is not
             // enough - it would keep believing the magazine is empty.
             if (UseableGunAmmoField != null && Self.equipment.useable is UseableGun gun)
@@ -941,9 +1212,11 @@ namespace BanditPlugin.FakePlayer
 
             // A swap dequips whatever was in hand, which drops aim-down-sights and any half-pulled
             // trigger with it. Without clearing these the bot would still believe it was shouldered
-            // and would never send the Start that shoulders the new weapon.
+            // and would never send the Start that shoulders the new weapon. The burst goes too: its
+            // round count belongs to a magazine that is no longer in the bot's hands.
             _aimingActive = false;
             _triggerHeld = false;
+            CancelBurst();
 
             Self.equipment.ServerEquip(desiredPage, 0, 0);
         }
@@ -1018,8 +1291,15 @@ namespace BanditPlugin.FakePlayer
         /// We briefly point PlayerInput.inputs at that queue and let vanilla's own sendRaycast do
         /// the RaycastInfo -> InputInfo conversion (limb, material, entity type, ...) rather than
         /// reimplementing that mapping and getting a field wrong.
+        ///
+        /// One raycast covers all <paramref name="count"/> reports, because they all stand for
+        /// rounds fired during this packet along the one aim it replicates. That means a gun quick
+        /// enough to fire twice inside 80ms has both those rounds hit or both miss together - only
+        /// true for guns with a Firerate of 3 or less, since everything above that fires at most
+        /// once per packet and gets its own draw. Reporting them along separate angles would buy
+        /// independence at the cost of the invariant below, which is not a good trade.
         /// </summary>
-        private void AttachHitReport(WalkingPlayerInputPacket packet)
+        private void AttachHitReports(WalkingPlayerInputPacket packet, int count)
         {
             if (PlayerInputInputsField == null)
             {
@@ -1046,7 +1326,10 @@ namespace BanditPlugin.FakePlayer
             try
             {
                 PlayerInputInputsField.SetValue(Self.input, packet.serversideInputs);
-                Self.input.sendRaycast(raycastInfo, ERaycastInfoUsage.Gun);
+                for (int i = 0; i < count; i++)
+                {
+                    Self.input.sendRaycast(raycastInfo, ERaycastInfoUsage.Gun);
+                }
             }
             finally
             {
@@ -1076,11 +1359,14 @@ namespace BanditPlugin.FakePlayer
                 clientSimulationFrameNumber = _clientSimulationFrameNumber++
             };
 
-            // Only a packet that actually pulls the trigger needs a hit report attached.
-            if (primaryAttack.HasFlag(EAttackInputFlags.Start))
+            // Only a packet that can put rounds downrange needs hit reports, and during a burst that
+            // is every packet the trigger stays latched for - not just the one carrying the Start.
+            // The trigger logic works out how many; see AttachHitReports().
+            if (_hitReportsForThisPacket > 0)
             {
-                AttachHitReport(packet);
+                AttachHitReports(packet, _hitReportsForThisPacket);
             }
+            _hitReportsForThisPacket = 0;
 
             _serversidePackets.Enqueue(packet);
         }

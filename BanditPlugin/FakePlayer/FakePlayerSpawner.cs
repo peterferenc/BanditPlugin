@@ -184,7 +184,7 @@ namespace BanditPlugin.FakePlayer
 
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
             BanditLoadoutApplier.Result loadout = config.ApplyLoadout
-                ? BanditLoadoutApplier.Apply(steamPlayer.player, config.Loadout)
+                ? BanditLoadoutApplier.Apply(steamPlayer.player, config.Loadout, config.BurstFire)
                 : default(BanditLoadoutApplier.Result);
 
             BanditBotController controller = steamPlayer.player.gameObject.AddComponent<BanditBotController>();
@@ -202,6 +202,13 @@ namespace BanditPlugin.FakePlayer
             controller.SecondaryWeaponRange = config.SecondaryWeaponRange;
             controller.PrimaryAimHitChance = ResolveHitChance(config.Loadout?.PrimaryWeapon, config.AimHitChance);
             controller.SecondaryAimHitChance = ResolveHitChance(config.Loadout?.SecondaryWeapon, config.AimHitChance);
+            controller.BurstFire = config.BurstFire;
+            controller.PrimaryBurstMinRounds = ResolveBurstRounds(config.Loadout?.PrimaryWeapon?.BurstMinRounds, config.BurstMinRounds);
+            controller.PrimaryBurstMaxRounds = ResolveBurstRounds(config.Loadout?.PrimaryWeapon?.BurstMaxRounds, config.BurstMaxRounds);
+            controller.SecondaryBurstMinRounds = ResolveBurstRounds(config.Loadout?.SecondaryWeapon?.BurstMinRounds, config.BurstMinRounds);
+            controller.SecondaryBurstMaxRounds = ResolveBurstRounds(config.Loadout?.SecondaryWeapon?.BurstMaxRounds, config.BurstMaxRounds);
+            controller.BurstIntervalSeconds = config.BurstIntervalSeconds;
+            controller.BurstErrorRampPerRound = config.BurstErrorRampPerRound;
             controller.AimTargetRadius = config.AimTargetRadius;
             controller.AimTargetHalfHeight = config.AimTargetHalfHeight;
             controller.AimMaxErrorDegrees = config.AimMaxErrorDegrees;
@@ -351,6 +358,16 @@ namespace BanditPlugin.FakePlayer
         private static float ResolveHitChance(BanditWeapon weapon, float fallback)
         {
             return weapon != null && weapon.AimHitChance >= 0f ? weapon.AimHitChance : fallback;
+        }
+
+        /// <summary>
+        /// A weapon's own burst size if it sets one, otherwise the global figure. Takes the value
+        /// rather than the weapon so one method covers both ends of the range; negative means the
+        /// entry did not set it, and a missing weapon entry arrives here as null.
+        /// </summary>
+        private static int ResolveBurstRounds(int? weaponValue, int fallback)
+        {
+            return weaponValue.HasValue && weaponValue.Value >= 0 ? weaponValue.Value : fallback;
         }
 
         /// <summary>

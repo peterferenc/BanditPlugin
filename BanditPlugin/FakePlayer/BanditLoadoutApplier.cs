@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using SDG.Unturned;
 using Logger = Rocket.Core.Logging.Logger;
 
@@ -34,6 +35,10 @@ namespace BanditPlugin.FakePlayer
         private const byte MagazineIdStateIndex = 8; // state[8..9] == attached magazine's legacy ID
         private const byte FiremodeStateIndex = 11;  // state[11] == EFiremode
 
+        // Putting a semi-only gun on automatic is worth saying out loud, but every bandit in a wave
+        // arms itself through here, so it is said once per gun rather than once per spawn.
+        private static readonly HashSet<Guid> ForcedAutoLogged = new HashSet<Guid>();
+
         /// <summary>Which slots the bot actually ended up with something usable in.</summary>
         public struct Result
         {
@@ -41,7 +46,11 @@ namespace BanditPlugin.FakePlayer
             public bool HasSecondaryWeapon;
         }
 
-        public static Result Apply(Player player, BanditLoadout loadout)
+        /// <param name="burstFire">
+        /// Whether the bot will be driving these weapons with a held trigger rather than one pull
+        /// per shot. Only affects which firemode they are handed over on - see SetFiremode.
+        /// </param>
+        public static Result Apply(Player player, BanditLoadout loadout, bool burstFire)
         {
             Result result = default(Result);
             if (player == null || loadout == null)
@@ -59,8 +68,8 @@ namespace BanditPlugin.FakePlayer
             Wear(player, loadout.Backpack, EItemType.BACKPACK, "Backpack");
             Wear(player, loadout.Glasses, EItemType.GLASSES, "Glasses");
 
-            result.HasPrimaryWeapon = GiveWeapon(player, loadout.PrimaryWeapon, PrimarySlotPage, "PrimaryWeapon");
-            result.HasSecondaryWeapon = GiveWeapon(player, loadout.SecondaryWeapon, SecondarySlotPage, "SecondaryWeapon");
+            result.HasPrimaryWeapon = GiveWeapon(player, loadout.PrimaryWeapon, PrimarySlotPage, "PrimaryWeapon", burstFire);
+            result.HasSecondaryWeapon = GiveWeapon(player, loadout.SecondaryWeapon, SecondarySlotPage, "SecondaryWeapon", burstFire);
             return result;
         }
 
@@ -140,7 +149,7 @@ namespace BanditPlugin.FakePlayer
             }
         }
 
-        private static bool GiveWeapon(Player player, BanditWeapon entry, byte page, string slotName)
+        private static bool GiveWeapon(Player player, BanditWeapon entry, byte page, string slotName, bool burstFire)
         {
             ItemAsset asset = Resolve(entry?.Item, slotName);
             if (asset == null)
@@ -157,7 +166,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             Item item = new Item(asset.id, true);
-            SetFiremode(gun, item);
+            SetFiremode(gun, item, burstFire);
 
             // x/y of 255 routes to Items.tryAddItem(item), the same call vanilla's own
             // tryAddItemEquip uses for slots - it skips the free-space search, which does not apply
@@ -176,14 +185,43 @@ namespace BanditPlugin.FakePlayer
 
         /// <summary>
         /// UseableGun.startPrimary() refuses to fire on SAFETY, which is a plausible default for an
-        /// asset to ship with, and the bot pulls the trigger once per fire interval rather than
-        /// holding it down - so semi is the mode that matches its cadence. Guns with no semi mode
-        /// keep whatever the asset's own default state gave them, as long as that is not safety.
+        /// asset to ship with, and without burst fire the bot pulls the trigger once per fire
+        /// interval rather than holding it down - so semi is the mode that matches its cadence.
+        /// Guns with no semi mode keep whatever the asset's own default state gave them, as long as
+        /// that is not safety.
+        ///
+        /// With burst fire on the bot instead latches the trigger down and counts rounds out, and
+        /// automatic is the only mode where that produces more than one round: tockShoot() clears
+        /// isShooting on the tock it fires in both SEMI and BURST, so holding the trigger on those
+        /// yields one round and one round only.
+        ///
+        /// A semi-only gun is put on automatic anyway. UseableGun.equip() reads state[11] straight
+        /// into its firemode without checking it against the asset's own hasAuto - only the
+        /// ReceiveChangeFiremode RPC, which a player's firemode key goes through and we do not,
+        /// validates that - so the mode sticks. That is what lets one BurstMinRounds setting mean
+        /// the same thing whatever is in the loadout, including the default Eaglefire. The
+        /// alternative was the asset's own BURST mode, which exists on only three vanilla guns and
+        /// fixes the size at whatever the asset says (3 for the Eaglefire).
+        ///
+        /// Guns that rechamber are the exception and stay on semi whatever the setting. Their round
+        /// count between bolt cycles is enforced in startPrimary(), which a held trigger only passes
+        /// through once, so bursting one would fire a bolt-action like a machinegun.
         /// </summary>
-        private static void SetFiremode(ItemGunAsset gun, Item item)
+        private static void SetFiremode(ItemGunAsset gun, Item item, bool burstFire)
         {
             if (gun == null || item.state == null || item.state.Length <= FiremodeStateIndex)
             {
+                return;
+            }
+
+            if (burstFire && gun.RechamberAfterShotCount <= 0)
+            {
+                if (!gun.hasAuto && ForcedAutoLogged.Add(gun.GUID))
+                {
+                    Logger.Log($"[Bandit] '{gun.FriendlyName}' has no automatic firemode of its own; bandits will carry it on automatic anyway so BurstFire can hold the trigger down. Set BurstFire false to leave it as the asset intends.");
+                }
+
+                item.state[FiremodeStateIndex] = (byte)EFiremode.AUTO;
                 return;
             }
 

@@ -48,6 +48,20 @@ namespace BanditPlugin
         /// of the aim model. Negative (the default) inherits the global value.
         /// </summary>
         public float AimHitChance = -1f;
+
+        /// <summary>
+        /// Overrides <see cref="BanditConfiguration.BurstMinRounds"/> and BurstMaxRounds while this
+        /// weapon is in the bot's hands, so one config can give a rifle 3-4 rounds and a machinegun
+        /// 5-6. Negative (the default) inherits the global pair, and both are ignored entirely
+        /// unless BurstFire is on. Set both to 1 to keep a particular weapon on single shots.
+        ///
+        /// Only the size is per-weapon: how fast the rounds inside a burst come out is the gun's
+        /// own Firerate and is not configurable here, and the pause between bursts is global.
+        /// </summary>
+        public int BurstMinRounds = -1;
+
+        /// <summary>Upper end of this weapon's burst size. See <see cref="BurstMinRounds"/>.</summary>
+        public int BurstMaxRounds = -1;
     }
 
     /// <summary>

@@ -47,6 +47,65 @@ namespace BanditPlugin
         public float FireRange = 50f;
 
         /// <summary>
+        /// Fire in bursts rather than one aimed shot every FireIntervalSeconds.
+        ///
+        /// A burst is produced by holding the trigger down, not by clicking faster: the bot sends
+        /// one attack Start, leaves it latched across the next several packets, and releases once
+        /// the configured number of rounds has actually left the barrel. Rounds inside a burst
+        /// therefore come out at the gun's own cadence - vanilla's UseableGun.tockShoot() paces
+        /// itself against the asset's Firerate, so an Eaglefire really does burst at its 600rpm -
+        /// and BurstIntervalSeconds becomes the gap between bursts rather than between rounds.
+        ///
+        /// Clicking faster is not an alternative: PlayerEquipment.isBusy stays set for 150ms after
+        /// every shot and UseableGun.startPrimary() refuses while it is, so no amount of re-pulling
+        /// beats about four rounds a second however fast the gun is.
+        ///
+        /// Holding the trigger only does anything on a gun set to automatic, so turning this on also
+        /// changes the firemode the loadout is given - see BanditLoadoutApplier.SetFiremode, which
+        /// explains why that works even for a semi-only gun like the Eaglefire. Bolt-actions and
+        /// pump shotguns are the exception and stay on semi, firing one round per interval as
+        /// before: their round count between rechambers is enforced where a held trigger never
+        /// looks, so bursting one would turn it into a machinegun.
+        /// </summary>
+        public bool BurstFire = false;
+
+        /// <summary>
+        /// Rounds per burst, drawn fresh for each burst so a squad of bandits doesn't fire in
+        /// lockstep. Both ends inclusive; set them equal for a fixed size, or both to 1 to keep
+        /// single shots at the burst cadence.
+        ///
+        /// Either weapon in the loadout can override this pair for as long as it is the one in the
+        /// bot's hands, via BanditWeapon - which is how a rifle gets 3-4 and a machinegun 5-6 from
+        /// one config.
+        /// </summary>
+        public int BurstMinRounds = 3;
+
+        /// <summary>Upper end of the burst size draw. See <see cref="BurstMinRounds"/>.</summary>
+        public int BurstMaxRounds = 4;
+
+        /// <summary>
+        /// Pause between bursts, used in place of FireIntervalSeconds while BurstFire is on.
+        ///
+        /// Worth setting deliberately rather than matching FireIntervalSeconds: 3-4 rounds every
+        /// 1.1s is roughly twice the sustained fire of one round every 0.6s, so a careless value
+        /// makes bandits abruptly deadlier instead of differently deadly. Raise it, or lower
+        /// AimHitChance, if bursts turn out to kill too fast.
+        /// </summary>
+        public float BurstIntervalSeconds = 1.1f;
+
+        /// <summary>
+        /// How much the aim error grows over a burst - a stand-in for the recoil climb a real player
+        /// fights, and the reason a burst is not simply strictly better than a single shot.
+        ///
+        /// Round n of a burst is fired with its miss distance scaled by 1 + this * n, so at the
+        /// default a 4-round burst walks from the configured AimHitChance out to roughly double the
+        /// spread by the last round. 0 makes every round as accurate as the first. Note that
+        /// AimMaxErrorDegrees still caps the result, so the ramp does less at point blank range,
+        /// where it is already clamped.
+        /// </summary>
+        public float BurstErrorRampPerRound = 0.35f;
+
+        /// <summary>
         /// Fraction of shots whose line passes within AimTargetRadius of the target's chest, i.e.
         /// roughly the bot's hit rate. The aim error needed for this is derived from the distance
         /// to the target, so the bot is no more accurate up close than it is far away in hitbox
@@ -242,6 +301,11 @@ namespace BanditPlugin
             FireIntervalSeconds = 0.6f;
             AimToleranceDegrees = 10f;
             FireRange = 50f;
+            BurstFire = false;
+            BurstMinRounds = 3;
+            BurstMaxRounds = 4;
+            BurstIntervalSeconds = 1.1f;
+            BurstErrorRampPerRound = 0.35f;
             AimHitChance = 0.3f;
             AimTargetRadius = 0.35f;
             AimTargetHalfHeight = 0.8f;
