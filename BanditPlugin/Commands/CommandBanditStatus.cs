@@ -51,13 +51,22 @@ namespace BanditPlugin.Commands
                       (brain.Navigator.IsFollowingPath ? "(A*)" : "(steering)")
                     : "none";
 
+                // The stance vanilla settled on, not the one the brain asked for. They can differ -
+                // PlayerStance refuses to duck in shallow water, and a crouch input beats a prone
+                // one - so this is the only honest answer to "did /banditprone take?".
+                string stance = bandit.Self.stance != null
+                    ? bandit.Self.stance.stance.ToString()
+                    : "unknown";
+
                 Reply(caller,
                     $"#{i + 1}: {brain.State}, target {target}, dest {destination}, " +
                     $"holding {bandit.EquippedWeaponName}{(bandit.IsBursting ? " (bursting)" : string.Empty)}, " +
+                    $"stance {stance}, " +
                     $"moving {(brain.MoveDirection.sqrMagnitude > 0.0001f ? "yes" : "no")}, " +
                     $"orders [{(bandit.HoldFire ? "hold fire" : "weapons free")}, " +
                     $"cover {(brain.CoverEnabled ? "on" : "off")}, " +
-                    $"peek {(brain.PeekEnabled ? "on" : "off")}]" +
+                    $"peek {(brain.PeekEnabled ? "on" : "off")}, " +
+                    $"prone {(brain.ProneEnabled ? "on" : "off")}]" +
                     $"{(brain.PatrolEnabled ? ", patrolling" : string.Empty)}",
                     Color.white);
             }

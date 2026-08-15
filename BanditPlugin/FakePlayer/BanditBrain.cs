@@ -37,6 +37,13 @@ namespace BanditPlugin.FakePlayer
         public bool WantsJump { get; private set; }
 
         /// <summary>
+        /// Lie down. Never set in the same tick as <see cref="WantsCrouch"/>: PlayerStance.simulate
+        /// tests its crouch input first and only looks at the prone one when that is clear, so a
+        /// packet carrying both is simply a crouch. See ApplyProneOrder.
+        /// </summary>
+        public bool WantsProne { get; private set; }
+
+        /// <summary>
         /// Lower the rifle and hold fire this tick. Set while sprinting somewhere that matters more
         /// than the shot: vanilla PlayerStance refuses to sprint while aiming down sights, so
         /// without the controller acting on this the bot would shoulder its gun the instant it saw
@@ -76,6 +83,14 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public bool PeekEnabled { get; private set; }
 
+        /// <summary>
+        /// Whether the bandit is lying down. A standing order rather than a one-off action, because
+        /// the stance only lasts as long as the key is held: PlayerStance.simulate stands a player
+        /// back up on the first packet that carries neither crouch nor prone, so this has to be
+        /// re-asserted every tick. Set by /banditprone.
+        /// </summary>
+        public bool ProneEnabled { get; private set; }
+
         public BanditNavigator Navigator { get; }
 
         /// <summary>Health below which the bot hides properly instead of looking for a firing angle.</summary>
@@ -91,6 +106,9 @@ namespace BanditPlugin.FakePlayer
         private const float TargetMemorySeconds = 8f;
 
         private const float ScanIntervalSeconds = 2f;
+
+        /// <summary>How long after the feet stop before a prone bandit drops back down.</summary>
+        private const float ProneSettleSeconds = 0.75f;
 
         private readonly BanditBotController _controller;
         private readonly Player _self;
@@ -123,6 +141,8 @@ namespace BanditPlugin.FakePlayer
         private float _coverPhaseUntil;
         private float _nextCoverSearchTime;
         private float _nextCoverValidationTime;
+
+        private float _proneSettleTime;
 
         private float _nextAdvanceRepathTime;
         private float _nextScanTime;
@@ -187,6 +207,17 @@ namespace BanditPlugin.FakePlayer
         public void SetPeekEnabled(bool enabled)
         {
             PeekEnabled = enabled;
+        }
+
+        /// <summary>
+        /// "/banditprone". Purely a stance: it deliberately leaves patrol, cover and any /banditgoto
+        /// order alone, so a bandit told to lie down crawls its route rather than stopping. What it
+        /// cannot do is beat vanilla's own rules - a bot in shallow water is forced upright by
+        /// PlayerStance regardless of what we send.
+        /// </summary>
+        public void SetProneEnabled(bool enabled)
+        {
+            ProneEnabled = enabled;
         }
 
         /// <summary>Sends the bot to a point. Overrides patrol until it arrives or gives up.</summary>
@@ -255,6 +286,7 @@ namespace BanditPlugin.FakePlayer
             MoveDirection = Vector3.zero;
             WantsSprint = false;
             WantsCrouch = false;
+            WantsProne = false;
             WantsJump = false;
             WantsWeaponDown = false;
             WantsLeanLeft = false;
@@ -270,7 +302,11 @@ namespace BanditPlugin.FakePlayer
 
             if (!_config.MovementEnabled)
             {
+                // Still honour the stance. MovementEnabled off means "don't walk anywhere", and a
+                // bandit lying still is exactly as stationary as one standing still - so refusing
+                // /banditprone here would read as the command being broken.
                 State = BanditState.Idle;
+                ApplyProneOrder();
                 return;
             }
 
@@ -293,6 +329,55 @@ namespace BanditPlugin.FakePlayer
             TickMovement(deltaTime, target);
 
             WantsJump |= Navigator.WantsJump;
+
+            // Last, so it overrides whatever stance the movement code asked for.
+            ApplyProneOrder();
+        }
+
+        /// <summary>
+        /// Folds the standing prone order into this tick's stance flags.
+        ///
+        /// Crouch has to be cleared rather than left set alongside: PlayerStance.simulate tests its
+        /// crouch input first and only falls through to the prone one when that is clear, so a
+        /// packet carrying both is just a crouch - the bandit would stay up on one knee and the
+        /// order would look ignored. That case is real, not theoretical: a bot in crouch cover asks
+        /// for crouch every tick it is hidden.
+        ///
+        /// Sprint goes with it. Vanilla would refuse it anyway - it only ever promotes to SPRINT
+        /// from STAND - but the sprint request drags WantsWeaponDown along in ApplySprintToCover,
+        /// and that flag is ours: left set, a crawling bandit would hold its fire waiting on a
+        /// sprint that can never start.
+        /// </summary>
+        private void ApplyProneOrder()
+        {
+            if (!ProneEnabled)
+            {
+                return;
+            }
+
+            // Get up to go anywhere. Vanilla crawls at PlayerMovement.SPEED_PRONE, 1.5 m/s against
+            // 7 sprinting, so a bandit that lies down and then walks to cover spends the whole
+            // firefight in the open getting there - which is the opposite of what the stance is
+            // for. Prone is a firing position, so it is something the bot settles into once it has
+            // stopped, and the standing order survives the trip rather than being cancelled by it.
+            if (MoveDirection.sqrMagnitude > 0.0001f)
+            {
+                _proneSettleTime = Time.time + ProneSettleSeconds;
+                return;
+            }
+
+            // Not the instant the feet stop, either. The cover shuffle steps under a metre between
+            // its hidden and peek positions, and dropping flat between each of those would have the
+            // bot flickering up and down instead of moving.
+            if (Time.time < _proneSettleTime)
+            {
+                return;
+            }
+
+            WantsProne = true;
+            WantsCrouch = false;
+            WantsSprint = false;
+            WantsWeaponDown = false;
         }
 
         /// <summary>

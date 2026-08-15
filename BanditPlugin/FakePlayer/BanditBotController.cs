@@ -101,6 +101,7 @@ namespace BanditPlugin.FakePlayer
         // PlayerInput reconstructs its key array as (packet.keys & (1 << index)) != 0.
         private const ushort KeyJump = 1 << 0;
         private const ushort KeyCrouch = 1 << 3;
+        private const ushort KeyProne = 1 << 4;
         private const ushort KeySprint = 1 << 5;
         private const ushort KeyLeanLeft = 1 << 6;
         private const ushort KeyLeanRight = 1 << 7;
@@ -127,6 +128,10 @@ namespace BanditPlugin.FakePlayer
         // further out, so a target loitering on the boundary doesn't make it swap every time it
         // takes a step. Any hysteresis band wider than a stride does the job; four metres is one.
         private const float WeaponSwitchHysteresisMetres = 4f;
+
+        // How far from the feet toward the eyes a player's chest sits. Applied to that player's own
+        // aim height, so it tracks their stance rather than assuming they are standing.
+        private const float ChestHeightFraction = 0.7f;
 
         // ServerEquip is a request, not a command - it no-ops while the player is busy, dead or
         // mid-equip-animation - so equipping is retried on this interval rather than assumed.
@@ -452,8 +457,14 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            Vector3 eye = transform.position + Vector3.up * 1.5f;
-            Vector3 toTarget = (lookAt.transform.position + Vector3.up * 1.5f) - eye;
+            // Both ends have to be the real, stance-dependent points rather than a nominal eye
+            // height, or the bot aims at where a standing body would be from where a standing eye
+            // would be. Prone is where that stops being a rounding error: PlayerLook puts the aim
+            // transform at HEIGHT_LOOK_PRONE (0.35m) against 1.75m standing, and the bullet leaves
+            // from that transform - so a bot solving its pitch as if its eye were 1.15m higher than
+            // it is fires into the ground in front of itself.
+            Vector3 eye = EyePosition;
+            Vector3 toTarget = AimPointOf(lookAt) - eye;
             if (toTarget.sqrMagnitude < 0.0001f)
             {
                 return;
@@ -543,9 +554,18 @@ namespace BanditPlugin.FakePlayer
             {
                 keys |= KeyJump;
             }
+            // Mutually exclusive, and in this order: PlayerStance.simulate reads its crouch input
+            // first and only considers prone when that one is clear, so a packet carrying both is
+            // a crouch. Sending exactly one key is what makes the stance the brain asked for the
+            // stance vanilla actually applies. The brain already keeps these two apart; the else
+            // is here so that stays true however the flags are set in future.
             if (Brain.WantsCrouch)
             {
                 keys |= KeyCrouch;
+            }
+            else if (Brain.WantsProne)
+            {
+                keys |= KeyProne;
             }
             // Vanilla PlayerStance refuses to sprint while aiming down sights, out of stamina or
             // standing still, so this is a request rather than a command - which is what we want.
@@ -980,17 +1000,30 @@ namespace BanditPlugin.FakePlayer
 
         private Vector3 TargetAimPoint
         {
-            get
-            {
-                if (_target == null)
-                {
-                    return EyePosition;
-                }
+            get { return _target == null ? EyePosition : AimPointOf(_target); }
+        }
 
-                return _target.look != null && _target.look.aim != null
-                    ? _target.look.aim.position
-                    : _target.transform.position + Vector3.up * 1.5f;
-            }
+        /// <summary>
+        /// Where on a player the bot points: the chest, wherever that has ended up.
+        ///
+        /// Taken as a fraction of the way from the feet to that player's own aim transform, so it
+        /// follows their stance for free - roughly 1.2m on someone standing, 0.85m crouched, 0.25m
+        /// prone. A fixed offset off the ground cannot do that, and the one this replaced (a flat
+        /// 1.5m) sailed a clear metre over anyone lying down.
+        ///
+        /// The chest rather than the eye because the aim error model in SampleAimError() draws a
+        /// miss around this point with a half-height of AimTargetHalfHeight; centred on the eyes,
+        /// half of that ellipse is over open air above the head and the measured hit rate comes out
+        /// under the configured one.
+        /// </summary>
+        private static Vector3 AimPointOf(Player player)
+        {
+            Vector3 feet = player.transform.position;
+            Vector3 eye = player.look != null && player.look.aim != null
+                ? player.look.aim.position
+                : feet + Vector3.up * 1.75f;
+
+            return Vector3.Lerp(feet, eye, ChestHeightFraction);
         }
 
         /// <summary>
@@ -1058,8 +1091,7 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            Vector3 eye = transform.position + Vector3.up * 1.5f;
-            return ((_target.transform.position + Vector3.up * 1.5f) - eye).magnitude <= FireRange;
+            return (TargetAimPoint - EyePosition).magnitude <= FireRange;
         }
 
         /// <summary>
@@ -1088,23 +1120,25 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            Vector3 eye = transform.position + Vector3.up * 1.5f;
-            Vector3 toTarget = (_target.transform.position + Vector3.up * 1.5f) - eye;
-            if (toTarget.magnitude > FireRange)
+            Vector3 toTarget = TargetAimPoint - EyePosition;
+            if (toTarget.magnitude > FireRange || toTarget.sqrMagnitude < 0.0001f)
             {
                 return false;
             }
 
-            // Compare against where the bot is actually looking, not where it wants to look, so it
-            // only shoots once it has finished turning onto the target.
-            Vector3 aimDirection = Quaternion.Euler(0f, _currentYaw, 0f) * Vector3.forward;
-            Vector3 flatToTarget = new Vector3(toTarget.x, 0f, toTarget.z);
-            if (flatToTarget.sqrMagnitude < 0.0001f)
-            {
-                return false;
-            }
+            // Pitch counts as well as yaw. This used to flatten both vectors and compare headings
+            // only, which meant the bot opened fire the moment it had turned onto the target no
+            // matter where the barrel was pointing vertically - so every time the required pitch
+            // moved sharply, most obviously on dropping prone, the first rounds went into the
+            // ground. The direction is built exactly as AttachHitReports() builds the one it
+            // raycasts along, so "aimed" means the same thing to both.
+            //
+            // Compared against where the bot is actually looking rather than where it wants to
+            // look, so it still only shoots once it has finished turning onto the target, and
+            // deliberately without the aim error, which is the shot's business and not the turn's.
+            Vector3 aimDirection = Quaternion.Euler(_currentPitch - 90f, _currentYaw, 0f) * Vector3.forward;
 
-            return Vector3.Angle(aimDirection, flatToTarget.normalized) <= AimToleranceDegrees;
+            return Vector3.Angle(aimDirection, toTarget.normalized) <= AimToleranceDegrees;
         }
 
         private void TopUpAmmoIfNeeded()

@@ -264,8 +264,12 @@ namespace BanditPlugin
         /// metres is not, so it walks the remainder with its gun up and keeps firing on the way in.
         /// Measured along the path where one exists, not straight-line. 0 disables sprinting to
         /// cover entirely. Also gated by AllowSprint, and by vanilla's own stamina rules.
+        ///
+        /// Low, because the alternative to running is usually worse than losing a few shots: a
+        /// bandit ordered prone stands up to move at all (see BanditBrain.ApplyProneOrder), and
+        /// walking those metres upright in the open is how it dies on the way to cover.
         /// </summary>
-        public float SprintToCoverMinPathDistance = 10f;
+        public float SprintToCoverMinPathDistance = 5f;
 
         /// <summary>How long the bot stays hidden between peeks.</summary>
         public float CoverHideSeconds = 2.5f;
@@ -334,7 +338,7 @@ namespace BanditPlugin
             CoverDebugMaxMarkers = 48;
             CoverDebugSeconds = 20f;
             CoverMinimumThreatDistance = 3f;
-            SprintToCoverMinPathDistance = 10f;
+            SprintToCoverMinPathDistance = 5f;
             CoverHideSeconds = 2.5f;
             CoverPeekSeconds = 2f;
 

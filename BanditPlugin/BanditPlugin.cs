@@ -15,7 +15,8 @@ namespace BanditPlugin
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
             Logger.Log("[Bandit] Loaded. /bandit spawns one - it just stands until ordered. "
                 + "/bandit shoot|cover|peek start|stop are the standing orders; /banditgoto sends one somewhere, "
-                + "/banditpatrol sets it walking a route, /banditstatus reports what each is doing.");
+                + "/banditpatrol sets it walking a route, /banditprone lies one down, "
+                + "/banditstatus reports what each is doing.");
         }
 
         protected override void Unload()
