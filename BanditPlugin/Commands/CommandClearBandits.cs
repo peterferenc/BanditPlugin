@@ -22,6 +22,11 @@ namespace BanditPlugin.Commands
         {
             int removed = FakePlayer.FakePlayerSpawner.RemoveAllBots();
 
+            // The bots are kicked above, so every squad is now empty - dropping them here rather
+            // than waiting for the next prune keeps a cleared field from leaving squad objects
+            // holding references to players that no longer exist.
+            FakePlayer.BanditSquad.ClearAll();
+
             if (caller is Rocket.Unturned.Player.UnturnedPlayer)
             {
                 UnturnedChat.Say(caller, removed > 0 ? $"Removed {removed} bandit(s)." : "No bandits to remove.", Color.green);

@@ -59,17 +59,20 @@ namespace BanditPlugin.Commands
                     : "unknown";
 
                 string kit = bandit.Profile != null ? bandit.Profile.KitName : "default";
+                string squad = bandit.Squad != null ? $" sq{bandit.Squad.Id}" : string.Empty;
 
                 Reply(caller,
-                    $"#{i + 1} [{kit}]: {brain.State}, target {target}, dest {destination}, " +
-                    $"holding {bandit.EquippedWeaponName}{(bandit.IsBursting ? " (bursting)" : string.Empty)}, " +
+                    $"#{i + 1} [{kit}{squad}]: {brain.State}, target {target}, dest {destination}, " +
+                    $"holding {bandit.EquippedWeaponName}{(bandit.IsBursting ? " (bursting)" : string.Empty)}" +
+                    $"{(bandit.IsSuppressingFire ? " (suppressing)" : string.Empty)}, " +
                     $"stance {stance}, " +
                     $"moving {(brain.MoveDirection.sqrMagnitude > 0.0001f ? "yes" : "no")}, " +
                     $"orders [{(bandit.HoldFire ? "hold fire" : "weapons free")}, " +
                     $"cover {(brain.CoverEnabled ? "on" : "off")}, " +
                     $"peek {(brain.PeekEnabled ? "on" : "off")}, " +
-                    $"prone {(brain.ProneEnabled ? "on" : "off")}]" +
-                    $"{(brain.PatrolEnabled ? ", patrolling" : string.Empty)}",
+                    $"stance {brain.StanceOrder}]" +
+                    $"{(brain.PatrolEnabled ? ", patrolling" : string.Empty)}" +
+                    $", fire: {bandit.DescribeFireBlock()}",
                     Color.white);
             }
         }

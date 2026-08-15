@@ -38,6 +38,22 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public BanditProfile Profile { get; set; }
 
+        /// <summary>
+        /// The squad this bandit belongs to, or null for one spawned on its own. Set by
+        /// BanditSquad.Add. A lone bandit behaves exactly as it did before squads existed - every
+        /// squad-aware branch in here and in the brain is written to fall through when this is null.
+        /// </summary>
+        public BanditSquad Squad { get; set; }
+
+        /// <summary>This bandit's class, for the squad's contact reports and /banditstatus.</summary>
+        public string KitName => Profile != null ? Profile.KitName : "default";
+
+        /// <summary>
+        /// Every live bandit, so one about to fire can check whether another is in the way without
+        /// walking Provider.clients or allocating a list on the way to every trigger pull.
+        /// </summary>
+        private static readonly List<BanditBotController> Live = new List<BanditBotController>();
+
         /// <summary>Decides where the bot wants to walk. Created in Start, once Self is set.</summary>
         public BanditBrain Brain { get; private set; }
 
@@ -81,6 +97,9 @@ namespace BanditPlugin.FakePlayer
         public float AimToleranceDegrees = 10f;
         public float FireRange = 50f;
         public float TargetAcquireRange = 140f;
+        public bool SuppressiveFire;
+        public float SuppressionSeconds = 6f;
+        public float FriendlyFireClearanceRadius = 0.9f;
         public bool InfiniteAmmo = true;
         public bool HasPrimaryWeapon = true;
         public bool HasSecondaryWeapon;
@@ -97,6 +116,8 @@ namespace BanditPlugin.FakePlayer
         public float AimTargetRadius = 0.35f;
         public float AimTargetHalfHeight = 0.8f;
         public float AimMaxErrorDegrees = 8f;
+        public float CrouchedAimErrorMultiplier = 0.8f;
+        public float ProneAimErrorMultiplier = 0.65f;
         public float AimWobbleIntervalSeconds = 0.35f;
         public float AimWobbleSmoothingSeconds = 0.15f;
         public bool RequireLineOfSight = true;
@@ -130,6 +151,27 @@ namespace BanditPlugin.FakePlayer
         // ends flush against a surface doesn't report that surface as cover. Same 0.025 vanilla
         // InteractableSentry.ScanForTargets uses.
         private const float LineOfSightSkinWidth = 0.025f;
+
+        // What counts as blocking the shot. Vanilla's sentry masks are the starting point, plus the
+        // SMALL layer on both rays.
+        //
+        // That addition is not cosmetic. A bullet is raycast against DAMAGE_CLIENT, which includes
+        // SMALL - bushes, low fences, debris, clutter - while BLOCK_SENTRY and DAMAGE_SERVER both
+        // leave it out. Testing visibility without it meant the bot looked down a line the ray
+        // treated as clear, fired, and had the round stop dead on a bush: the hit report came back
+        // against a non-player and nothing took damage. It fires, and nothing happens.
+        //
+        // It shows up mostly when the gun is low. A standing bandit's eye at 1.75m is above most
+        // clutter; a prone one's at 0.35m is inside it, which is why lying down looked like it
+        // broke shooting outright. The two masks now agree, so "I can see you" means "my round can
+        // reach you", and where it cannot the bandit holds fire or moves instead of feeding rounds
+        // into a shrub.
+        //
+        // ENEMY and ENTITY are still in the bullet's mask and not in these: those are zombies and
+        // world entities, which do eat a round, but they move off on their own and are not worth
+        // making a bandit stand down for.
+        private static readonly int LineOfSightForwardMask = RayMasks.BLOCK_SENTRY | RayMasks.SMALL;
+        private static readonly int LineOfSightReturnMask = RayMasks.DAMAGE_SERVER | RayMasks.SMALL;
 
         // The bot swaps to its sidearm at SecondaryWeaponRange and back to the rifle this much
         // further out, so a target loitering on the boundary doesn't make it swap every time it
@@ -211,6 +253,21 @@ namespace BanditPlugin.FakePlayer
             Playing
         }
 
+        // Where this bandit keeps firing once it can no longer see anyone, and when that place was
+        // last actually seen by somebody. See UpdateSuppression().
+        private Vector3 _suppressionPoint;
+        private float _lastSightingTime = float.MinValue;
+        private bool _hasSuppressionPoint;
+
+        // Measured from the last live sighting rather than from a deadline set when contact broke,
+        // so the window cannot be restarted by a stale memory - it runs down once, and only a
+        // fresh pair of eyes on the enemy resets it.
+        private bool IsSuppressing =>
+            SuppressiveFire && _hasSuppressionPoint && Time.time - _lastSightingTime < SuppressionSeconds;
+
+        /// <summary>True while firing at a place rather than a person, for /banditstatus.</summary>
+        public bool IsSuppressingFire => IsSuppressing && _aimIntent == AimIntent.Suppression;
+
         private GesturePhase _gesturePhase;
         private EPlayerGesture _pendingGesture;
         private Player _gestureLookAt;
@@ -246,6 +303,13 @@ namespace BanditPlugin.FakePlayer
             }
 
             Brain = new BanditBrain(this, Self);
+            Live.Add(this);
+        }
+
+        private void OnDestroy()
+        {
+            Live.Remove(this);
+            Squad?.ReleaseCover(this);
         }
 
         /// <summary>
@@ -281,7 +345,21 @@ namespace BanditPlugin.FakePlayer
             {
                 _nextScanTime = Time.time + ScanIntervalSeconds;
                 _target = FindNearestRealPlayer();
+
+                // Everything this bandit can see goes to the squad, every scan. This is the only
+                // place contact enters the shared picture, and it is why a bandit behind a wall
+                // reacts at all.
+                if (_target != null)
+                {
+                    // The target's real eye, not the chest this bandit aims at. The squad uses
+                    // this as the threat's viewpoint for cover searches, and a viewpoint reported
+                    // half a metre too low sees less over a wall than the shooter really does -
+                    // which would hand out cover that is not cover.
+                    Squad?.ReportContact(this, _target, EyeOf(_target));
+                }
             }
+
+            UpdateSuppression();
 
             // Feed packets at the same rate a real client sends them. PlayerInput self-regulates if
             // we run slightly fast, but there's no reason to let the queue grow.
@@ -302,12 +380,102 @@ namespace BanditPlugin.FakePlayer
             // is walking - and because the analog byte built below is relative to that facing.
             Brain?.Tick(elapsed, _target);
 
+            ResolveAimPoint();
+            RecordShotOpportunity();
             AimAtTarget(elapsed);
             UpdateAimWobble(elapsed);
             // Order matters: DecideAttackInput() consumes the trigger state for this packet.
             EAttackInputFlags secondary = DecideAimInput();
             EAttackInputFlags primary = DecideAttackInput();
             EnqueueInputPacket(primary, secondary);
+        }
+
+        /// <summary>
+        /// When this bandit last had somewhere to put a round: something to aim at, in range, with
+        /// a clear line to it.
+        ///
+        /// Deliberately not "when it last fired" - a bandit between bursts, or one that has been
+        /// told to hold fire, has a shot and simply is not taking it, and treating that as a dry
+        /// spell would send it wandering off looking for an angle it already has. This measures
+        /// opportunity, which is what the brain wants to know before deciding its position is
+        /// useless.
+        /// </summary>
+        public float LastShotOpportunityTime { get; private set; } = float.MinValue;
+
+        private void RecordShotOpportunity()
+        {
+            if (_aimIntent != AimIntent.Target && _aimIntent != AimIntent.Suppression)
+            {
+                return;
+            }
+
+            if (!IsTargetInRange())
+            {
+                return;
+            }
+
+            // A squadmate in the way counts as having no shot, and has to. This is a standing
+            // condition, not a passing one: a rifleman that takes cover directly in front of a
+            // prone machinegunner sits there for the rest of the fight, and treating that as "the
+            // gunner has a shot, it is simply choosing not to take it" would leave it lying behind
+            // its own squad in silence forever. Counted as a dry spell instead, so the brain moves
+            // it somewhere it can shoot from.
+            if (IsFriendlyInLineOfFire())
+            {
+                return;
+            }
+
+            bool visible = HasLineOfSightToPoint(_aimPoint);
+
+            if (visible)
+            {
+                LastShotOpportunityTime = Time.time;
+            }
+        }
+
+        /// <summary>
+        /// Keeps a machinegunner firing at a place after it has stopped being able to see a person.
+        ///
+        /// Two windows feed this, and the difference between them is the whole behaviour. While
+        /// anyone in the squad still has eyes on the contact, the point is refreshed every tick and
+        /// the deadline keeps being pushed out - so the gunner hoses a position a rifleman fifteen
+        /// metres away is looking at, from behind something it cannot see past itself. Once nobody
+        /// can see them any more, the last reported position is fired at for SuppressionSeconds and
+        /// then dropped.
+        ///
+        /// A visible target always wins: there is no point suppressing a place when there is a
+        /// person to shoot at, and reacquiring cancels the suppression outright rather than letting
+        /// it run down.
+        /// </summary>
+        private void UpdateSuppression()
+        {
+            if (!SuppressiveFire)
+            {
+                return;
+            }
+
+            // Anything this bandit can see itself is the best possible report, and recording it
+            // here is what starts the clock the moment it loses sight of them.
+            if (_target != null && _target.life != null && !_target.life.isDead)
+            {
+                _suppressionPoint = AimPointOf(_target);
+                _lastSightingTime = Time.time;
+                _hasSuppressionPoint = true;
+                return;
+            }
+
+            // Otherwise take a squadmate's word for it, but only while one of them can genuinely
+            // see the contact rather than merely remember it. That distinction is the behaviour:
+            // refreshed on a live sighting the gunner keeps firing indefinitely at a position
+            // somebody else is watching, and the moment the last pair of eyes loses them the
+            // window below starts running down.
+            BanditSquad squad = Squad;
+            if (squad != null && squad.AnyoneSeesContact)
+            {
+                _suppressionPoint = squad.ContactAimPoint;
+                _lastSightingTime = Time.time;
+                _hasSuppressionPoint = true;
+            }
         }
 
         /// <summary>
@@ -450,15 +618,64 @@ namespace BanditPlugin.FakePlayer
             Self.equipment.ServerEquip(DequipPage, 0, 0);
         }
 
-        private void AimAtTarget(float elapsed)
+        /// <summary>What the bot is currently pointing its gun at, and why.</summary>
+        private enum AimIntent
+        {
+            /// <summary>Nothing to aim at; the body turns to follow the feet.</summary>
+            None,
+
+            /// <summary>Turned to face whoever is being waved at.</summary>
+            Gesture,
+
+            /// <summary>A player this bandit can see, and may shoot at.</summary>
+            Target,
+
+            /// <summary>A position, not a person - see <see cref="UpdateSuppression"/>.</summary>
+            Suppression
+        }
+
+        private AimIntent _aimIntent;
+        private Vector3 _aimPoint;
+
+        /// <summary>
+        /// Works out what to point at this tick, in priority order, and leaves it in
+        /// <see cref="_aimPoint"/> for the firing decisions further down to share.
+        ///
+        /// One point for everything is what keeps the aim, the "am I on target" test, the
+        /// line-of-sight check and the hit raycast all talking about the same place. Suppression
+        /// only exists because that point does not have to be a player.
+        /// </summary>
+        private void ResolveAimPoint()
         {
             // A gesture aimed at somebody outranks the combat target: the whole point of /banditwave
             // is that the bandit turns and waves at *you*, even if someone else is closer.
-            Player lookAt = IsGesturing && _gestureLookAt != null && _gestureLookAt.life != null && !_gestureLookAt.life.isDead
-                ? _gestureLookAt
-                : _target;
+            if (IsGesturing && _gestureLookAt != null && _gestureLookAt.life != null && !_gestureLookAt.life.isDead)
+            {
+                _aimIntent = AimIntent.Gesture;
+                _aimPoint = AimPointOf(_gestureLookAt);
+                return;
+            }
 
-            if (lookAt == null)
+            if (_target != null && _target.life != null && !_target.life.isDead)
+            {
+                _aimIntent = AimIntent.Target;
+                _aimPoint = AimPointOf(_target);
+                return;
+            }
+
+            if (IsSuppressing)
+            {
+                _aimIntent = AimIntent.Suppression;
+                _aimPoint = _suppressionPoint;
+                return;
+            }
+
+            _aimIntent = AimIntent.None;
+        }
+
+        private void AimAtTarget(float elapsed)
+        {
+            if (_aimIntent == AimIntent.None)
             {
                 TurnTowardsTravelDirection(elapsed);
                 return;
@@ -471,7 +688,7 @@ namespace BanditPlugin.FakePlayer
             // from that transform - so a bot solving its pitch as if its eye were 1.15m higher than
             // it is fires into the ground in front of itself.
             Vector3 eye = EyePosition;
-            Vector3 toTarget = AimPointOf(lookAt) - eye;
+            Vector3 toTarget = _aimPoint - eye;
             if (toTarget.sqrMagnitude < 0.0001f)
             {
                 return;
@@ -484,7 +701,39 @@ namespace BanditPlugin.FakePlayer
             float desiredPitch = Mathf.Clamp(90f - (Mathf.Asin(Mathf.Clamp(direction.y, -1f, 1f)) * Mathf.Rad2Deg), 0f, 180f);
 
             _currentYaw = Mathf.MoveTowardsAngle(_currentYaw, desiredYaw, TurnSpeedDegreesPerSecond * elapsed);
-            _currentPitch = Mathf.MoveTowards(_currentPitch, desiredPitch, TurnSpeedDegreesPerSecond * elapsed);
+            _currentPitch = Mathf.MoveTowards(_currentPitch, ClampPitchToStance(desiredPitch), TurnSpeedDegreesPerSecond * elapsed);
+        }
+
+        /// <summary>
+        /// Holds a wanted pitch to what the bot's current stance actually allows.
+        ///
+        /// PlayerLook.clampPitch does this to every player and the limits are tight lying down -
+        /// prone is held to 60-120, a mere 30 degrees either side of level, against a standing
+        /// player's full 0-180. Without matching it here the bot would believe it had aimed
+        /// somewhere vanilla will not let it point: IsAimedAtTarget would pass, and the hit raycast
+        /// - which is the thing that actually does the damage - would be fired down a line the gun
+        /// is not on, landing hits the replicated aim visibly contradicts.
+        ///
+        /// Matching it instead means a prone bandit simply cannot engage something steeply above or
+        /// below it, and holds fire rather than cheating, which is what a player in that stance
+        /// would have to do too.
+        /// </summary>
+        private float ClampPitchToStance(float pitch)
+        {
+            if (Self == null || Self.stance == null)
+            {
+                return pitch;
+            }
+
+            switch (Self.stance.stance)
+            {
+                case EPlayerStance.PRONE:
+                    return Mathf.Clamp(pitch, 60f, 120f);
+                case EPlayerStance.CROUCH:
+                    return Mathf.Clamp(pitch, 20f, 160f);
+                default:
+                    return pitch;
+            }
         }
 
         /// <summary>
@@ -602,7 +851,7 @@ namespace BanditPlugin.FakePlayer
         {
             // Nothing to wobble around while gesturing: the aim is pointed at whoever is being
             // waved at, not at a target being shot, and shooting error has no business moving it.
-            if (_target == null || IsGesturing)
+            if (_aimIntent != AimIntent.Target && _aimIntent != AimIntent.Suppression)
             {
                 _aimErrorYaw = _aimErrorYawTarget = 0f;
                 _aimErrorPitch = _aimErrorPitchTarget = 0f;
@@ -650,19 +899,47 @@ namespace BanditPlugin.FakePlayer
             pitchError = 0f;
 
             float hitChance = Mathf.Clamp(ActiveAimHitChance, 0f, 0.999f);
-            if (hitChance >= 0.999f || AimTargetRadius <= 0f || _target == null)
+            if (hitChance >= 0.999f || AimTargetRadius <= 0f || _aimIntent == AimIntent.None)
             {
                 return; // configured back into a perfect aimbot
             }
 
-            float scale = 1f / Mathf.Sqrt(-2f * Mathf.Log(1f - hitChance));
+            float scale = StanceAimErrorMultiplier / Mathf.Sqrt(-2f * Mathf.Log(1f - hitChance));
 
             // Clamped because at arm's length the angle subtended by a torso-width miss explodes;
             // AimMaxErrorDegrees catches the same case from the other side.
-            float distance = Mathf.Max((TargetAimPoint - EyePosition).magnitude, 1f);
+            float distance = Mathf.Max((_aimPoint - EyePosition).magnitude, 1f);
 
             yawError = ErrorDegrees(NextGaussian() * AimTargetRadius * scale * errorScale, distance);
             pitchError = ErrorDegrees(NextGaussian() * AimTargetHalfHeight * scale * errorScale, distance);
+        }
+
+        /// <summary>
+        /// How much of its aim error this bandit keeps in the stance it is actually in.
+        ///
+        /// Read from the live vanilla stance rather than from what the brain asked for, so a
+        /// bandit that has been refused a crouch - no headroom, shallow water - does not get to
+        /// shoot as though it were braced.
+        /// </summary>
+        private float StanceAimErrorMultiplier
+        {
+            get
+            {
+                if (Self == null || Self.stance == null)
+                {
+                    return 1f;
+                }
+
+                switch (Self.stance.stance)
+                {
+                    case EPlayerStance.PRONE:
+                        return Mathf.Max(0f, ProneAimErrorMultiplier);
+                    case EPlayerStance.CROUCH:
+                        return Mathf.Max(0f, CrouchedAimErrorMultiplier);
+                    default:
+                        return 1f;
+                }
+            }
         }
 
         private float ErrorDegrees(float offsetMetres, float distance)
@@ -820,6 +1097,12 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
+            // Nothing to shoot at, or aimed at somebody being waved at rather than shot at.
+            if (_aimIntent != AimIntent.Target && _aimIntent != AimIntent.Suppression)
+            {
+                return false;
+            }
+
             // Must come before anything else that can pull the trigger. PlayerEquipment.simulate
             // routes primary attacks to simulate_PunchInput whenever there is no valid useable, so
             // firing during the equip animation makes the bot throw punches instead of shooting.
@@ -834,9 +1117,179 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
+            // A squadmate standing in the line. Bandits never target each other, but bullets are
+            // raycast and hit whatever is in the way, so without this a prone machinegunner puts
+            // its belt through the backs of the riflemen in front of it. Checked before the
+            // line-of-sight rays because it costs no raycasts at all.
+            if (IsFriendlyInLineOfFire())
+            {
+                return false;
+            }
+
             // Re-checked here and not just at scan time: the target can step behind cover in the
             // half second between scans, and this is the last moment before the round goes out.
-            return HasLineOfSight(_target);
+            // Tested along the line the round will actually travel - to the aim point - and not
+            // to the target's eyes.
+            //
+            // Those are not the same line, and the gap between them scales with how low the
+            // shooter is. A standing bandit's eye and the chest it aims at are close enough to
+            // parallel that the distinction never showed. Crouched, the ray to a standing target's
+            // head climbs over a low wall while the round flies flat into it; prone it climbs
+            // steeply over everything while the round eats dirt. The bot saw a clear shot, fired,
+            // and hit the obstacle every single time - which is why crouch and prone landed
+            // nothing at all while standing hit at its configured rate.
+            //
+            // It also covers suppression for free, which was already aiming at a place.
+            return HasLineOfSightToPoint(_aimPoint);
+        }
+
+        /// <summary>
+        /// Whether another bandit is close enough to this bandit's line of fire to be hit by it.
+        ///
+        /// Geometric rather than a raycast, because it runs on every trigger pull: each candidate
+        /// is projected onto the firing line and rejected if it sits within
+        /// FriendlyFireClearanceRadius of it, in front of the muzzle and nearer than whatever is
+        /// being shot at. Squadmates behind the shooter or beyond the target cannot be hit by the
+        /// round and are ignored.
+        /// </summary>
+        private bool IsFriendlyInLineOfFire()
+        {
+            if (FriendlyFireClearanceRadius <= 0f)
+            {
+                return false;
+            }
+
+            Vector3 origin = EyePosition;
+            Vector3 toAim = _aimPoint - origin;
+            float aimDistance = toAim.magnitude;
+            if (aimDistance < 0.01f)
+            {
+                return false;
+            }
+
+            Vector3 direction = toAim / aimDistance;
+            float clearanceSq = FriendlyFireClearanceRadius * FriendlyFireClearanceRadius;
+
+            for (int i = 0; i < Live.Count; i++)
+            {
+                BanditBotController other = Live[i];
+                if (other == null || other == this || other.Self == null
+                    || other.Self.life == null || other.Self.life.isDead)
+                {
+                    continue;
+                }
+
+                // Their chest, taken from their own stance rather than assumed to be standing.
+                // That distinction is the whole point here: the case this check exists for is a
+                // prone machinegunner behind riflemen who are crouched in cover, and treating
+                // those riflemen as 1.8m tall would block the gunner from firing all fight.
+                Vector3 centre = AimPointOf(other.Self) - origin;
+
+                float along = Vector3.Dot(centre, direction);
+                if (along <= 0.5f || along >= aimDistance)
+                {
+                    continue; // behind the muzzle, or further away than what is being shot at
+                }
+
+                if ((centre - direction * along).sqrMagnitude < clearanceSq)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Why this bandit is not shooting, in the same order the trigger logic asks the questions.
+        ///
+        /// A bandit that holds its fire is completely silent about it - nothing is logged, because
+        /// nothing went wrong, and every cause looks identical from the outside: it just lies there.
+        /// This runs the same gates CanShootThisPacket() does and names the first one that fails,
+        /// which is the difference between "the machinegun is broken" and "the machinegun is prone
+        /// behind a rise and cannot see you".
+        ///
+        /// Read-only - it must not consume the trigger state or draw an aim sample.
+        /// </summary>
+        public string DescribeFireBlock()
+        {
+            if (Self == null || Self.life == null || Self.life.isDead)
+            {
+                return "dead";
+            }
+
+            if (HoldFire)
+            {
+                return "holding fire";
+            }
+
+            if (WeaponDown)
+            {
+                return "weapon down (sprinting)";
+            }
+
+            if (IsGesturing)
+            {
+                return "gesturing";
+            }
+
+            if (_aimIntent == AimIntent.None)
+            {
+                return "nothing to shoot at";
+            }
+
+            if (_aimIntent == AimIntent.Gesture)
+            {
+                return "facing a gesture target";
+            }
+
+            if (!IsGunReady())
+            {
+                return "gun not ready";
+            }
+
+            float range = (_aimPoint - EyePosition).magnitude;
+            if (range > FireRange)
+            {
+                return $"out of range ({range:0}m > {FireRange:0}m)";
+            }
+
+            if (!IsAimedAtTarget())
+            {
+                Vector3 aimDirection = Quaternion.Euler(_currentPitch - 90f, _currentYaw, 0f) * Vector3.forward;
+                float off = Vector3.Angle(aimDirection, (_aimPoint - EyePosition).normalized);
+
+                // Worth calling out separately: prone is held to 60-120 degrees of pitch, so a
+                // gunner lying down simply cannot point at something steep, and "not aimed" alone
+                // would look like it was merely slow to turn.
+                string stanceNote = Self.stance != null && Self.stance.stance == EPlayerStance.PRONE
+                    && (_currentPitch <= 60.01f || _currentPitch >= 119.99f)
+                    ? " - prone pitch limit reached"
+                    : string.Empty;
+
+                return $"not aimed (off by {off:0.#}deg){stanceNote}";
+            }
+
+            if (IsFriendlyInLineOfFire())
+            {
+                return "squadmate in the line of fire";
+            }
+
+            bool visible = HasLineOfSightToPoint(_aimPoint);
+            if (!visible)
+            {
+                string stanceNote = Self.stance != null && Self.stance.stance == EPlayerStance.PRONE
+                    ? " (prone - eyes at 0.35m)"
+                    : string.Empty;
+                return $"no line of sight{stanceNote}";
+            }
+
+            if (Time.time < _nextFireTime && _burstTarget <= 0)
+            {
+                return "between shots";
+            }
+
+            return "clear to fire";
         }
 
         private int DrawBurstSize()
@@ -973,7 +1426,8 @@ namespace BanditPlugin.FakePlayer
         private EAttackInputFlags DecideAimInput()
         {
             bool wantsToAim = !HoldFire && !WeaponDown && !IsGesturing && IsGunReady()
-                && _target != null && !_target.life.isDead && IsTargetInRange();
+                && (_aimIntent == AimIntent.Target || _aimIntent == AimIntent.Suppression)
+                && IsTargetInRange();
 
             if (wantsToAim && !_aimingActive)
             {
@@ -1025,12 +1479,18 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private static Vector3 AimPointOf(Player player)
         {
-            Vector3 feet = player.transform.position;
-            Vector3 eye = player.look != null && player.look.aim != null
-                ? player.look.aim.position
-                : feet + Vector3.up * 1.75f;
+            return Vector3.Lerp(player.transform.position, EyeOf(player), ChestHeightFraction);
+        }
 
-            return Vector3.Lerp(feet, eye, ChestHeightFraction);
+        /// <summary>
+        /// A player's own aim transform - their eye, and where their shots come from. Follows their
+        /// stance, so this is 1.75m standing and 0.35m prone.
+        /// </summary>
+        private static Vector3 EyeOf(Player player)
+        {
+            return player.look != null && player.look.aim != null
+                ? player.look.aim.position
+                : player.transform.position + Vector3.up * 1.75f;
         }
 
         /// <summary>
@@ -1060,11 +1520,52 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            Vector3 origin = EyePosition;
-            Vector3 aimPoint = candidate.look != null && candidate.look.aim != null
+            return HasLineOfSightToPoint(candidate.look != null && candidate.look.aim != null
                 ? candidate.look.aim.position
-                : candidate.transform.position + Vector3.up * 1.5f;
+                : candidate.transform.position + Vector3.up * 1.5f);
+        }
 
+        /// <summary>
+        /// Height PlayerLook puts the aim transform at when prone (HEIGHT_LOOK_PRONE), which is
+        /// where a prone bandit's eyes and its bullets both are.
+        /// </summary>
+        public const float ProneEyeHeight = 0.35f;
+
+        /// <summary>The same, crouched (HEIGHT_LOOK_CROUCH).</summary>
+        public const float CrouchEyeHeight = 1.2f;
+
+        /// <summary>
+        /// Whether this bandit would still be able to see a point from a given eye height, i.e.
+        /// after dropping into a lower stance.
+        ///
+        /// Prone drops the aim transform from 1.75m to 0.35m, and that is where both the
+        /// line-of-sight test and the bullet come from - so a gunner that goes flat on level ground
+        /// is looking through every rise, kerb and tuft between it and the target. It ends up lying
+        /// there holding its fire, which reads exactly like a machinegunner that cannot shoot.
+        ///
+        /// Rather than let it blind itself, the stance is tested before it is taken.
+        /// </summary>
+        public bool WouldKeepLineOfSightFromHeight(float eyeHeight, Vector3 point)
+        {
+            if (!RequireLineOfSight)
+            {
+                return true;
+            }
+
+            return HasLineOfSightFrom(transform.position + Vector3.up * eyeHeight, point);
+        }
+
+        /// <summary>
+        /// The same visibility test against a bare position, for suppressive fire - which is aimed
+        /// at a place that may well have nobody standing in it.
+        /// </summary>
+        private bool HasLineOfSightToPoint(Vector3 aimPoint)
+        {
+            return !RequireLineOfSight || HasLineOfSightFrom(EyePosition, aimPoint);
+        }
+
+        private bool HasLineOfSightFrom(Vector3 origin, Vector3 aimPoint)
+        {
             Vector3 toTarget = aimPoint - origin;
             float distance = toTarget.magnitude;
             if (distance <= LineOfSightSkinWidth)
@@ -1076,13 +1577,13 @@ namespace BanditPlugin.FakePlayer
             float rayLength = distance - LineOfSightSkinWidth;
 
             RaycastHit hit;
-            if (Physics.Raycast(new Ray(origin, direction), out hit, rayLength, RayMasks.BLOCK_SENTRY)
+            if (Physics.Raycast(new Ray(origin, direction), out hit, rayLength, LineOfSightForwardMask)
                 && hit.transform != null && hit.transform != transform)
             {
                 return false;
             }
 
-            if (Physics.Raycast(new Ray(origin + direction * rayLength, -direction), out hit, rayLength, RayMasks.DAMAGE_SERVER)
+            if (Physics.Raycast(new Ray(origin + direction * rayLength, -direction), out hit, rayLength, LineOfSightReturnMask)
                 && hit.transform != null && hit.transform != transform)
             {
                 return false;
@@ -1093,12 +1594,12 @@ namespace BanditPlugin.FakePlayer
 
         private bool IsTargetInRange()
         {
-            if (_target == null)
+            if (_aimIntent == AimIntent.None)
             {
                 return false;
             }
 
-            return (TargetAimPoint - EyePosition).magnitude <= FireRange;
+            return (_aimPoint - EyePosition).magnitude <= FireRange;
         }
 
         /// <summary>
@@ -1122,12 +1623,12 @@ namespace BanditPlugin.FakePlayer
 
         private bool IsAimedAtTarget()
         {
-            if (_target == null || _target.life.isDead || Self.life.isDead)
+            if (Self.life.isDead || _aimIntent == AimIntent.None)
             {
                 return false;
             }
 
-            Vector3 toTarget = TargetAimPoint - EyePosition;
+            Vector3 toTarget = _aimPoint - EyePosition;
             if (toTarget.magnitude > FireRange || toTarget.sqrMagnitude < 0.0001f)
             {
                 return false;
@@ -1447,7 +1948,10 @@ namespace BanditPlugin.FakePlayer
                 // Last, because it is the only test here that costs raycasts: a player the bot
                 // cannot see is not a target, so it locks onto the nearest *visible* player rather
                 // than tracking the nearest one through a wall and waiting for them to step out.
-                if (!HasLineOfSight(candidate))
+                // To the point it would aim at, for the same reason the firing check is: a
+                // target whose head is visible over a wall its chest is behind is one this bandit
+                // cannot hit, and locking onto it only stops it looking for one it can.
+                if (!HasLineOfSightToPoint(AimPointOf(candidate)))
                 {
                     continue;
                 }

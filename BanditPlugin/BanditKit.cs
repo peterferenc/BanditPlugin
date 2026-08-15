@@ -3,6 +3,21 @@ using System.Collections.Generic;
 namespace BanditPlugin
 {
     /// <summary>
+    /// A stance, either as something a class adopts on contact or as an order given in the field.
+    ///
+    /// <see cref="Free"/> is the important one: it means "nobody has an opinion, work it out for
+    /// yourself" - so a kit set to Free lets cover decide, and an *order* of Free hands the choice
+    /// back to the class after you have overridden it.
+    /// </summary>
+    public enum BanditStance
+    {
+        Free,
+        Stand,
+        Crouch,
+        Prone
+    }
+
+    /// <summary>
     /// One class of bandit: what it carries, and how it fights with it.
     ///
     /// A kit is picked by name - "/bandit mg" - and everything a bandit needs is resolved from it
@@ -92,6 +107,35 @@ namespace BanditPlugin
         public bool AdvanceOnTarget;
 
         /// <summary>
+        /// The stance this class drops into when the squad makes contact, and comes out of when it
+        /// is over. This is the machinegunner's posture: it does not go looking for cover, it gets
+        /// low where it stands and puts rounds down. It still stands up to move anywhere, so
+        /// repositioning is never a crawl.
+        ///
+        /// Crouch is the useful setting and Prone is the extreme one. Lying down puts the eye at
+        /// 0.35m, and that is where both the line-of-sight test and the bullet start - so on any
+        /// ground that is not billiard-flat a prone gunner spends the fight looking into a rise it
+        /// cannot shoot over. Crouching sits at 1.2m, which clears low cover and clutter while
+        /// still being a markedly smaller target than standing.
+        ///
+        /// Whatever is set here is only what the class does when nobody has told it otherwise:
+        /// "/bandit stance ..." overrides it outright, and "/bandit stance free" hands it back.
+        /// </summary>
+        public BanditStance ContactStance = BanditStance.Free;
+
+        /// <summary>
+        /// Keep firing at where the enemy was last seen after losing sight of them, rather than
+        /// standing there waiting to see them again.
+        ///
+        /// Suppression is the reason a machinegun is worth having in a squad at all: it is aimed at
+        /// a place rather than a person, so it continues while the target is behind cover and it
+        /// works off the squad's shared contact - which means the gunner keeps firing at a position
+        /// somebody else can still see, from behind a wall it cannot. Off for the classes that
+        /// shoot at people, where hosing a bush the target has left is simply a waste.
+        /// </summary>
+        public bool SuppressiveFire;
+
+        /// <summary>
         /// The four classes a squad is built from, with the weapons picked out of this server's own
         /// Bundles folder. Used both as the field initializer on
         /// <see cref="BanditConfiguration.Kits"/> and by LoadDefaults, so a config file written
@@ -112,11 +156,14 @@ namespace BanditPlugin
                     PreferredEngagementRange = 45f,
                     BurstFire = true,
                     BurstIntervalSeconds = 1.4f,
-                    // Cover off on purpose: this class fights from the ground, and going prone is
-                    // driven by contact rather than set at spawn - which is squad work, still to
-                    // come. Until then /banditprone puts it down by hand.
+                    // Cover off on purpose: this class does not go looking for a rock, it gets low
+                    // where it stands and fires. The stance and the suppression are both driven by
+                    // contact rather than set at spawn, so it walks upright until there is
+                    // something to shoot at.
                     Cover = false,
                     Peek = false,
+                    ContactStance = BanditStance.Crouch,
+                    SuppressiveFire = true,
                     Loadout = MilitaryForest(new BanditWeapon
                     {
                         Item = "126",
@@ -161,10 +208,16 @@ namespace BanditPlugin
                     BurstFire = false,
                     Cover = true,
                     Peek = true,
+                    // The highest hit chance of the four by a wide margin. A marksman that misses is
+                    // just a slow rifleman - the class only reads as one at all because a shot from
+                    // it is expected to land. The aim model puts that accuracy on the chest rather
+                    // than the head: it draws the miss around AimPointOf(), which is centre of
+                    // mass, so raising this concentrates rounds on the torso instead of producing
+                    // headshots.
                     Loadout = MilitaryForest(new BanditWeapon
                     {
                         Item = "129",
-                        AimHitChance = 0.55f
+                        AimHitChance = 0.85f
                     })
                 },
 

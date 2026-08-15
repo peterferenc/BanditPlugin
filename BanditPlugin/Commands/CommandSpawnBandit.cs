@@ -15,6 +15,7 @@ namespace BanditPlugin.Commands
     ///   /bandit               spawn one of the default class in front of you
     ///   /bandit mg            spawn a specific class - see /bandit kits
     ///   /bandit kits          list the classes and the ranges each fights at
+    ///   /bandit stance prone  hold a stance - stand, crouch, prone, or free to choose again
     ///   /bandit cover start   look for cover and move to it, re-finding it as the threat moves
     ///   /bandit cover stop    stop where you are and stay there
     ///   /bandit peek start    once in cover, alternate hiding with stepping out to shoot
@@ -72,6 +73,23 @@ namespace BanditPlugin.Commands
                 return;
             }
 
+            // Handled before the start/stop parsing below, because this one takes a stance name as
+            // its second word rather than start or stop.
+            if (command[0].Equals("stance", System.StringComparison.OrdinalIgnoreCase))
+            {
+                if (command.Length < 2 || !TryParseStance(command[1], out BanditStance stance))
+                {
+                    Reply(caller, "Usage: /bandit stance stand|crouch|prone|free", Color.yellow);
+                    return;
+                }
+
+                ApplyToAll(caller, bandit => bandit.Brain.SetStanceOrder(stance),
+                    stance == BanditStance.Free
+                        ? "choosing their own stance again"
+                        : $"holding {command[1].ToLowerInvariant()}");
+                return;
+            }
+
             if (command.Length < 2 || !TryParseStartStop(command[1], out bool start))
             {
                 ReplyUsage(caller);
@@ -99,6 +117,35 @@ namespace BanditPlugin.Commands
                 default:
                     ReplyUsage(caller);
                     break;
+            }
+        }
+
+        /// <summary>
+        /// "free" is the way back to letting each class decide for itself - without it, ordering a
+        /// squad to stand would permanently disable the machinegunner's own prone-on-contact.
+        /// </summary>
+        private static bool TryParseStance(string argument, out BanditStance stance)
+        {
+            switch (argument.ToLowerInvariant())
+            {
+                case "stand":
+                case "standing":
+                    stance = BanditStance.Stand;
+                    return true;
+                case "crouch":
+                case "crouched":
+                    stance = BanditStance.Crouch;
+                    return true;
+                case "prone":
+                    stance = BanditStance.Prone;
+                    return true;
+                case "free":
+                case "auto":
+                    stance = BanditStance.Free;
+                    return true;
+                default:
+                    stance = BanditStance.Free;
+                    return false;
             }
         }
 
@@ -255,7 +302,8 @@ namespace BanditPlugin.Commands
 
         private static void ReplyUsage(IRocketPlayer caller)
         {
-            Reply(caller, "Usage: /bandit  |  /bandit <kit>  |  /bandit kits  |  /bandit cover start|stop  "
+            Reply(caller, "Usage: /bandit  |  /bandit <kit>  |  /bandit kits  |  "
+                + "/bandit stance stand|crouch|prone|free  |  /bandit cover start|stop  "
                 + "|  /bandit peek start|stop  |  /bandit shoot start|stop", Color.yellow);
         }
 

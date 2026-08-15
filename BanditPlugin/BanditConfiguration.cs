@@ -14,8 +14,17 @@ namespace BanditPlugin
         /// The classes a bandit can be spawned as: "/bandit mg", "/bandit marksman". Each carries
         /// its own loadout and its own combat figures, resolved once at spawn, so bandits of
         /// different classes fight differently under one configuration. See BanditKit.
+        ///
+        /// Starts EMPTY, and must. XmlSerializer does not replace a collection it finds already
+        /// populated - it calls Add for every element in the file on top of whatever the field
+        /// initializer built. Seeding the defaults here therefore appended the file's four kits to
+        /// the initializer's four, and because Rocket's XMLFileAsset.Load() saves immediately after
+        /// deserializing, the doubled list was written straight back out: four kits became eight,
+        /// then sixteen, once per server start. BanditPlugin.Load fills this in after the fact
+        /// instead, which is the only point at which "the file didn't have any" can be told apart
+        /// from "the file's are already loaded".
         /// </summary>
-        public List<BanditKit> Kits = BanditKit.BuildDefaults();
+        public List<BanditKit> Kits = new List<BanditKit>();
 
         /// <summary>
         /// Which kit a plain "/bandit" spawns. Blank falls back to <see cref="Loadout"/> and the
@@ -162,6 +171,28 @@ namespace BanditPlugin
         /// </summary>
         public float AimMaxErrorDegrees = 8f;
 
+        /// <summary>
+        /// How much of its aim error a bandit keeps while crouched, and while prone.
+        ///
+        /// Bracing. A bipod on the ground is steadier than a rifle held at the shoulder, and
+        /// without something like this getting low is all cost and no benefit - a smaller target
+        /// that shoots exactly as badly, which is no reason for a machinegunner to ever lie down.
+        ///
+        /// It multiplies the miss distance drawn in SampleAimError, so it tightens the group and
+        /// quietens the visible sway in the same stroke - the wobble between shots is drawn from
+        /// the same figure. 1 is no bracing bonus at all.
+        ///
+        /// The effect is not linear: a hit chance p becomes 1-(1-p)^(1/m^2), so at these defaults
+        /// the machinegunner's 0.22 standing becomes 0.32 crouched and 0.44 prone. Worth knowing
+        /// before raising them, and worth knowing that this applies to ANY bandit in the stance -
+        /// including a rifleman crouched in cover, whose 0.35 becomes 0.49. Deliberately modest for
+        /// that reason: a big bonus here quietly makes every squad far deadlier.
+        /// </summary>
+        public float CrouchedAimErrorMultiplier = 0.8f;
+
+        /// <summary>Prone is steadier still. See <see cref="CrouchedAimErrorMultiplier"/>.</summary>
+        public float ProneAimErrorMultiplier = 0.65f;
+
         /// <summary>How often a fresh aim error is drawn while the bot is holding aim between shots.</summary>
         public float AimWobbleIntervalSeconds = 0.35f;
 
@@ -303,6 +334,94 @@ namespace BanditPlugin
         /// <summary>How long the bot exposes itself to shoot before ducking back.</summary>
         public float CoverPeekSeconds = 2f;
 
+        /// <summary>
+        /// Which classes "/squadspawn" puts on the ground, in the order they are laid out from
+        /// left to right. Any kit name is valid, and repeats are how you get two riflemen.
+        ///
+        /// Empty for the same reason <see cref="Kits"/> is - a seeded list gets the file's entries
+        /// appended to it rather than replacing it, which is what turned a five-man squad into ten.
+        /// </summary>
+        public List<string> SquadComposition = new List<string>();
+
+        /// <summary>The squad a fresh configuration starts with. See <see cref="SquadComposition"/>.</summary>
+        public static List<string> DefaultSquadComposition()
+        {
+            return new List<string> { "rifleman", "rifleman", "mg", "marksman", "breacher" };
+        }
+
+        /// <summary>
+        /// Metres between squad members as they are placed. Also the depth of the wedge, so the
+        /// flanks sit back from the centre rather than the whole squad standing on one line.
+        /// </summary>
+        public float SquadSpacing = 5f;
+
+        /// <summary>
+        /// How far down your sightline "/squadspawn" puts the squad.
+        ///
+        /// Deliberately well past every kit's TargetAcquireRange, so a squad spawns unaware and you
+        /// get to walk in on it rather than arriving mid-firefight. Spawning one on top of yourself
+        /// skips the only part of the behaviour worth watching - the moment they notice.
+        /// </summary>
+        public float SquadSpawnDistance = 200f;
+
+        /// <summary>
+        /// Spawn a squad weapons free and already under its classes' standing orders, unlike a
+        /// lone "/bandit" which stands inert until told. A squad exists to be watched fighting, and
+        /// one that has to be switched on a command at a time is not a squad.
+        /// </summary>
+        public bool SquadWeaponsFree = true;
+
+        /// <summary>
+        /// How long a squad keeps acting on a sighting after the last member loses sight of it -
+        /// cover held, machinegun still firing at the spot, nobody standing up. Longer than one
+        /// bandit's own target memory on purpose: a squad that loses eyes on someone for a moment
+        /// has not stopped being in contact with them.
+        /// </summary>
+        public float SquadContactMemorySeconds = 12f;
+
+        /// <summary>
+        /// Closest two squad members will deliberately take cover to each other.
+        ///
+        /// Without a separation the squad piles onto one spot, and not by chance: the cover finder
+        /// is deterministic and scores candidates from the searcher's position and the threat
+        /// alone, so bandits standing together facing the same way all pick the same coordinate.
+        /// Worth keeping at least a couple of metres wide - close enough that they are still one
+        /// squad behind one wall, far enough that one grenade is not all of them.
+        /// </summary>
+        public float SquadCoverSeparation = 4f;
+
+        /// <summary>
+        /// How long a squad member sits in contact without a shot before it stops waiting and does
+        /// something about it: giving up its cover and searching again against where the enemy is
+        /// now, and failing that, moving toward them until an angle opens up.
+        ///
+        /// This is what stops a squad going inert. Cover is chosen against the threat as it was at
+        /// the time, and it is only given up when it stops *hiding* the bandit - so once the enemy
+        /// shifts to a flank, everyone who cannot see the new angle stays tucked behind a rock
+        /// facing the wrong way, perfectly safe and perfectly useless, while whoever happens to
+        /// have the angle fights alone.
+        ///
+        /// Only applies to bandits in a squad. A lone one keeps holding the position it was given,
+        /// which is what makes it useful for testing one behaviour at a time. 0 disables it.
+        /// </summary>
+        public float RepositionAfterNoShotSeconds = 5f;
+
+        /// <summary>
+        /// How long a suppressing bandit keeps firing at a position after the whole squad has lost
+        /// sight of the enemy. While anyone can still see them this does not apply - the gunner
+        /// keeps firing for as long as the contact is being reported.
+        /// </summary>
+        public float SuppressionSeconds = 6f;
+
+        /// <summary>
+        /// How wide a berth a bandit gives a squadmate standing in its line of fire. Measured
+        /// perpendicular to the shot, so this is roughly "how close to a mate's shoulder a round
+        /// may pass". Bandits do not target each other, but bullets are raycast and hit whatever is
+        /// in the way, so without this a prone machinegunner cheerfully empties a belt into the
+        /// backs of the two riflemen in front of it.
+        /// </summary>
+        public float FriendlyFireClearanceRadius = 0.9f;
+
         /// <summary>Start newly spawned bandits patrolling immediately.</summary>
         public bool PatrolByDefault = false;
 
@@ -384,6 +503,8 @@ namespace BanditPlugin
             AimTargetRadius = 0.35f;
             AimTargetHalfHeight = 0.8f;
             AimMaxErrorDegrees = 8f;
+            CrouchedAimErrorMultiplier = 0.8f;
+            ProneAimErrorMultiplier = 0.65f;
             AimWobbleIntervalSeconds = 0.35f;
             AimWobbleSmoothingSeconds = 0.15f;
             RequireLineOfSight = true;
@@ -411,6 +532,16 @@ namespace BanditPlugin
             SprintToCoverMinPathDistance = 5f;
             CoverHideSeconds = 2.5f;
             CoverPeekSeconds = 2f;
+
+            SquadComposition = DefaultSquadComposition();
+            SquadSpacing = 5f;
+            SquadSpawnDistance = 200f;
+            SquadWeaponsFree = true;
+            SquadContactMemorySeconds = 12f;
+            SquadCoverSeparation = 4f;
+            RepositionAfterNoShotSeconds = 5f;
+            SuppressionSeconds = 6f;
+            FriendlyFireClearanceRadius = 0.9f;
 
             PatrolByDefault = false;
             PatrolWaypointDwellSeconds = 3f;

@@ -33,7 +33,10 @@ namespace BanditPlugin.Navigation
         NoGround,
         TooCloseToThreat,
         NoStandingRoom,
-        StillVisible
+        StillVisible,
+
+        /// <summary>A squadmate got there first, or is close enough that this would bunch them up.</summary>
+        TakenBySquadmate
     }
 
     /// <summary>One candidate and its verdict, for /banditcover to draw and log.</summary>
@@ -56,6 +59,10 @@ namespace BanditPlugin.Navigation
         public int RejectedNoStandingRoom;
         public int RejectedNotCover;
         public int RejectedNotBetter;
+
+        /// <summary>Rejected because a squadmate had already claimed that spot or one next to it.</summary>
+        public int RejectedTakenBySquadmate;
+
         public int Viable;
 
         /// <summary>
@@ -72,7 +79,7 @@ namespace BanditPlugin.Navigation
             return $"{Candidates} candidates: {RejectedNoGround} no ground, " +
                    $"{RejectedTooCloseToThreat} too close to threat, {RejectedNoStandingRoom} no room, " +
                    $"{RejectedNotCover} still visible, {RejectedNotBetter} not better than here, " +
-                   $"{Viable} viable"
+                   $"{RejectedTakenBySquadmate} taken by squadmates, {Viable} viable"
                    + (ColliderBufferFull ? " (collider buffer full - reduce CoverSearchRadius)" : string.Empty);
         }
     }
@@ -208,6 +215,33 @@ namespace BanditPlugin.Navigation
             out BanditCoverSearchStats stats,
             List<BanditCoverCandidateReport> reports)
         {
+            return TryFindCover(selfPosition, threatEye, searchRadius, ringSamples, minimumThreatDistance,
+                preferredThreatDistance, preferHidden, out best, out stats, reports, null, 0f);
+        }
+
+        /// <inheritdoc cref="TryFindCover(Vector3,Vector3,float,int,float,float,bool,out BanditCoverSpot)"/>
+        /// <param name="occupiedSpots">
+        /// Cover other members of the same squad have already committed to. Candidates within
+        /// <paramref name="minSeparation"/> of one are rejected outright, which is what stops a
+        /// squad stacking onto a single rock: this search is deterministic, so bandits standing
+        /// near each other and facing the same threat otherwise all pick the same coordinate.
+        /// Null or an empty list restores the plain single-bandit search.
+        /// </param>
+        /// <param name="minSeparation">Metres of clearance to keep from each occupied spot.</param>
+        public static bool TryFindCover(
+            Vector3 selfPosition,
+            Vector3 threatEye,
+            float searchRadius,
+            int ringSamples,
+            float minimumThreatDistance,
+            float preferredThreatDistance,
+            bool preferHidden,
+            out BanditCoverSpot best,
+            out BanditCoverSearchStats stats,
+            List<BanditCoverCandidateReport> reports,
+            IList<Vector3> occupiedSpots,
+            float minSeparation)
+        {
             best = default;
             stats = default;
             reports?.Clear();
@@ -216,8 +250,13 @@ namespace BanditPlugin.Navigation
             // The bar to beat. If the bot is already in cover this scores well and most candidates
             // are rejected; if it is standing in the open this evaluates to nothing and anything
             // valid wins.
+            //
+            // Held to the separation rule as well, so a bandit whose mate has since claimed the
+            // spot it is standing on stops treating that spot as good enough and goes elsewhere -
+            // otherwise the first one there would keep everyone else's search from ever winning.
             float incumbentScore = float.MinValue;
-            if (TryEvaluate(selfPosition, selfPosition, threatEye, minimumThreatDistance,
+            if (!IsTaken(selfPosition, occupiedSpots, minSeparation)
+                && TryEvaluate(selfPosition, selfPosition, threatEye, minimumThreatDistance,
                     preferredThreatDistance, preferHidden, out BanditCoverSpot incumbent, ref stats, out _))
             {
                 incumbentScore = incumbent.Score;
@@ -230,6 +269,19 @@ namespace BanditPlugin.Navigation
 
             for (int i = 0; i < Candidates.Count; i++)
             {
+                // Before the evaluation rather than after: this test is two subtractions against a
+                // handful of claims, and the one it skips ends in a dozen raycasts.
+                if (IsTaken(Candidates[i], occupiedSpots, minSeparation))
+                {
+                    stats.RejectedTakenBySquadmate++;
+                    reports?.Add(new BanditCoverCandidateReport
+                    {
+                        Position = Candidates[i],
+                        Outcome = BanditCoverOutcome.TakenBySquadmate
+                    });
+                    continue;
+                }
+
                 bool viable = TryEvaluate(Candidates[i], selfPosition, threatEye, minimumThreatDistance,
                     preferredThreatDistance, preferHidden, out BanditCoverSpot spot, ref stats,
                     out BanditCoverOutcome outcome);
@@ -276,6 +328,32 @@ namespace BanditPlugin.Navigation
 
             // "The best spot is the one I'm already standing on" is not a move order.
             return (best.Position - selfPosition).sqrMagnitude > 1f;
+        }
+
+        /// <summary>
+        /// Whether a spot is close enough to one a squadmate has claimed to count as the same
+        /// piece of cover. Flat distance, because two bandits either side of a bank are still
+        /// standing on top of each other as far as a shooter is concerned.
+        /// </summary>
+        private static bool IsTaken(Vector3 position, IList<Vector3> occupiedSpots, float minSeparation)
+        {
+            if (occupiedSpots == null || minSeparation <= 0f)
+            {
+                return false;
+            }
+
+            float thresholdSq = minSeparation * minSeparation;
+            for (int i = 0; i < occupiedSpots.Count; i++)
+            {
+                Vector3 offset = occupiedSpots[i] - position;
+                offset.y = 0f;
+                if (offset.sqrMagnitude < thresholdSq)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>

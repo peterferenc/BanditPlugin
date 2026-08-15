@@ -12,16 +12,56 @@ namespace BanditPlugin
         protected override void Load()
         {
             Instance = this;
+            BackfillEmptyCollections();
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
-            Logger.Log("[Bandit] Loaded. /bandit spawns one - it just stands until ordered. "
+            Logger.Log("[Bandit] Loaded. /squadspawn puts a whole squad down fighting; "
+                + "/bandit spawns one - it just stands until ordered. "
                 + "/bandit shoot|cover|peek start|stop are the standing orders; /banditgoto sends one somewhere, "
                 + "/banditpatrol sets it walking a route, /banditprone lies one down, "
                 + "/banditstatus reports what each is doing.");
         }
 
+        /// <summary>
+        /// Fills in the list settings for a configuration file written before they existed.
+        ///
+        /// These cannot be seeded from their field initializers the way every other setting is.
+        /// XmlSerializer adds to a collection it finds already populated instead of replacing it,
+        /// so a seeded list ends up holding the defaults *and* the file's contents - and since
+        /// Rocket's XMLFileAsset.Load() saves straight after deserializing, that doubled list is
+        /// written back to disk and doubles again on the next start. Doing it here, once the file
+        /// has been read, is the only place an empty list unambiguously means "the file had none".
+        /// </summary>
+        private void BackfillEmptyCollections()
+        {
+            BanditConfiguration config = Configuration.Instance;
+            bool changed = false;
+
+            if (config.Kits == null || config.Kits.Count == 0)
+            {
+                config.Kits = BanditKit.BuildDefaults();
+                changed = true;
+            }
+
+            if (config.SquadComposition == null || config.SquadComposition.Count == 0)
+            {
+                config.SquadComposition = BanditConfiguration.DefaultSquadComposition();
+                changed = true;
+            }
+
+            if (changed)
+            {
+                Configuration.Save();
+                Logger.Log("[Bandit] Wrote the default kits and squad composition into the configuration.");
+            }
+        }
+
         protected override void Unload()
         {
             DamageTool.damagePlayerRequested -= OnDamagePlayerRequested;
+
+            // Squads are held in a static list, which a Rocket reload does not clear on its own -
+            // without this the next load starts with squads full of players from the last one.
+            BanditSquad.ClearAll();
 
             // Cover markers are paintball decals with no lifetime, so they outlive the plugin that
             // drew them. Clearing here means /rocket reload doesn't strand a field of paint on

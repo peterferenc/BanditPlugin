@@ -29,6 +29,8 @@ namespace BanditPlugin
         public bool Peek;
         public bool Prone;
         public bool AdvanceOnTarget;
+        public BanditStance ContactStance;
+        public bool SuppressiveFire;
 
         /// <summary>
         /// What a bandit spawned with no kit gets: the global configuration exactly as it was
@@ -52,7 +54,9 @@ namespace BanditPlugin
                 Cover = config.CoverByDefault,
                 Peek = config.PeekByDefault,
                 Prone = false,
-                AdvanceOnTarget = config.AdvanceOnTarget
+                AdvanceOnTarget = config.AdvanceOnTarget,
+                ContactStance = BanditStance.Free,
+                SuppressiveFire = false
             };
         }
 
@@ -83,7 +87,9 @@ namespace BanditPlugin
                 Cover = kit.Cover,
                 Peek = kit.Peek,
                 Prone = kit.Prone,
-                AdvanceOnTarget = kit.AdvanceOnTarget
+                AdvanceOnTarget = kit.AdvanceOnTarget,
+                ContactStance = kit.ContactStance,
+                SuppressiveFire = kit.SuppressiveFire
             };
         }
 

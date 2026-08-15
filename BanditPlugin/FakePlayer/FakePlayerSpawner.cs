@@ -127,7 +127,12 @@ namespace BanditPlugin.FakePlayer
                 Logger.LogWarning($"[Bandit] Could not clear stale savedata for bot {fakeSteamId}: {e.Message}. It may spawn carrying gear from an earlier session.");
             }
 
-            byte angleByte = (byte)Mathf.RoundToInt(angleDegrees / 2f);
+            // Wrapped into 0-360 before halving, because the packed angle is a byte and the callers
+            // hand over whatever the maths gave them. "eulerAngles.y + 180" reaches 540 and an
+            // Atan2 facing goes negative; both then cast to a byte that has wrapped, which spawns
+            // the bandit pointing somewhere unrelated to where it was told to face.
+            float normalizedAngle = Mathf.Repeat(angleDegrees, 360f);
+            byte angleByte = (byte)Mathf.RoundToInt(normalizedAngle / 2f);
             object netId = ClaimNetIdBlockMethod.Invoke(null, null);
             object channel = AllocPlayerChannelIdMethod.Invoke(null, null);
 
@@ -215,6 +220,9 @@ namespace BanditPlugin.FakePlayer
             controller.AimToleranceDegrees = config.AimToleranceDegrees;
             controller.FireRange = profile.FireRange;
             controller.TargetAcquireRange = profile.TargetAcquireRange;
+            controller.SuppressiveFire = profile.SuppressiveFire;
+            controller.SuppressionSeconds = config.SuppressionSeconds;
+            controller.FriendlyFireClearanceRadius = config.FriendlyFireClearanceRadius;
             controller.InfiniteAmmo = config.InfiniteAmmo;
             controller.HoldFire = profile.HoldFire;
             controller.HasPrimaryWeapon = loadout.HasPrimaryWeapon;
@@ -232,6 +240,8 @@ namespace BanditPlugin.FakePlayer
             controller.AimTargetRadius = config.AimTargetRadius;
             controller.AimTargetHalfHeight = config.AimTargetHalfHeight;
             controller.AimMaxErrorDegrees = config.AimMaxErrorDegrees;
+            controller.CrouchedAimErrorMultiplier = config.CrouchedAimErrorMultiplier;
+            controller.ProneAimErrorMultiplier = config.ProneAimErrorMultiplier;
             controller.AimWobbleIntervalSeconds = config.AimWobbleIntervalSeconds;
             controller.AimWobbleSmoothingSeconds = config.AimWobbleSmoothingSeconds;
             controller.RequireLineOfSight = config.RequireLineOfSight;
