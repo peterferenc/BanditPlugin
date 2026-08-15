@@ -156,14 +156,38 @@ namespace BanditPlugin
         /// </summary>
         public bool PeekByDefault = false;
 
-        /// <summary>Radius searched for cover around the bot.</summary>
-        public float CoverSearchRadius = 18f;
+        /// <summary>
+        /// Radius searched for cover around the bot. Comfortably beyond PreferredEngagementRange,
+        /// so a bandit can fall back to real cover rather than only what is already at arm's reach.
+        /// Cost scales with it - see CoverRingSamples.
+        /// </summary>
+        public float CoverSearchRadius = 32f;
 
         /// <summary>Minimum gap between cover searches - each one costs a burst of raycasts.</summary>
         public float CoverSearchIntervalSeconds = 3f;
 
-        /// <summary>Blind samples per ring when searching for cover, on top of nearby colliders.</summary>
-        public int CoverRingSamples = 12;
+        /// <summary>
+        /// Blind samples per ring when searching for cover, on top of nearby colliders. Two rings
+        /// are sampled, at 45% and 90% of the search radius, so this is the angular resolution of
+        /// the fallback sweep: raising the radius without raising this spreads the same number of
+        /// samples over a bigger circle and quietly makes the search coarser.
+        /// </summary>
+        public int CoverRingSamples = 20;
+
+        /// <summary>
+        /// Most candidate markers "/banditcover" will draw. Each marker is a paintball impact
+        /// effect, and each of those spawns eight decals that vanilla never expires - so this is
+        /// really a budget of maxMarkers x 8 objects on your client until they are cleared. The
+        /// search itself is unaffected; only the drawing is capped, and the reported tallies always
+        /// cover the whole search.
+        /// </summary>
+        public int CoverDebugMaxMarkers = 48;
+
+        /// <summary>
+        /// How long "/banditcover" markers stay before clearing themselves. 0 leaves them until the
+        /// next search or "/banditcover clear".
+        /// </summary>
+        public float CoverDebugSeconds = 20f;
 
         /// <summary>
         /// Cover closer to the threat than this is ignored, so the bot doesn't "take cover" by
@@ -172,6 +196,17 @@ namespace BanditPlugin
         /// close-range fight.
         /// </summary>
         public float CoverMinimumThreatDistance = 3f;
+
+        /// <summary>
+        /// Sprint to cover while this much of the route is still ahead, and walk the rest.
+        ///
+        /// Vanilla refuses to sprint while aiming down sights, so a sprinting bandit has its rifle
+        /// down and cannot shoot. Running the long open stretch is worth that; running the last few
+        /// metres is not, so it walks the remainder with its gun up and keeps firing on the way in.
+        /// Measured along the path where one exists, not straight-line. 0 disables sprinting to
+        /// cover entirely. Also gated by AllowSprint, and by vanilla's own stamina rules.
+        /// </summary>
+        public float SprintToCoverMinPathDistance = 10f;
 
         /// <summary>How long the bot stays hidden between peeks.</summary>
         public float CoverHideSeconds = 2.5f;
@@ -229,10 +264,13 @@ namespace BanditPlugin
 
             CoverByDefault = false;
             PeekByDefault = false;
-            CoverSearchRadius = 18f;
+            CoverSearchRadius = 32f;
             CoverSearchIntervalSeconds = 3f;
-            CoverRingSamples = 12;
+            CoverRingSamples = 20;
+            CoverDebugMaxMarkers = 48;
+            CoverDebugSeconds = 20f;
             CoverMinimumThreatDistance = 3f;
+            SprintToCoverMinPathDistance = 10f;
             CoverHideSeconds = 2.5f;
             CoverPeekSeconds = 2f;
 

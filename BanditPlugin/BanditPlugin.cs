@@ -21,6 +21,12 @@ namespace BanditPlugin
         protected override void Unload()
         {
             DamageTool.damagePlayerRequested -= OnDamagePlayerRequested;
+
+            // Cover markers are paintball decals with no lifetime, so they outlive the plugin that
+            // drew them. Clearing here means /rocket reload doesn't strand a field of paint on
+            // everyone - and it has to happen before Instance goes null, since Clear() uses it.
+            Navigation.BanditCoverDebug.Clear();
+
             Instance = null;
         }
 

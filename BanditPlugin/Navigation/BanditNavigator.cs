@@ -61,6 +61,39 @@ namespace BanditPlugin.Navigation
         /// </summary>
         public bool IsFollowingPath => _hasPath;
 
+        /// <summary>
+        /// How far the bot still has to walk: the remaining A* corners summed end to end, or the
+        /// straight line to the destination when steering directly because one end is off the
+        /// navmesh.
+        ///
+        /// The distinction matters for anything deciding "is this trip long enough to be worth
+        /// sprinting". Straight-line distance badly understates a route around a building, which is
+        /// exactly the case where a bandit crossing open ground wants to be running.
+        /// </summary>
+        public float RemainingDistance
+        {
+            get
+            {
+                if (!HasDestination)
+                {
+                    return 0f;
+                }
+
+                Vector3 position = _transform.position;
+                if (!_hasPath || _corners.Count == 0 || _cornerIndex >= _corners.Count)
+                {
+                    return FlatDistance(position, Destination);
+                }
+
+                float total = FlatDistance(position, _corners[_cornerIndex]);
+                for (int i = _cornerIndex; i < _corners.Count - 1; i++)
+                {
+                    total += FlatDistance(_corners[i], _corners[i + 1]);
+                }
+                return total;
+            }
+        }
+
         private const float StepHeight = 0.5f;
         private const float JumpableObstacleHeight = 1f;
         private const float ObstacleProbeDistance = 1.6f;

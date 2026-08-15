@@ -58,12 +58,22 @@ namespace BanditPlugin.Navigation
         public int RejectedNotBetter;
         public int Viable;
 
+        /// <summary>
+        /// True when the overlap query filled its collider buffer, i.e. there were more solid
+        /// things within the search radius than the search could look at. Worth surfacing rather
+        /// than swallowing: OverlapSphereNonAlloc returns an arbitrary subset once it is full - not
+        /// the nearest ones - so a truncated search in a dense town is quietly sampling the wrong
+        /// half of the map around it, which looks identical to "the search just didn't find much".
+        /// </summary>
+        public bool ColliderBufferFull;
+
         public override string ToString()
         {
             return $"{Candidates} candidates: {RejectedNoGround} no ground, " +
                    $"{RejectedTooCloseToThreat} too close to threat, {RejectedNoStandingRoom} no room, " +
                    $"{RejectedNotCover} still visible, {RejectedNotBetter} not better than here, " +
-                   $"{Viable} viable";
+                   $"{Viable} viable"
+                   + (ColliderBufferFull ? " (collider buffer full - reduce CoverSearchRadius)" : string.Empty);
         }
     }
 
@@ -129,7 +139,13 @@ namespace BanditPlugin.Navigation
         /// <summary>How far the standing-room capsule is lifted off the floor. See HasStandingRoom.</summary>
         private const float GroundClearance = 0.15f;
 
-        private static readonly Collider[] ColliderBuffer = new Collider[48];
+        /// <summary>
+        /// Overlap results for one search. Sized against CoverSearchRadius rather than left at the
+        /// 48 it was when that radius was 18m: OverlapSphereNonAlloc stops at the buffer length and
+        /// gives back whatever it found first, which is not distance-sorted, so a buffer too small
+        /// for the radius throws away real cover in exactly the cluttered places cover matters.
+        /// </summary>
+        private static readonly Collider[] ColliderBuffer = new Collider[128];
         private static readonly HashSet<long> SeenCells = new HashSet<long>();
         private static readonly List<Vector3> Candidates = new List<Vector3>();
 
@@ -209,7 +225,7 @@ namespace BanditPlugin.Navigation
                 found = true;
             }
 
-            CollectCandidates(selfPosition, threatEye, searchRadius, ringSamples);
+            stats.ColliderBufferFull = CollectCandidates(selfPosition, threatEye, searchRadius, ringSamples);
             stats.Candidates = Candidates.Count;
 
             for (int i = 0; i < Candidates.Count; i++)
@@ -263,13 +279,17 @@ namespace BanditPlugin.Navigation
         }
 
         /// <summary>
-        /// Whether a spot still hides a crouching player from a threat. Cheap enough to re-run
-        /// every second, which is what keeps a bot from sitting behind a rock the shooter has
-        /// since walked around.
+        /// Whether a spot still hides a player from a threat. Cheap enough to re-run every second,
+        /// which is what keeps a bot from sitting behind a rock the shooter has since walked around.
+        ///
+        /// <paramref name="crouched"/> must match the stance the bot is actually holding. Testing
+        /// the crouching silhouette for a bot that is standing up is not a conservative
+        /// approximation - it is the wrong question, and it passes long after the bot's head and
+        /// chest have come into view over whatever is hiding its legs.
         /// </summary>
-        public static bool IsCoveredFrom(Vector3 ground, Vector3 threatEye)
+        public static bool IsCoveredFrom(Vector3 ground, Vector3 threatEye, bool crouched)
         {
-            return IsBodyHidden(threatEye, ground, crouched: true, out _);
+            return IsBodyHidden(threatEye, ground, crouched, out _);
         }
 
         /// <summary>
@@ -422,13 +442,15 @@ namespace BanditPlugin.Navigation
             return false;
         }
 
-        private static void CollectCandidates(Vector3 selfPosition, Vector3 threatEye, float searchRadius, int ringSamples)
+        /// <summary>Returns true when the collider buffer filled, i.e. results were dropped.</summary>
+        private static bool CollectCandidates(Vector3 selfPosition, Vector3 threatEye, float searchRadius, int ringSamples)
         {
             Candidates.Clear();
             SeenCells.Clear();
 
             int colliderCount = Physics.OverlapSphereNonAlloc(selfPosition, searchRadius, ColliderBuffer,
                 RayMasks.BLOCK_COLLISION, QueryTriggerInteraction.Ignore);
+            bool bufferFull = colliderCount >= ColliderBuffer.Length;
 
             for (int i = 0; i < colliderCount; i++)
             {
@@ -494,6 +516,8 @@ namespace BanditPlugin.Navigation
                 AddCandidate(selfPosition + direction * (searchRadius * 0.45f), selfPosition.y);
                 AddCandidate(selfPosition + direction * (searchRadius * 0.9f), selfPosition.y);
             }
+
+            return bufferFull;
         }
 
         private static void AddCandidate(Vector3 point, float height)

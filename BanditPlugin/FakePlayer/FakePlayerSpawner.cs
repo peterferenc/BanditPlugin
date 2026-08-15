@@ -79,6 +79,43 @@ namespace BanditPlugin.FakePlayer
                 newNickName: displayName,
                 newGroup: CSteamID.Nil);
 
+            // Never let the delete below reach a real person's savedata. The IDs generated here are
+            // in universe 17, which Steam does not issue, so this can't trip today - but "can't"
+            // rests entirely on FakeSteamIdBase, and the cost of that constant being edited into the
+            // real range is silently wiping a player's character. Cheap to check, unrecoverable not to.
+            if (IsRealIndividualAccount(fakeSteamId.m_SteamID))
+            {
+                Logger.LogError($"[Bandit] Refusing to spawn: generated bot SteamID {fakeSteamId.m_SteamID} decodes as a real individual Steam account, and spawning clears that ID's savedata. Check FakeSteamIdBase.");
+                return null;
+            }
+
+            // Wipe anything left on disk under this synthetic SteamID before the player exists.
+            //
+            // The IDs come from a static counter that restarts at FakeSteamIdBase every time the
+            // plugin loads, so bot #1 of this session is bot #1 of the last one - same SteamID, same
+            // Servers/<id>/Players/<steamid>_0 folder. Player.InitializePlayer() then runs
+            // PlayerInventory.load() and PlayerClothing.load(), which restore that folder's contents,
+            // and the configured loadout is applied on top. Provider.kick saves the combined total on
+            // the way out - Player.save() unconditionally saves clothing, inventory, life, skills and
+            // quests, with no opt-out - so every spawn-then-clear cycle wrote back one more full set
+            // of gear than the last. That is why bandits started dropping doubles, then triples.
+            //
+            // (Killing a bot instead of clearing it hides the problem rather than avoiding it:
+            // PlayerInventory.save() deletes Inventory.dat outright when the player is dead and both
+            // Lose_Weapons/Lose_Clothes are on, so only bots removed alive - /banditclear, or a
+            // server shutdown - accumulate.)
+            //
+            // Deleting here beats deleting on despawn: it runs ahead of every load path, so a bot
+            // starts from nothing no matter what a previous session left behind or how it ended.
+            try
+            {
+                PlayerSavedata.deleteFolder(playerID);
+            }
+            catch (System.Exception e)
+            {
+                Logger.LogWarning($"[Bandit] Could not clear stale savedata for bot {fakeSteamId}: {e.Message}. It may spawn carrying gear from an earlier session.");
+            }
+
             byte angleByte = (byte)Mathf.RoundToInt(angleDegrees / 2f);
             object netId = ClaimNetIdBlockMethod.Invoke(null, null);
             object channel = AllocPlayerChannelIdMethod.Invoke(null, null);
@@ -175,6 +212,22 @@ namespace BanditPlugin.FakePlayer
             SpawnedBotSteamIds.Add(fakeSteamId.m_SteamID);
             LastSpawnedController = controller;
             return steamPlayer.player;
+        }
+
+        /// <summary>
+        /// Whether a SteamID64 could belong to a real person's account.
+        ///
+        /// The 64 bits pack universe (top 8), account type (next 4), instance (next 20) and account
+        /// number (low 32). Real player accounts are universe 1 (Public) and type 1 (Individual),
+        /// which is the whole of 76561197960265728..76561202255233023 - every account Steam can ever
+        /// issue. Bot IDs are built in universe 17, a value Steam has no meaning for, so they sit far
+        /// above that range and cannot alias into it however many are spawned.
+        /// </summary>
+        private static bool IsRealIndividualAccount(ulong steamId)
+        {
+            ulong universe = (steamId >> 56) & 0xFF;
+            ulong accountType = (steamId >> 52) & 0xF;
+            return universe == 1 && accountType == 1;
         }
 
         /// <summary>

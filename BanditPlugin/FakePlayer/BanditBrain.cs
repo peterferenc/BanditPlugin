@@ -37,6 +37,14 @@ namespace BanditPlugin.FakePlayer
         public bool WantsJump { get; private set; }
 
         /// <summary>
+        /// Lower the rifle and hold fire this tick. Set while sprinting somewhere that matters more
+        /// than the shot: vanilla PlayerStance refuses to sprint while aiming down sights, so
+        /// without the controller acting on this the bot would shoulder its gun the instant it saw
+        /// someone and quietly walk to cover instead of running.
+        /// </summary>
+        public bool WantsWeaponDown { get; private set; }
+
+        /// <summary>
         /// Lean out from behind cover, the same Q/E a player uses. Not cosmetic: PlayerLook's
         /// updateAim rolls aim.parent by the lean angle server-side, and because the aim transform
         /// sits about 1.6m up, that roll swings the eye roughly half a metre sideways. aim.position
@@ -248,6 +256,7 @@ namespace BanditPlugin.FakePlayer
             WantsSprint = false;
             WantsCrouch = false;
             WantsJump = false;
+            WantsWeaponDown = false;
             WantsLeanLeft = false;
             WantsLeanRight = false;
             DesiredFacing = null;
@@ -490,6 +499,7 @@ namespace BanditPlugin.FakePlayer
             {
                 Navigator.Tick(deltaTime);
                 MoveDirection = Navigator.DesiredDirection;
+                ApplySprintToCover();
                 return;
             }
 
@@ -525,6 +535,37 @@ namespace BanditPlugin.FakePlayer
 
             // Crouch cover is the good case: down is safe, up is a firing position, no walking.
             WantsCrouch = _coverSpot.RequiresCrouch && !_peeking;
+        }
+
+        /// <summary>
+        /// Runs the long leg of a move to cover, and only the long leg.
+        ///
+        /// Sprinting is not free: vanilla PlayerStance refuses to sprint while aiming down sights,
+        /// so the gun has to come down for the bot to run at all - which means a sprinting bandit
+        /// cannot shoot. That is the right trade while crossing open ground where it has no angle
+        /// anyway, and the wrong one over the last few metres, where lowering the rifle just throws
+        /// away shots it could have taken on the way in.
+        ///
+        /// So the threshold is on the distance still to travel rather than the length of the trip:
+        /// a bandit sent 40m away sprints the first 30 and walks the last 10 with its rifle up,
+        /// which is also why this needs no hysteresis - the remaining distance only shrinks.
+        /// Measured along the path, not straight-line, because a route around a building is exactly
+        /// the case worth running.
+        /// </summary>
+        private void ApplySprintToCover()
+        {
+            if (!_config.AllowSprint || MoveDirection.sqrMagnitude < 0.0001f)
+            {
+                return;
+            }
+
+            if (Navigator.RemainingDistance < _config.SprintToCoverMinPathDistance)
+            {
+                return;
+            }
+
+            WantsSprint = true;
+            WantsWeaponDown = true;
         }
 
         /// <summary>
@@ -583,6 +624,21 @@ namespace BanditPlugin.FakePlayer
         /// <summary>
         /// Drops the current cover spot once it stops being cover - the shooter has moved, or the
         /// bot has been pushed off the spot.
+        ///
+        /// Two things here are easy to get wrong and were:
+        ///
+        /// The stance has to match what the bot is actually doing. This used to always test the
+        /// crouching silhouette, which is what let a bandit in "hard cover" stand in full view
+        /// believing it was hidden. Hard cover means the spot hid it *standing* when it was chosen,
+        /// and TickCover leaves it standing - WantsCrouch is only set for crouch cover. A counter or
+        /// a window sill stops hiding a standing body long before it stops hiding a crouching one,
+        /// so as the threat walked around, the crouched test kept passing on a bot whose head and
+        /// chest were plainly visible.
+        ///
+        /// And the position has to be where the bot actually is once it has arrived, not the spot it
+        /// was aiming for. While it is still walking the spot is the right thing to judge - the bot
+        /// isn't there yet - but afterwards the bot can be shoved off it, and what gets shot is the
+        /// body, not the coordinate.
         /// </summary>
         private void ReleaseCoverIfStale()
         {
@@ -590,9 +646,22 @@ namespace BanditPlugin.FakePlayer
             {
                 return;
             }
+
+            // A peek is deliberate exposure - that is the whole point of it - so validating mid-peek
+            // would drop cover every single time the bot leaned out.
+            if (_peeking)
+            {
+                return;
+            }
+
             _nextCoverValidationTime = Time.time + 1f;
 
-            if (!BanditCoverFinder.IsCoveredFrom(_coverSpot.Position, ThreatEye()))
+            bool crouching = _coverSpot.RequiresCrouch;
+            Vector3 checkPosition = Navigator.HasDestination
+                ? _coverSpot.Position
+                : _self.transform.position;
+
+            if (!BanditCoverFinder.IsCoveredFrom(checkPosition, ThreatEye(), crouching))
             {
                 _hasCover = false;
             }

@@ -49,6 +49,15 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public bool HoldFire { get; set; }
 
+        /// <summary>
+        /// The brain asking for the rifle to come down this tick, currently only while sprinting to
+        /// cover. Separate from HoldFire because that is a standing order you give a bandit, and
+        /// this is a momentary consequence of what it is doing - clearing itself the moment it stops
+        /// running - so folding the two together would make /bandit shoot start look like it had
+        /// been silently undone.
+        /// </summary>
+        private bool WeaponDown => Brain != null && Brain.WantsWeaponDown;
+
         public float TurnSpeedDegreesPerSecond = 180f;
         public float ScanIntervalSeconds = 0.5f;
         public float FireIntervalSeconds = 0.6f;
@@ -467,7 +476,7 @@ namespace BanditPlugin.FakePlayer
                 return EAttackInputFlags.Stop;
             }
 
-            if (HoldFire)
+            if (HoldFire || WeaponDown)
             {
                 return EAttackInputFlags.None;
             }
@@ -523,7 +532,8 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private EAttackInputFlags DecideAimInput()
         {
-            bool wantsToAim = !HoldFire && IsGunReady() && _target != null && !_target.life.isDead && IsTargetInRange();
+            bool wantsToAim = !HoldFire && !WeaponDown && IsGunReady()
+                && _target != null && !_target.life.isDead && IsTargetInRange();
 
             if (wantsToAim && !_aimingActive)
             {
