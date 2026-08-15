@@ -56,7 +56,18 @@ namespace BanditPlugin.FakePlayer
         public static readonly System.Collections.Generic.HashSet<ulong> SpawnedBotSteamIds =
             new System.Collections.Generic.HashSet<ulong>();
 
+        /// <summary>Spawns a bandit with no kit: the legacy loadout and the global figures.</summary>
         public static Player Spawn(Vector3 position, float angleDegrees, string displayName)
+        {
+            return Spawn(position, angleDegrees, displayName, null);
+        }
+
+        /// <param name="kit">
+        /// The class to spawn as, or null for the global configuration. Resolved into a
+        /// <see cref="BanditProfile"/> here and then owned by that bandit, so editing the kit
+        /// afterwards has no effect on it.
+        /// </param>
+        public static Player Spawn(Vector3 position, float angleDegrees, string displayName, BanditKit kit)
         {
             System.Collections.Generic.List<string> missing = new System.Collections.Generic.List<string>();
             if (AllocPlayerChannelIdMethod == null) missing.Add("Provider.allocPlayerChannelId");
@@ -183,31 +194,40 @@ namespace BanditPlugin.FakePlayer
             AttachRocketPlayerComponents(steamPlayer.player);
 
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
+
+            // Everything the kit has a say in, folded against the global figures once, here. From
+            // this point nothing downstream knows or cares whether a kit was involved.
+            BanditProfile profile = kit != null
+                ? BanditProfile.FromKit(config, kit)
+                : BanditProfile.FromConfiguration(config);
+
             BanditLoadoutApplier.Result loadout = config.ApplyLoadout
-                ? BanditLoadoutApplier.Apply(steamPlayer.player, config.Loadout, config.BurstFire)
+                ? BanditLoadoutApplier.Apply(steamPlayer.player, profile.Loadout, profile.BurstFire)
                 : default(BanditLoadoutApplier.Result);
 
             BanditBotController controller = steamPlayer.player.gameObject.AddComponent<BanditBotController>();
             controller.Self = steamPlayer.player;
             controller.SteamPlayerToKeepAlive = steamPlayer;
+            controller.Profile = profile;
             controller.TurnSpeedDegreesPerSecond = config.TurnSpeedDegreesPerSecond;
             controller.ScanIntervalSeconds = config.ScanIntervalSeconds;
-            controller.FireIntervalSeconds = config.FireIntervalSeconds;
+            controller.FireIntervalSeconds = profile.FireIntervalSeconds;
             controller.AimToleranceDegrees = config.AimToleranceDegrees;
-            controller.FireRange = config.FireRange;
+            controller.FireRange = profile.FireRange;
+            controller.TargetAcquireRange = profile.TargetAcquireRange;
             controller.InfiniteAmmo = config.InfiniteAmmo;
-            controller.HoldFire = config.HoldFireByDefault;
+            controller.HoldFire = profile.HoldFire;
             controller.HasPrimaryWeapon = loadout.HasPrimaryWeapon;
             controller.HasSecondaryWeapon = loadout.HasSecondaryWeapon;
-            controller.SecondaryWeaponRange = config.SecondaryWeaponRange;
-            controller.PrimaryAimHitChance = ResolveHitChance(config.Loadout?.PrimaryWeapon, config.AimHitChance);
-            controller.SecondaryAimHitChance = ResolveHitChance(config.Loadout?.SecondaryWeapon, config.AimHitChance);
-            controller.BurstFire = config.BurstFire;
-            controller.PrimaryBurstMinRounds = ResolveBurstRounds(config.Loadout?.PrimaryWeapon?.BurstMinRounds, config.BurstMinRounds);
-            controller.PrimaryBurstMaxRounds = ResolveBurstRounds(config.Loadout?.PrimaryWeapon?.BurstMaxRounds, config.BurstMaxRounds);
-            controller.SecondaryBurstMinRounds = ResolveBurstRounds(config.Loadout?.SecondaryWeapon?.BurstMinRounds, config.BurstMinRounds);
-            controller.SecondaryBurstMaxRounds = ResolveBurstRounds(config.Loadout?.SecondaryWeapon?.BurstMaxRounds, config.BurstMaxRounds);
-            controller.BurstIntervalSeconds = config.BurstIntervalSeconds;
+            controller.SecondaryWeaponRange = profile.SecondaryWeaponRange;
+            controller.PrimaryAimHitChance = ResolveHitChance(profile.Loadout?.PrimaryWeapon, config.AimHitChance);
+            controller.SecondaryAimHitChance = ResolveHitChance(profile.Loadout?.SecondaryWeapon, config.AimHitChance);
+            controller.BurstFire = profile.BurstFire;
+            controller.PrimaryBurstMinRounds = ResolveBurstRounds(profile.Loadout?.PrimaryWeapon?.BurstMinRounds, config.BurstMinRounds);
+            controller.PrimaryBurstMaxRounds = ResolveBurstRounds(profile.Loadout?.PrimaryWeapon?.BurstMaxRounds, config.BurstMaxRounds);
+            controller.SecondaryBurstMinRounds = ResolveBurstRounds(profile.Loadout?.SecondaryWeapon?.BurstMinRounds, config.BurstMinRounds);
+            controller.SecondaryBurstMaxRounds = ResolveBurstRounds(profile.Loadout?.SecondaryWeapon?.BurstMaxRounds, config.BurstMaxRounds);
+            controller.BurstIntervalSeconds = profile.BurstIntervalSeconds;
             controller.BurstErrorRampPerRound = config.BurstErrorRampPerRound;
             controller.AimTargetRadius = config.AimTargetRadius;
             controller.AimTargetHalfHeight = config.AimTargetHalfHeight;
@@ -215,6 +235,10 @@ namespace BanditPlugin.FakePlayer
             controller.AimWobbleIntervalSeconds = config.AimWobbleIntervalSeconds;
             controller.AimWobbleSmoothingSeconds = config.AimWobbleSmoothingSeconds;
             controller.RequireLineOfSight = config.RequireLineOfSight;
+
+            // Now that the loadout has been applied, the gun is a real asset and its own Range can
+            // be checked against what the kit told the bandit to shoot at.
+            profile.WarnIfOutranged(ResolvePrimaryGunAsset(profile.Loadout));
 
             SpawnedBotSteamIds.Add(fakeSteamId.m_SteamID);
             LastSpawnedController = controller;
@@ -355,6 +379,29 @@ namespace BanditPlugin.FakePlayer
         /// than in the loadout applier because it is the only part of a loadout entry the bot's
         /// combat code cares about, and the controller wants it resolved once at spawn.
         /// </summary>
+        /// <summary>
+        /// The primary weapon's asset, purely so the kit's FireRange can be sanity-checked against
+        /// the gun's own Range. Resolution failures are the loadout applier's business and have
+        /// already been logged by the time this runs, so anything unresolvable is simply null here.
+        /// </summary>
+        private static ItemGunAsset ResolvePrimaryGunAsset(BanditLoadout loadout)
+        {
+            string identifier = loadout?.PrimaryWeapon?.Item?.Trim();
+            if (string.IsNullOrEmpty(identifier))
+            {
+                return null;
+            }
+
+            if (ushort.TryParse(identifier, out ushort legacyId))
+            {
+                return legacyId != 0 ? Assets.find(EAssetType.ITEM, legacyId) as ItemGunAsset : null;
+            }
+
+            return System.Guid.TryParse(identifier, out System.Guid guid) && guid != System.Guid.Empty
+                ? Assets.find(guid) as ItemGunAsset
+                : null;
+        }
+
         private static float ResolveHitChance(BanditWeapon weapon, float fallback)
         {
             return weapon != null && weapon.AimHitChance >= 0f ? weapon.AimHitChance : fallback;

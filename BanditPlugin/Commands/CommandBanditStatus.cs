@@ -58,8 +58,10 @@ namespace BanditPlugin.Commands
                     ? bandit.Self.stance.stance.ToString()
                     : "unknown";
 
+                string kit = bandit.Profile != null ? bandit.Profile.KitName : "default";
+
                 Reply(caller,
-                    $"#{i + 1}: {brain.State}, target {target}, dest {destination}, " +
+                    $"#{i + 1} [{kit}]: {brain.State}, target {target}, dest {destination}, " +
                     $"holding {bandit.EquippedWeaponName}{(bandit.IsBursting ? " (bursting)" : string.Empty)}, " +
                     $"stance {stance}, " +
                     $"moving {(brain.MoveDirection.sqrMagnitude > 0.0001f ? "yes" : "no")}, " +

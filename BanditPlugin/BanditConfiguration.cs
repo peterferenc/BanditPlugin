@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Rocket.API;
 
 namespace BanditPlugin
@@ -10,8 +11,22 @@ namespace BanditPlugin
         public bool ApplyLoadout = true;
 
         /// <summary>
-        /// What every bandit spawns wearing and carrying. See BanditLoadout for the slot list and
-        /// a table of GUIDs read out of this server's own Bundles folder.
+        /// The classes a bandit can be spawned as: "/bandit mg", "/bandit marksman". Each carries
+        /// its own loadout and its own combat figures, resolved once at spawn, so bandits of
+        /// different classes fight differently under one configuration. See BanditKit.
+        /// </summary>
+        public List<BanditKit> Kits = BanditKit.BuildDefaults();
+
+        /// <summary>
+        /// Which kit a plain "/bandit" spawns. Blank falls back to <see cref="Loadout"/> and the
+        /// global figures below, which is what every bandit used before kits existed.
+        /// </summary>
+        public string DefaultKit = "rifleman";
+
+        /// <summary>
+        /// What a bandit spawned with no kit wears and carries - see <see cref="DefaultKit"/>.
+        /// BanditLoadout has the slot list and a table of GUIDs read out of this server's own
+        /// Bundles folder. A kit ignores this entirely and brings its own.
         /// </summary>
         public BanditLoadout Loadout = new BanditLoadout();
 
@@ -45,6 +60,17 @@ namespace BanditPlugin
         public float FireIntervalSeconds = 0.6f;
         public float AimToleranceDegrees = 10f;
         public float FireRange = 50f;
+
+        /// <summary>
+        /// Furthest a bandit notices anyone at all, as opposed to being able to shoot them.
+        ///
+        /// This used to be unbounded: the target scan walked every connected player, took the
+        /// nearest one it had line of sight to at any distance whatsoever, and turned the body onto
+        /// them - so a bandit would stand tracking someone across a valley it could never reach.
+        /// Kept comfortably above FireRange, because watching a target close the last stretch is
+        /// the behaviour worth having; it is the four-hundred-metre stare that is not.
+        /// </summary>
+        public float TargetAcquireRange = 140f;
 
         /// <summary>
         /// Fire in bursts rather than one aimed shot every FireIntervalSeconds.
@@ -293,9 +319,52 @@ namespace BanditPlugin
         /// </summary>
         public bool PatrolUseLocationNodesWhenNoWaypoints = true;
 
+        /// <summary>
+        /// The kit of that name, or null. Case-insensitive, because these are typed into chat.
+        /// </summary>
+        public BanditKit FindKit(string name)
+        {
+            if (Kits == null || string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+
+            foreach (BanditKit kit in Kits)
+            {
+                if (kit != null && string.Equals(kit.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    return kit;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Every kit name, for the usage line and "/bandit kits".</summary>
+        public List<string> KitNames()
+        {
+            List<string> names = new List<string>();
+            if (Kits == null)
+            {
+                return names;
+            }
+
+            foreach (BanditKit kit in Kits)
+            {
+                if (kit != null && !string.IsNullOrEmpty(kit.Name))
+                {
+                    names.Add(kit.Name);
+                }
+            }
+
+            return names;
+        }
+
         public void LoadDefaults()
         {
             ApplyLoadout = true;
+            Kits = BanditKit.BuildDefaults();
+            DefaultKit = "rifleman";
             Loadout = new BanditLoadout();
             SecondaryWeaponRange = 0f;
             InfiniteAmmo = true;
@@ -305,6 +374,7 @@ namespace BanditPlugin
             FireIntervalSeconds = 0.6f;
             AimToleranceDegrees = 10f;
             FireRange = 50f;
+            TargetAcquireRange = 140f;
             BurstFire = false;
             BurstMinRounds = 3;
             BurstMaxRounds = 4;

@@ -114,6 +114,13 @@ namespace BanditPlugin.FakePlayer
         private readonly Player _self;
         private readonly BanditConfiguration _config;
 
+        /// <summary>
+        /// This bandit's class settings. Everything the kit has a say in is read from here rather
+        /// than from <see cref="_config"/>, which is what lets a machinegunner and a marksman run
+        /// different engagement ranges and standing orders side by side.
+        /// </summary>
+        private readonly BanditProfile _profile;
+
         private readonly List<Vector3> _patrolRoute = new List<Vector3>();
         private int _patrolIndex;
         private float _patrolDwellUntil;
@@ -154,6 +161,10 @@ namespace BanditPlugin.FakePlayer
             _self = self;
             _config = BanditPlugin.Instance.Configuration.Instance;
 
+            // The spawner sets Profile immediately after AddComponent and Start() runs a frame
+            // later, so it is there by now. The fallback is for a controller added by hand.
+            _profile = controller.Profile ?? BanditProfile.FromConfiguration(_config);
+
             Navigator = new BanditNavigator(self)
             {
                 ArriveRadius = _config.ArriveRadius,
@@ -162,8 +173,9 @@ namespace BanditPlugin.FakePlayer
                 AllowJumping = _config.AllowJumping
             };
 
-            CoverEnabled = _config.CoverByDefault;
-            PeekEnabled = _config.PeekByDefault;
+            CoverEnabled = _profile.Cover;
+            PeekEnabled = _profile.Peek;
+            ProneEnabled = _profile.Prone;
 
             PatrolEnabled = _config.PatrolByDefault;
             if (PatrolEnabled)
@@ -424,7 +436,7 @@ namespace BanditPlugin.FakePlayer
                 _config.CoverSearchRadius,
                 _config.CoverRingSamples,
                 _config.CoverMinimumThreatDistance,
-                _config.PreferredEngagementRange,
+                _profile.PreferredEngagementRange,
                 PrefersToHide,
                 out BanditCoverSpot spot,
                 out stats,
@@ -481,7 +493,7 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            if (_config.AdvanceOnTarget && target != null && !target.life.isDead)
+            if (_profile.AdvanceOnTarget && target != null && !target.life.isDead)
             {
                 State = BanditState.Engage;
                 TickAdvance(deltaTime, target);
@@ -499,7 +511,7 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private void TickAdvance(float deltaTime, Player target)
         {
-            if (FlatDistance(_self.transform.position, target.transform.position) <= _config.PreferredEngagementRange)
+            if (FlatDistance(_self.transform.position, target.transform.position) <= _profile.PreferredEngagementRange)
             {
                 Navigator.Stop();
                 return;
@@ -661,7 +673,7 @@ namespace BanditPlugin.FakePlayer
         private void PullDeeperIntoCover()
         {
             if (BanditCoverFinder.TryPullDeeper(_coverSpot, ThreatEye(),
-                    _config.CoverMinimumThreatDistance, _config.PreferredEngagementRange,
+                    _config.CoverMinimumThreatDistance, _profile.PreferredEngagementRange,
                     out BanditCoverSpot deeper))
             {
                 _coverSpot = deeper;

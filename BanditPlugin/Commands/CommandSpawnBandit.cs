@@ -12,7 +12,9 @@ namespace BanditPlugin.Commands
     /// <summary>
     /// "/bandit" - spawns a bandit, and with a subcommand sets a standing order for every live one.
     ///
-    ///   /bandit               spawn one in front of you
+    ///   /bandit               spawn one of the default class in front of you
+    ///   /bandit mg            spawn a specific class - see /bandit kits
+    ///   /bandit kits          list the classes and the ranges each fights at
     ///   /bandit cover start   look for cover and move to it, re-finding it as the threat moves
     ///   /bandit cover stop    stop where you are and stay there
     ///   /bandit peek start    once in cover, alternate hiding with stepping out to shoot
@@ -32,16 +34,41 @@ namespace BanditPlugin.Commands
     {
         public AllowedCaller AllowedCaller => AllowedCaller.Both;
         public string Name => "bandit";
-        public string Help => "Spawns a bandit, or sets a standing order (cover/peek/shoot) for all of them.";
-        public string Syntax => "[cover|peek|shoot] [start|stop]";
+        public string Help => "Spawns a bandit of a given class, or sets a standing order (cover/peek/shoot) for all of them.";
+        public string Syntax => "[<kit>|kits|cover start|peek start|shoot start]";
         public List<string> Aliases => new List<string>();
         public List<string> Permissions => new List<string> { "bandit.spawn" };
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
+
             if (command.Length == 0)
             {
-                Spawn(caller);
+                Spawn(caller, config.FindKit(config.DefaultKit));
+                return;
+            }
+
+            if (command[0].Equals("kits", System.StringComparison.OrdinalIgnoreCase))
+            {
+                ReplyKits(caller, config);
+                return;
+            }
+
+            // A single argument is a kit name. Checked before the order parsing below rather than
+            // after, so a kit called "cover" would be unreachable rather than ambiguous - and the
+            // orders keep their two-word shape, which is what keeps the two apart at all.
+            if (command.Length == 1)
+            {
+                BanditKit kit = config.FindKit(command[0]);
+                if (kit == null)
+                {
+                    Reply(caller, $"No kit called '{command[0]}'. Known kits: "
+                        + $"{string.Join(", ", config.KitNames().ToArray())}.", Color.red);
+                    return;
+                }
+
+                Spawn(caller, kit);
                 return;
             }
 
@@ -125,7 +152,7 @@ namespace BanditPlugin.Commands
             Reply(caller, $"{applied} bandit(s) {description}.", Color.green);
         }
 
-        private static void Spawn(IRocketPlayer caller)
+        private static void Spawn(IRocketPlayer caller, BanditKit kit)
         {
             if (!(caller is UnturnedPlayer callerPlayer))
             {
@@ -152,21 +179,84 @@ namespace BanditPlugin.Commands
             // soon as it sees someone, but it gives it a sane initial facing.
             float facingAngleDegrees = unturnedPlayer.transform.eulerAngles.y + 180f;
 
-            Player bandit = FakePlayerSpawner.Spawn(spawnPosition, facingAngleDegrees, "Bandit");
+            // The class goes in the name, because it is the one label visible from across a field
+            // and through a scope - which is the only practical way to tell five of them apart
+            // once a squad is on the ground.
+            string kitName = kit != null && !string.IsNullOrEmpty(kit.Name) ? kit.Name : null;
+            string displayName = kitName != null ? $"Bandit {kitName}" : "Bandit";
+
+            Player bandit = FakePlayerSpawner.Spawn(spawnPosition, facingAngleDegrees, displayName, kit);
             if (bandit == null)
             {
                 Reply(caller, "Failed to spawn bandit - see server console for details.", Color.red);
                 return;
             }
 
-            Reply(caller, "Bandit spawned. It will stand and watch until told otherwise - "
-                + "/bandit shoot start, /bandit cover start, /bandit peek start.", Color.green);
+            BanditBotController controller = FakePlayerSpawner.LastSpawnedController;
+            string orders = controller?.Brain != null
+                ? DescribeStandingOrders(controller)
+                : "no standing orders yet";
+
+            Reply(caller, $"Spawned {displayName} ({orders}).", Color.green);
+        }
+
+        /// <summary>
+        /// What the kit already switched on, so it is obvious which of the usual commands still
+        /// need giving by hand. A kit that turns nothing on behaves exactly as a bandit always did.
+        /// </summary>
+        private static string DescribeStandingOrders(BanditBotController bandit)
+        {
+            List<string> orders = new List<string>();
+            if (!bandit.HoldFire)
+            {
+                orders.Add("weapons free");
+            }
+            if (bandit.Brain.CoverEnabled)
+            {
+                orders.Add("cover");
+            }
+            if (bandit.Brain.PeekEnabled)
+            {
+                orders.Add("peek");
+            }
+            if (bandit.Brain.ProneEnabled)
+            {
+                orders.Add("prone");
+            }
+
+            return orders.Count > 0
+                ? string.Join(", ", orders.ToArray())
+                : "holding fire, no orders";
+        }
+
+        private static void ReplyKits(IRocketPlayer caller, BanditConfiguration config)
+        {
+            List<string> names = config.KitNames();
+            if (names.Count == 0)
+            {
+                Reply(caller, "No kits configured.", Color.red);
+                return;
+            }
+
+            Reply(caller, $"Kits: {string.Join(", ", names.ToArray())}. "
+                + $"'/bandit' alone spawns '{config.DefaultKit}'.", Color.white);
+
+            foreach (string name in names)
+            {
+                // Resolved rather than read off the kit, so a kit that leaves a figure at -1 to
+                // inherit the global one reports the number it will actually fight with.
+                BanditProfile profile = BanditProfile.FromKit(config, config.FindKit(name));
+                Reply(caller, $"  {name}: fires to {profile.FireRange:0}m, notices at {profile.TargetAcquireRange:0}m, "
+                    + $"fights at {profile.PreferredEngagementRange:0}m"
+                    + (profile.BurstFire ? ", bursts" : ", single shots")
+                    + (profile.AdvanceOnTarget ? ", closes in" : string.Empty), Color.grey);
+            }
         }
 
         private static void ReplyUsage(IRocketPlayer caller)
         {
-            Reply(caller, "Usage: /bandit  |  /bandit cover start|stop  |  /bandit peek start|stop  "
-                + "|  /bandit shoot start|stop", Color.yellow);
+            Reply(caller, "Usage: /bandit  |  /bandit <kit>  |  /bandit kits  |  /bandit cover start|stop  "
+                + "|  /bandit peek start|stop  |  /bandit shoot start|stop", Color.yellow);
         }
 
         private static void Reply(IRocketPlayer caller, string message, Color color)

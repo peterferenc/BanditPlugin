@@ -32,6 +32,12 @@ namespace BanditPlugin.FakePlayer
         public Player Self { get; set; }
         public SteamPlayer SteamPlayerToKeepAlive { get; set; }
 
+        /// <summary>
+        /// This bandit's resolved class settings. Set by the spawner before Start() runs, so the
+        /// brain can read it as it is constructed. Never null on a spawned bandit.
+        /// </summary>
+        public BanditProfile Profile { get; set; }
+
         /// <summary>Decides where the bot wants to walk. Created in Start, once Self is set.</summary>
         public BanditBrain Brain { get; private set; }
 
@@ -74,6 +80,7 @@ namespace BanditPlugin.FakePlayer
         public float FireIntervalSeconds = 0.6f;
         public float AimToleranceDegrees = 10f;
         public float FireRange = 50f;
+        public float TargetAcquireRange = 140f;
         public bool InfiniteAmmo = true;
         public bool HasPrimaryWeapon = true;
         public bool HasSecondaryWeapon;
@@ -1408,7 +1415,14 @@ namespace BanditPlugin.FakePlayer
         private Player FindNearestRealPlayer()
         {
             Player nearest = null;
-            float nearestDistanceSq = float.MaxValue;
+
+            // Doubles as the acquisition cap, so anyone beyond it can never become the nearest.
+            // Without one the scan took the nearest visible player at any distance at all and
+            // turned the body onto them, which is how a bandit ended up tracking someone across a
+            // valley it had no hope of reaching. Per class, so a marksman really does see further.
+            float nearestDistanceSq = TargetAcquireRange > 0f
+                ? TargetAcquireRange * TargetAcquireRange
+                : float.MaxValue;
 
             foreach (SteamPlayer steamPlayer in Provider.clients)
             {
