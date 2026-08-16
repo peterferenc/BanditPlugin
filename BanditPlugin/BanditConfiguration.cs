@@ -447,6 +447,38 @@ namespace BanditPlugin
         /// </summary>
         public float FriendlyFireClearanceRadius = 0.9f;
 
+        /// <summary>
+        /// The sides bandits and players can be on: "/squadspawn rifle team:red", "/banditteam join
+        /// red". A team is a real in-game group, so joining one is visible in game and the server's
+        /// own Gameplay.Friendly_Fire setting decides whether teammates can hurt each other. See
+        /// <see cref="BanditTeam"/>.
+        ///
+        /// Starts EMPTY, and must, for the same reason <see cref="Kits"/> does - XmlSerializer adds
+        /// to a collection it finds populated rather than replacing it, so a seeded list is written
+        /// back doubled. BanditPlugin.Load fills it in after the file has been read.
+        /// </summary>
+        public List<BanditTeam> Teams = new List<BanditTeam>();
+
+        /// <summary>
+        /// Which team a bandit joins when neither its squad type nor the spawn command names one.
+        ///
+        /// A name matching no team leaves bandits on no team at all, which is how they behaved
+        /// before teams existed: one undifferentiated side that ignores its own and shoots everyone
+        /// else. Blank does the same.
+        /// </summary>
+        public string DefaultTeam = "bandits";
+
+        /// <summary>
+        /// Whether a player on no team is a target for every bandit.
+        ///
+        /// On is what a bandit server usually wants - somebody who has joined nothing is nobody's
+        /// friend, which is exactly how bandits treated every player before teams existed. Off makes
+        /// bandits fight only the sides they can actually see: rival teams, and nobody else. Useful
+        /// if you want two bot factions fighting a war you can walk through without being shot at
+        /// until you pick a side.
+        /// </summary>
+        public bool HostileToUngrouped = true;
+
         /// <summary>Start newly spawned bandits patrolling immediately.</summary>
         public bool PatrolByDefault = false;
 
@@ -609,6 +641,10 @@ namespace BanditPlugin
             RepositionAfterNoShotSeconds = 5f;
             SuppressionSeconds = 6f;
             FriendlyFireClearanceRadius = 0.9f;
+
+            Teams = BanditTeam.BuildDefaults();
+            DefaultTeam = "bandits";
+            HostileToUngrouped = true;
 
             PatrolByDefault = false;
             PatrolWaypointDwellSeconds = 3f;

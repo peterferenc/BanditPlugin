@@ -59,7 +59,13 @@ namespace BanditPlugin.FakePlayer
         /// <summary>Spawns a bandit with no kit: the legacy loadout and the global figures.</summary>
         public static Player Spawn(Vector3 position, float angleDegrees, string displayName)
         {
-            return Spawn(position, angleDegrees, displayName, null);
+            return Spawn(position, angleDegrees, displayName, null, null);
+        }
+
+        /// <summary>Spawns a bandit of a class onto whichever team the configuration defaults to.</summary>
+        public static Player Spawn(Vector3 position, float angleDegrees, string displayName, BanditKit kit)
+        {
+            return Spawn(position, angleDegrees, displayName, kit, null);
         }
 
         /// <param name="kit">
@@ -67,7 +73,13 @@ namespace BanditPlugin.FakePlayer
         /// <see cref="BanditProfile"/> here and then owned by that bandit, so editing the kit
         /// afterwards has no effect on it.
         /// </param>
-        public static Player Spawn(Vector3 position, float angleDegrees, string displayName, BanditKit kit)
+        /// <param name="team">
+        /// The side to put it on, or null for the configured default team. A team is a real in-game
+        /// group, so this is what decides who the bandit shoots at and who it will not - see
+        /// <see cref="BanditTeams"/>.
+        /// </param>
+        public static Player Spawn(Vector3 position, float angleDegrees, string displayName, BanditKit kit,
+            BanditTeam team)
         {
             System.Collections.Generic.List<string> missing = new System.Collections.Generic.List<string>();
             if (AllocPlayerChannelIdMethod == null) missing.Add("Provider.allocPlayerChannelId");
@@ -200,6 +212,20 @@ namespace BanditPlugin.FakePlayer
 
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
+            // The side it fights on, before anything else reads the bot: the group has to be set
+            // before its first target scan, or it spends that scan deciding its own teammates are
+            // targets. Done after the join has been broadcast, so every client already knows the
+            // player the group state is about.
+            //
+            // A team that cannot be resolved leaves the bandit ungrouped rather than failing the
+            // spawn - which is exactly how every bandit behaved before teams existed.
+            BanditTeam resolvedTeam = team ?? BanditTeams.Default(config);
+            if (resolvedTeam != null && !BanditTeams.Assign(steamPlayer.player, resolvedTeam))
+            {
+                Logger.LogWarning($"[Bandit] Could not put {displayName} on team '{resolvedTeam.Name}'. "
+                    + "It will spawn on no team, and will treat every other team's bandits as friendly.");
+            }
+
             // Everything the kit has a say in, folded against the global figures once, here. From
             // this point nothing downstream knows or cares whether a kit was involved.
             BanditProfile profile = kit != null
@@ -221,8 +247,10 @@ namespace BanditPlugin.FakePlayer
             controller.FireRange = profile.FireRange;
             controller.TargetAcquireRange = profile.TargetAcquireRange;
             controller.SuppressiveFire = profile.SuppressiveFire;
+            controller.DestroysCover = profile.DestroysCover;
             controller.SuppressionSeconds = config.SuppressionSeconds;
             controller.FriendlyFireClearanceRadius = config.FriendlyFireClearanceRadius;
+            controller.HostileToUngrouped = config.HostileToUngrouped;
             controller.InfiniteAmmo = config.InfiniteAmmo;
             controller.HoldFire = profile.HoldFire;
             controller.HasPrimaryWeapon = loadout.HasPrimaryWeapon;
@@ -303,6 +331,7 @@ namespace BanditPlugin.FakePlayer
                 return; // not ours, or already removed
             }
 
+            LeaveTeam(steamPlayer);
             Provider.kick(steamPlayer.playerID.steamID, "bandit killed");
         }
 
@@ -453,12 +482,34 @@ namespace BanditPlugin.FakePlayer
                     continue;
                 }
 
+                LeaveTeam(client);
                 Provider.kick(client.playerID.steamID, "bandit despawned");
                 removed++;
             }
 
             SpawnedBotSteamIds.Clear();
             return removed;
+        }
+
+        /// <summary>
+        /// Takes a bot off its team on the way out.
+        ///
+        /// Not cosmetic: vanilla counts a group's members up in ServerAssignToGroup and only ever
+        /// counts them back down in leaveGroup, and a kicked player does neither. Without this,
+        /// every spawn-and-clear cycle leaves a team one member heavier than it really is, that
+        /// count is written into Groups.dat, and a server with Max_Group_Members set eventually
+        /// refuses to let anyone join a team that has nobody on it.
+        /// </summary>
+        private static void LeaveTeam(SteamPlayer steamPlayer)
+        {
+            try
+            {
+                BanditTeams.Leave(steamPlayer.player);
+            }
+            catch (System.Exception e)
+            {
+                Logger.LogWarning($"[Bandit] Could not take a despawning bandit off its team: {e.Message}");
+            }
         }
     }
 }

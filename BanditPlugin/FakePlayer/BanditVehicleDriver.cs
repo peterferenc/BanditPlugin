@@ -821,10 +821,15 @@ namespace BanditPlugin.FakePlayer
                     continue;
                 }
 
-                // Same squad. Two bandits spawned loose both have a null squad, which puts them in
-                // the same "ours" pool - which is what you want when testing with /bandit rather
-                // than /squadspawn.
-                if (other.Squad != _controller.Squad)
+                // One of ours: the same squad, or - since teams exist - anyone else on our side,
+                // because a driver that swerves for its own section and flattens the section next
+                // to it is not steering around friends, it is steering around five of them. Two
+                // bandits spawned loose are on the same team as well as in the same null squad,
+                // which is what you want when testing with /bandit rather than /squadspawn.
+                //
+                // An enemy team's bandit is deliberately not in this pool. It gets run over.
+                if (other.Squad != _controller.Squad
+                    && _controller.IsHostileTo(other.Self, otherIsBandit: true))
                 {
                     continue;
                 }
@@ -899,13 +904,12 @@ namespace BanditPlugin.FakePlayer
         /// seeing its target would drop it the moment the hull came between them and snap back to
         /// centre - which reads as the tracking being broken rather than as the gunner being careful.
         ///
-        /// The angles are seat-local, because that is what vanilla expects: PlayerLook assigns them
-        /// to the seat's own local rotation and clamps them to the turret's yawMin/yawMax and
-        /// pitchMin/pitchMax. A world-space aim would be folded onto a limit and sit there.
+        /// The angles are local, because that is what vanilla expects - but local to *what* is the
+        /// whole difficulty; see <see cref="ResolveAimFrame"/>.
         /// </summary>
         private void UpdateSeatAim(InteractableVehicle vehicle, float deltaTime)
         {
-            _lookTarget = TrackNearestPlayer && vehicle != null ? FindNearestRealPlayer() : null;
+            _lookTarget = TrackNearestPlayer && vehicle != null ? FindNearestEnemy() : null;
 
             if (_lookTarget == null)
             {
@@ -916,7 +920,7 @@ namespace BanditPlugin.FakePlayer
 
             Player target = _lookTarget;
             Passenger seat = _self.movement.getVehicleSeat();
-            Transform frame = seat != null && seat.seat != null ? seat.seat : vehicle.transform;
+            Quaternion frame = ResolveAimFrame(vehicle, seat);
 
             Vector3 origin = _self.look != null && _self.look.aim != null
                 ? _self.look.aim.position
@@ -928,7 +932,7 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            Vector3 local = frame.InverseTransformDirection(toTarget.normalized);
+            Vector3 local = Quaternion.Inverse(frame) * toTarget.normalized;
             float wantedYaw = Mathf.Atan2(local.x, local.z) * Mathf.Rad2Deg;
             float wantedPitch = 90f - Mathf.Asin(Mathf.Clamp(local.y, -1f, 1f)) * Mathf.Rad2Deg;
 
@@ -943,6 +947,53 @@ namespace BanditPlugin.FakePlayer
                 _lookYaw = Mathf.Clamp(_lookYaw, seat.turret.yawMin, seat.turret.yawMax);
                 _lookPitch = Mathf.Clamp(_lookPitch, seat.turret.pitchMin, seat.turret.pitchMax);
             }
+        }
+
+        /// <summary>
+        /// The frame the seat's yaw and pitch are measured in - which is not the seat.
+        ///
+        /// PlayerLook.simulate rotates the gun itself with
+        ///     turretYaw.localRotation = rotationYaw * Euler(0, yaw, 0)
+        /// so the barrel's zero is the yaw pivot's parent times the base rotation the pivot was
+        /// built with. The player's own aim transform, meanwhile, hangs off the *seat*. Those two
+        /// agree only while the seat happens to face the same way as the turret mount, which is true
+        /// of a hull gun and false of most second and third turrets - and where they disagree, a
+        /// bandit solving its angles in seat space pointed the barrel somewhere else entirely while
+        /// its rounds still went to the target. Gun facing away, bullets landing: exactly the bug.
+        ///
+        /// Solving in the turret's own frame instead makes the barrel point at the target, and the
+        /// shot is traced along the same frame, so what is aimed and what is fired agree.
+        ///
+        /// The one exception is a projectile turret without an aim camera. Vanilla spawns rockets
+        /// along player.look.aim.forward, and with useAimCamera off that transform stays in seat
+        /// space whatever the barrel does - so for those the seat frame is what the round will
+        /// actually follow, and matching it is what makes the rocket land on the target.
+        /// </summary>
+        private Quaternion ResolveAimFrame(InteractableVehicle vehicle, Passenger seat)
+        {
+            if (seat == null)
+            {
+                return vehicle != null ? vehicle.transform.rotation : Quaternion.identity;
+            }
+
+            Quaternion seatFrame = seat.seat != null
+                ? seat.seat.rotation
+                : (vehicle != null ? vehicle.transform.rotation : Quaternion.identity);
+
+            if (seat.turret == null || seat.turretYaw == null)
+            {
+                return seatFrame; // no turret to disagree with
+            }
+
+            if (!seat.turret.useAimCamera && _self.equipment != null
+                && _self.equipment.asset is ItemGunAsset gun && gun.projectile != null)
+            {
+                return seatFrame; // the rocket follows the seat, so aim the seat
+            }
+
+            Transform pivotParent = seat.turretYaw.parent;
+            Quaternion parentRotation = pivotParent != null ? pivotParent.rotation : Quaternion.identity;
+            return parentRotation * seat.rotationYaw;
         }
 
         /// <summary>
@@ -1083,8 +1134,10 @@ namespace BanditPlugin.FakePlayer
                     ? _self.look.aim.position
                     : _self.transform.position + Vector3.up * 1.5f);
 
+            // The same frame the angles were solved in, so the traced shot is the one the barrel is
+            // actually pointing along. See ResolveAimFrame.
             Vector3 localDirection = Quaternion.Euler(_lookPitch - 90f, _lookYaw, 0f) * Vector3.forward;
-            direction = seat.seat.TransformDirection(localDirection).normalized;
+            direction = (ResolveAimFrame(vehicle, seat) * localDirection).normalized;
 
             aimPoint = AimPointOf(target);
             Vector3 toTarget = aimPoint - origin;
@@ -1140,6 +1193,15 @@ namespace BanditPlugin.FakePlayer
                 return false; // its own hull
             }
 
+            // Someone behind a tree, a fence or a parked car is not safe from a turret - the turret
+            // shoots the tree. Unconditional here rather than gated on the kit the way the on-foot
+            // path is: a vehicle gun can always do something about breakable cover, and waiting for
+            // the target to step out is the one thing a tank should never do.
+            if (_controller.IsBreakableCover(info, aimPoint))
+            {
+                return true;
+            }
+
             if (info.player == target)
             {
                 return true;
@@ -1186,6 +1248,11 @@ namespace BanditPlugin.FakePlayer
                     || other.Self.life == null || other.Self.life.isDead)
                 {
                     continue;
+                }
+
+                if (_controller.IsHostileTo(other.Self, otherIsBandit: true))
+                {
+                    continue; // another team's - the gunner is not holding fire for that
                 }
 
                 Vector3 centre = AimPointOf(other.Self) - origin;
@@ -1437,10 +1504,10 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// The nearest live player who is not one of ours, at any angle and through anything. Used
+        /// The nearest live player this crew is at war with, at any angle and through anything. Used
         /// only for pointing a seat; nothing shoots off the back of it.
         /// </summary>
-        private Player FindNearestRealPlayer()
+        private Player FindNearestEnemy()
         {
             Player nearest = null;
             float nearestDistanceSquared = TurretTrackRangeMetres * TurretTrackRangeMetres;
@@ -1454,9 +1521,12 @@ namespace BanditPlugin.FakePlayer
                     continue;
                 }
 
-                if (candidate.GetComponent<BanditBotController>() != null)
+                // A bandit from a team this crew is fighting is worth pointing the gun at; one of
+                // our own is not. Same rule the on-foot scan uses - see BanditTeams.IsHostile.
+                bool candidateIsBandit = candidate.GetComponent<BanditBotController>() != null;
+                if (!_controller.IsHostileTo(candidate, candidateIsBandit))
                 {
-                    continue; // bandits don't watch each other
+                    continue;
                 }
 
                 float distanceSquared = (candidate.transform.position - origin).sqrMagnitude;

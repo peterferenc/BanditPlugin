@@ -20,6 +20,13 @@ namespace BanditPlugin
         /// <summary>The kit names to place, left to right. See <see cref="BanditSquadType.Members"/>.</summary>
         public List<string> Members = new List<string>();
 
+        /// <summary>
+        /// The side to spawn this squad onto, or blank for the configured default team. Still a
+        /// name rather than a resolved team, because the spawn command may be overriding it with
+        /// one the caller typed - see <see cref="BanditSquadType.Team"/>.
+        /// </summary>
+        public string Team = string.Empty;
+
         public float Spacing;
         public float SpawnDistance;
         public float ContactMemorySeconds;
@@ -37,6 +44,7 @@ namespace BanditPlugin
             {
                 TypeName = "squad",
                 Members = new List<string>(),
+                Team = config.DefaultTeam,
                 Spacing = config.SquadSpacing,
                 SpawnDistance = config.SquadSpawnDistance,
                 ContactMemorySeconds = config.SquadContactMemorySeconds,
@@ -62,6 +70,7 @@ namespace BanditPlugin
             {
                 TypeName = string.IsNullOrEmpty(type.Name) ? "unnamed" : type.Name,
                 Members = type.Members ?? new List<string>(),
+                Team = string.IsNullOrEmpty(type.Team) ? config.DefaultTeam : type.Team,
                 Spacing = Inherit(type.Spacing, config.SquadSpacing),
                 SpawnDistance = Inherit(type.SpawnDistance, config.SquadSpawnDistance),
                 ContactMemorySeconds = Inherit(type.ContactMemorySeconds, config.SquadContactMemorySeconds),

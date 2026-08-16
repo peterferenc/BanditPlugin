@@ -136,6 +136,21 @@ namespace BanditPlugin
         public bool SuppressiveFire;
 
         /// <summary>
+        /// Shoot the cover rather than waiting for the target to leave it.
+        ///
+        /// With this off - which is the default, and right for a rifleman or a marksman - a bandit
+        /// with no clear line simply holds its fire, because putting rounds into a tree trunk
+        /// accomplishes nothing but noise. With it on, a target hiding behind something breakable
+        /// gets that something shot out from in front of them: trees, player builds, vehicles and
+        /// breakable objects all come down, and terrain and buildings still do not.
+        ///
+        /// Meant for classes whose weapon can actually do it - a grenadier, or anything firing
+        /// explosives. Vehicle turrets do this regardless of the kit, on the grounds that a tank
+        /// with a clear shot at the tree someone is behind has no business waiting politely.
+        /// </summary>
+        public bool DestroysCover;
+
+        /// <summary>
         /// The four classes a squad is built from, with the weapons picked out of this server's own
         /// Bundles folder. Used both as the field initializer on
         /// <see cref="BanditConfiguration.Kits"/> and by LoadDefaults, so a config file written

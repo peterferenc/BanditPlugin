@@ -112,8 +112,22 @@ namespace BanditPlugin.FakePlayer
         public float FireRange = 50f;
         public float TargetAcquireRange = 140f;
         public bool SuppressiveFire;
+
+        /// <summary>
+        /// Shoot breakable cover out from in front of a target instead of holding fire. Off for
+        /// rifles and marksmen; on for classes that can actually do something about a tree. A bandit
+        /// in a vehicle turret does it regardless. See <see cref="BanditKit.DestroysCover"/>.
+        /// </summary>
+        public bool DestroysCover;
         public float SuppressionSeconds = 6f;
         public float FriendlyFireClearanceRadius = 0.9f;
+
+        /// <summary>
+        /// Whether someone on no team at all is a target. Copied from the configuration at spawn
+        /// like every other figure here, so changing it affects the next bandit rather than the one
+        /// already in the field. See <see cref="BanditConfiguration.HostileToUngrouped"/>.
+        /// </summary>
+        public bool HostileToUngrouped = true;
         public bool InfiniteAmmo = true;
         public bool HasPrimaryWeapon = true;
         public bool HasSecondaryWeapon;
@@ -363,7 +377,7 @@ namespace BanditPlugin.FakePlayer
             if (Time.time >= _nextScanTime)
             {
                 _nextScanTime = Time.time + ScanIntervalSeconds;
-                _target = FindNearestRealPlayer();
+                _target = FindNearestEnemy();
 
                 // Everything this bandit can see goes to the squad, every scan. This is the only
                 // place contact enters the shared picture, and it is why a bandit behind a wall
@@ -1220,17 +1234,43 @@ namespace BanditPlugin.FakePlayer
             // nothing at all while standing hit at its configured rate.
             //
             // It also covers suppression for free, which was already aiming at a place.
-            return HasLineOfSightToPoint(_aimPoint);
+            return HasLineOfSightToPoint(_aimPoint) || HasBreakableCoverInTheWay();
         }
 
         /// <summary>
-        /// Whether another bandit is close enough to this bandit's line of fire to be hit by it.
+        /// With no clear line, whether what is in the way is worth shooting anyway.
+        ///
+        /// Only for classes told to do it - a rifleman putting rounds into a tree trunk achieves
+        /// nothing but noise, which is why this is off by default and why the line-of-sight test
+        /// above still decides the ordinary case. Costs one raycast, and only on the packets where
+        /// the bandit was about to hold its fire.
+        /// </summary>
+        private bool HasBreakableCoverInTheWay()
+        {
+            if (!DestroysCover)
+            {
+                return false;
+            }
+
+            Vector3 origin = EyePosition;
+            Vector3 direction = Quaternion.Euler(_currentPitch - 90f, _currentYaw, 0f) * Vector3.forward;
+
+            RaycastInfo info = DamageTool.raycast(new Ray(origin, direction), FireRange, RayMasks.DAMAGE_CLIENT, Self);
+            return IsBreakableCover(info, _aimPoint);
+        }
+
+        /// <summary>
+        /// Whether one of this bandit's own side is close enough to its line of fire to be hit by it.
         ///
         /// Geometric rather than a raycast, because it runs on every trigger pull: each candidate
         /// is projected onto the firing line and rejected if it sits within
         /// FriendlyFireClearanceRadius of it, in front of the muzzle and nearer than whatever is
         /// being shot at. Squadmates behind the shooter or beyond the target cannot be hit by the
         /// round and are ignored.
+        ///
+        /// Only friends block a shot. A bandit from a team this one is fighting standing in the way
+        /// is not a reason to hold fire - it is a second target - which is what keeps two sides
+        /// shooting at each other rather than politely waiting for a clear lane.
         /// </summary>
         private bool IsFriendlyInLineOfFire()
         {
@@ -1257,6 +1297,11 @@ namespace BanditPlugin.FakePlayer
                     || other.Self.life == null || other.Self.life.isDead)
                 {
                     continue;
+                }
+
+                if (IsHostileTo(other.Self, otherIsBandit: true))
+                {
+                    continue; // another team's, and therefore something to shoot rather than around
                 }
 
                 // Their chest, taken from their own stance rather than assumed to be standing.
@@ -1368,6 +1413,11 @@ namespace BanditPlugin.FakePlayer
             }
 
             bool visible = HasLineOfSightToPoint(_aimPoint);
+            if (!visible && HasBreakableCoverInTheWay())
+            {
+                return "clearing cover";
+            }
+
             if (!visible)
             {
                 string stanceNote = Self.stance != null && Self.stance.stance == EPlayerStance.PRONE
@@ -1683,6 +1733,82 @@ namespace BanditPlugin.FakePlayer
 
             return true;
         }
+
+        /// <summary>
+        /// Whether what this shot would hit is worth shooting even though it is not the target:
+        /// something breakable, standing between us and them, close enough to them to be the thing
+        /// they are actually hiding behind.
+        ///
+        /// The proximity test is what stops a tank levelling every tree between itself and someone
+        /// two hundred metres away. The category test is what stops it firing into a hillside
+        /// forever: terrain, rock and buildings take no damage, so a bandit shooting at them would
+        /// hold a permanent clear-to-fire on something it can never remove.
+        /// </summary>
+        internal bool IsBreakableCover(RaycastInfo info, Vector3 targetPoint)
+        {
+            if (info.transform == null)
+            {
+                return false;
+            }
+
+            if ((info.point - targetPoint).sqrMagnitude > BreakableCoverRadius * BreakableCoverRadius)
+            {
+                return false;
+            }
+
+            if (info.vehicle != null)
+            {
+                // Someone else's vehicle is fair game; one with our own side in it is not, and that
+                // includes the one this bandit may be sitting in.
+                return !CarriesFriendlyCrew(info.vehicle);
+            }
+
+            Transform hit = info.transform;
+            if (hit.CompareTag("Resource") || hit.CompareTag("Barricade") || hit.CompareTag("Structure"))
+            {
+                return true; // trees, and anything a player built
+            }
+
+            // Breakable world objects - crates, fences, the props that leave rubble behind. Anything
+            // else on those layers is scenery and cannot be shot away.
+            return hit.GetComponentInParent<InteractableObjectRubble>() != null;
+        }
+
+        private bool CarriesFriendlyCrew(InteractableVehicle vehicle)
+        {
+            Passenger[] passengers = vehicle.passengers;
+            if (passengers == null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < passengers.Length; i++)
+            {
+                SteamPlayer occupant = passengers[i]?.player;
+                Player occupantPlayer = occupant?.player;
+                if (occupantPlayer == null)
+                {
+                    continue;
+                }
+
+                if (occupantPlayer == Self)
+                {
+                    return true;
+                }
+
+                bool occupantIsBandit = occupantPlayer.GetComponent<BanditBotController>() != null;
+                if (!IsHostileTo(occupantPlayer, occupantIsBandit))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>How close to the target a piece of cover has to be before shooting it counts as
+        /// clearing their cover rather than as demolishing the landscape.</summary>
+        private const float BreakableCoverRadius = 12f;
 
         private bool IsTargetInRange()
         {
@@ -2082,7 +2208,21 @@ namespace BanditPlugin.FakePlayer
             _serversidePackets.Enqueue(packet);
         }
 
-        private Player FindNearestRealPlayer()
+        /// <summary>
+        /// Whether this bandit should be shooting at someone. The rule itself lives in
+        /// <see cref="BanditTeams"/>, because the vehicle's turret needs the same answer.
+        /// </summary>
+        internal bool IsHostileTo(Player other, bool otherIsBandit)
+        {
+            return BanditTeams.IsHostile(Self, other, otherIsBandit, HostileToUngrouped);
+        }
+
+        /// <summary>
+        /// The nearest visible player this bandit is at war with - which since teams exist means
+        /// another team's bandits as readily as it means a person. Its own side is skipped whether
+        /// that side is a squad of bots or the player who joined their team.
+        /// </summary>
+        private Player FindNearestEnemy()
         {
             Player nearest = null;
 
@@ -2102,8 +2242,12 @@ namespace BanditPlugin.FakePlayer
                     continue;
                 }
 
-                // Don't let bots target each other.
-                if (candidate.gameObject.GetComponent<BanditBotController>() != null)
+                // Whose side they are on. The GetComponent is what used to rule every bot out of
+                // being a target at all; now it only says which of the two hostility rules applies,
+                // since two bandits on no team are still one side while two players on no team are
+                // not. See BanditTeams.IsHostile.
+                bool candidateIsBandit = candidate.gameObject.GetComponent<BanditBotController>() != null;
+                if (!IsHostileTo(candidate, candidateIsBandit))
                 {
                     continue;
                 }

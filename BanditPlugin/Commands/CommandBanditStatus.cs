@@ -59,6 +59,11 @@ namespace BanditPlugin.Commands
                     : "unknown";
 
                 string kit = bandit.Profile != null ? bandit.Profile.KitName : "default";
+
+                // Read off the bandit's live group rather than what it was spawned with, so a team
+                // changed underneath it - by /banditteam, or by the group being deleted - shows the
+                // side it is actually fighting on.
+                string team = BanditTeams.Describe(bandit.Self);
                 // The type as well as the number: two squads on the ground are usually two different
                 // types, and which one a bandit belongs to explains the figures it is fighting with.
                 string squad = bandit.Squad != null
@@ -66,7 +71,7 @@ namespace BanditPlugin.Commands
                     : string.Empty;
 
                 Reply(caller,
-                    $"#{i + 1} [{kit}{squad}]: {brain.State}, target {target}, dest {destination}, " +
+                    $"#{i + 1} [{kit}{squad} team {team}]: {brain.State}, target {target}, dest {destination}, " +
                     $"holding {bandit.EquippedWeaponName}{(bandit.IsBursting ? " (bursting)" : string.Empty)}" +
                     $"{(bandit.IsSuppressingFire ? " (suppressing)" : string.Empty)}, " +
                     $"stance {stance}, " +

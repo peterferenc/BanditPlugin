@@ -43,6 +43,18 @@ namespace BanditPlugin
         /// </summary>
         public List<string> Members = new List<string>();
 
+        /// <summary>
+        /// Which side this squad fights on - a name from <see cref="BanditConfiguration.Teams"/>.
+        /// Blank uses the configured default team, which is what makes every squad one side unless
+        /// you say otherwise.
+        ///
+        /// This is how you build a standing enemy of your own: a squad type on team "blue" is a
+        /// squad that fights the red bandits wherever the two of them meet, without anyone having
+        /// to name a team on the command line. "/squadspawn &lt;type&gt; team:&lt;name&gt;" overrides
+        /// it for one spawn.
+        /// </summary>
+        public string Team = string.Empty;
+
         /// <summary>Metres between members as they are placed, and the depth of the wedge.</summary>
         public float Spacing = -1f;
 

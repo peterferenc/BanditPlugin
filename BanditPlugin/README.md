@@ -10,8 +10,9 @@ zombies. See "Why not zombies?" below.
 
 | Command | Permission | Description |
 |---|---|---|
-| `/bandit` | `bandit.spawn` | Spawns a bandit where you're looking, facing you. |
-| `/squadspawn [<type>] [<metres>\|marker]` (aliases `/spawnsquad`, `/squad`) | `bandit.spawn` | Puts a whole squad down fighting - `basic`, `rifle` or `sniper` by default. Each type names the kits it is built from and its own spacing, spawn distance and group behaviour. `/squadspawn squads` lists them. |
+| `/bandit [<kit>] [team:<team>]` | `bandit.spawn` | Spawns a bandit where you're looking, facing you. |
+| `/squadspawn [<type>] [<metres>\|marker] [team:<team>]` (aliases `/spawnsquad`, `/squad`) | `bandit.spawn` | Puts a whole squad down fighting - `basic`, `rifle` or `sniper` by default. Each type names the kits it is built from and its own spacing, spawn distance and group behaviour. `/squadspawn squads` lists them. |
+| `/banditteam [list\|join <team>\|leave\|<player> <team>]` (aliases `/team`, `/teams`) | `bandit.team` | Which side someone is on. Bandits never shoot their own team and always shoot the others. |
 | `/banditgoto` (alias `/bgoto`) | `bandit.spawn` | Sends the last spawned bandit to the point you're looking at (up to 512m). |
 | `/banditpatrol [on\|off]` | `bandit.spawn` | Starts/stops **all** bandits patrolling this map's waypoints. No argument toggles. |
 | `/banditwp add\|remove\|clear\|list` | `bandit.spawn` | Records this map's patrol route at your feet. |
@@ -275,7 +276,20 @@ against the footprint figure so an already-floating vehicle cannot bake its floa
 ### Firing a turret
 
 A turret seat auto-equips its gun (`equipment.turretEquipServer`), so the trigger is the same
-`equipment.simulate` path the bandits already use on foot. What differs is the aim and the reports:
+`equipment.simulate` path the bandits already use on foot. What differs is the aim and the reports.
+
+**The aim angles are local to the turret, not to the seat.** `PlayerLook.simulate` rotates the gun
+with `turretYaw.localRotation = rotationYaw * Euler(0, yaw, 0)`, so the barrel's zero is the yaw
+pivot's parent times the base rotation it was built with - while the player's own aim transform
+hangs off the *seat*. Those agree only while the seat faces the same way as the turret mount, which
+is true of a hull gun and false of plenty of second and third turrets. Solving in seat space there
+pointed the barrel somewhere else entirely while the rounds still went to the target: gun facing
+away, bullets landing. Angles are now solved in the turret's own frame and the shot is traced along
+that same frame, so what is aimed and what is fired agree.
+
+The exception is a projectile turret with `useAimCamera` off: vanilla spawns rockets along
+`player.look.aim.forward`, which stays in seat space whatever the barrel does, so for those the seat
+frame is what the round will actually follow and is what gets aimed.
 
 - The muzzle line is computed from the angles **this packet is about to carry**, converted out of
   seat space, rather than read off `player.look.aim` - which still holds the previous packet's aim,
@@ -305,6 +319,23 @@ not shoot with one of its own within 1.5m of the firing line.
 `gunner` is F2, `gunner2` is F3, `gunner3` is F4, and so on: the number is the seat *key*, not a
 count of turrets, so a command can be checked by pressing the key yourself. That is how you find out
 which seat a modded vehicle's second turret is really on.
+
+### Shooting the cover away
+
+A target behind a tree, a fence or a parked car used to mean no shot at all, because the fire gate
+asks whether the traced round reaches them. Now, if what it meets instead is **breakable** and is
+within 12m of the target - the thing they are actually hiding behind, rather than every tree on the
+way - the bandit shoots that instead.
+
+Breakable means trees (`Resource`), player builds (`Barricade`, `Structure`), other vehicles, and
+world objects with an `InteractableObjectRubble`. Terrain, rock and buildings deliberately do not
+qualify: they take no damage, so a bandit shooting at them would hold a permanent clear-to-fire on
+something it can never remove. A vehicle with our own side aboard doesn't qualify either.
+
+Vehicle turrets do this **unconditionally** - a tank has no business waiting politely for someone to
+step out from behind a sapling. On foot it is per-kit via `DestroysCover`, off by default: a
+rifleman putting rounds into a trunk achieves nothing but noise, so this is for grenadiers and
+anything firing explosives. `/banditstatus` reports `clearing cover`.
 
 ### Reloads are served, not skipped
 
@@ -342,6 +373,49 @@ a locked vehicle. What it will not do is let you name a seat; it takes the first
 why the driver seat is confirmed empty before the call rather than after. Trains are excluded: they
 replicate a road position packed into all three channels of the position vector, and the packing is
 an `internal` method.
+
+## Teams
+
+A team is not a tag this plugin keeps to itself - it is a real in-game **group**, the same thing
+vanilla makes when players form one between themselves. `BanditTeams` derives a group ID from the
+team's name (FNV-1a, pushed into `0x40000000`-`0x7FFFFFFF` so it can never collide with the IDs
+vanilla hands out to player-made groups, which count up from 1) and creates it through
+`GroupManager.getOrAddGroup`. Bandits are put on one at spawn with
+`PlayerQuests.ServerAssignToGroup`, players with `/banditteam join`.
+
+Deriving the ID from the name rather than generating one is what makes a team durable: the same
+name is the same group after a restart, and a player's group is saved with their character
+(`PlayerQuests.save` writes it), so somebody who joined `red` last night is still red tonight and
+lines up with a squad spawned onto red today.
+
+Everything the game already does with groups therefore comes free:
+
+- teammates see each other's names in green and appear on each other's map,
+- with the vanilla default `Gameplay.Friendly_Fire = false`, teammates **cannot damage each other
+  at all** - `DamageTool.isPlayerAllowedToDamagePlayer` blocks it before the plugin is involved,
+- players can be on a team with no bot on the map at all, which is what makes this a server
+  feature rather than a bandit one.
+
+The targeting rule is one method, `BanditTeams.IsHostile`, shared by the on-foot scan, the
+friendly-fire clearance and the vehicle turret:
+
+1. same group is never a target - that covers two red bandits as much as it covers a red bandit and
+   the player who joined red;
+2. two bandits both on *no* team are one side, so a server that never configures teams keeps bots
+   that ignore each other;
+3. anyone on no team is fair game, unless `HostileToUngrouped` is off;
+4. anything else is another side, and is a target.
+
+Only friends block a shot. A rival team's bandit standing in the line of fire is a second target
+rather than a reason to hold fire, and a driver will run one over while still steering around its
+own - otherwise two sides would politely wait for clear lanes instead of fighting.
+
+One thing worth knowing if you extend this: vanilla counts a group's members **up** in
+`ServerAssignToGroup` and only ever counts them back **down** in `leaveGroup`, and a kicked player
+does neither. Despawning bandits therefore leave their team explicitly (`FakePlayerSpawner.LeaveTeam`)
+before the kick, or every spawn-and-clear cycle would leave the team a member heavier than it is,
+write that into `Groups.dat`, and eventually make a server with `Max_Group_Members` refuse to let
+anyone join a team nobody is on.
 
 ## Non-obvious things this had to work around
 
@@ -447,6 +521,9 @@ Developed against Unturned 3.26.3.8 with RocketModFix 4.23.1.
 | `CoverRingSamples` | `12` | Blind samples per ring, on top of nearby colliders. |
 | `CoverMinimumThreatDistance` | `8` | Cover nearer the threat than this is ignored. |
 | `CoverHideSeconds` / `CoverPeekSeconds` | `2.5` / `2` | The duck-and-pop cycle. |
+| `Teams` | `bandits`, `red`, `blue` | The sides bandits and players can fight on. Each is a real in-game group; `DisplayName` is what shows in game and prefixes the bandits' names. |
+| `DefaultTeam` | `bandits` | Team a bandit joins when neither its squad type nor the command names one. A name matching no team leaves bandits ungrouped, exactly as they were before teams existed. |
+| `HostileToUngrouped` | `true` | Whether someone on no team is a target for every bandit. Off makes bandits fight only rival teams, so you can walk through a bot war until you pick a side. |
 | `PatrolByDefault` | `false` | Start newly spawned bandits patrolling. |
 | `PatrolWaypointDwellSeconds` | `3` | Loiter time at each waypoint. |
 | `PatrolLoop` | `true` | Return to the first waypoint after the last. |

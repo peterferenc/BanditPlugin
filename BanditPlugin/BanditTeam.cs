@@ -33,7 +33,12 @@ namespace BanditPlugin
         /// </summary>
         public string DisplayName = string.Empty;
 
-        /// <summary>What to show and to name bandits after: DisplayName, or the name it was given.</summary>
+        /// <summary>
+        /// What to show and to name bandits after: DisplayName, or the name it was given. Kept out
+        /// of the file - it is derived from the two fields above, and a third element saying the
+        /// same thing is a third element to keep in step.
+        /// </summary>
+        [System.Xml.Serialization.XmlIgnore]
         public string Label => !string.IsNullOrEmpty(DisplayName) ? DisplayName : Name;
 
         /// <summary>

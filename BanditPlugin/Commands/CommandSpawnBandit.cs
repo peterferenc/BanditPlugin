@@ -44,9 +44,21 @@ namespace BanditPlugin.Commands
         {
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
+            // Lifted out first so "/bandit mg team:blue" is still a one-word kit spawn rather than
+            // looking like one of the two-word orders below. See BanditTeams.ExtractTeamArgument.
+            command = BanditTeams.ExtractTeamArgument(command, out string requestedTeam);
+
+            BanditTeam team = BanditTeams.Find(config, requestedTeam);
+            if (team == null && !string.IsNullOrEmpty(requestedTeam))
+            {
+                Reply(caller, $"No team called '{requestedTeam}'. Teams: "
+                    + $"{string.Join(", ", BanditTeams.Names(config).ToArray())}.", Color.red);
+                return;
+            }
+
             if (command.Length == 0)
             {
-                Spawn(caller, config.FindKit(config.DefaultKit));
+                Spawn(caller, config.FindKit(config.DefaultKit), team, config);
                 return;
             }
 
@@ -69,7 +81,7 @@ namespace BanditPlugin.Commands
                     return;
                 }
 
-                Spawn(caller, kit);
+                Spawn(caller, kit, team, config);
                 return;
             }
 
@@ -199,7 +211,7 @@ namespace BanditPlugin.Commands
             Reply(caller, $"{applied} bandit(s) {description}.", Color.green);
         }
 
-        private static void Spawn(IRocketPlayer caller, BanditKit kit)
+        private static void Spawn(IRocketPlayer caller, BanditKit kit, BanditTeam team, BanditConfiguration config)
         {
             if (!(caller is UnturnedPlayer callerPlayer))
             {
@@ -226,13 +238,15 @@ namespace BanditPlugin.Commands
             // soon as it sees someone, but it gives it a sane initial facing.
             float facingAngleDegrees = unturnedPlayer.transform.eulerAngles.y + 180f;
 
-            // The class goes in the name, because it is the one label visible from across a field
-            // and through a scope - which is the only practical way to tell five of them apart
-            // once a squad is on the ground.
+            // The class and the side go in the name, because that is the one label visible from
+            // across a field and through a scope - which is the only practical way to tell five of
+            // them apart once a squad is on the ground, or to tell two sides apart once both are.
+            BanditTeam spawnTeam = team ?? BanditTeams.Default(config);
             string kitName = kit != null && !string.IsNullOrEmpty(kit.Name) ? kit.Name : null;
-            string displayName = kitName != null ? $"Bandit {kitName}" : "Bandit";
+            string prefix = spawnTeam != null ? spawnTeam.Label : "Bandit";
+            string displayName = kitName != null ? $"{prefix} {kitName}" : prefix;
 
-            Player bandit = FakePlayerSpawner.Spawn(spawnPosition, facingAngleDegrees, displayName, kit);
+            Player bandit = FakePlayerSpawner.Spawn(spawnPosition, facingAngleDegrees, displayName, kit, spawnTeam);
             if (bandit == null)
             {
                 Reply(caller, "Failed to spawn bandit - see server console for details.", Color.red);
@@ -244,7 +258,7 @@ namespace BanditPlugin.Commands
                 ? DescribeStandingOrders(controller)
                 : "no standing orders yet";
 
-            Reply(caller, $"Spawned {displayName} ({orders}).", Color.green);
+            Reply(caller, $"Spawned {displayName} on team {BanditTeams.Describe(bandit)} ({orders}).", Color.green);
         }
 
         /// <summary>
@@ -302,8 +316,8 @@ namespace BanditPlugin.Commands
 
         private static void ReplyUsage(IRocketPlayer caller)
         {
-            Reply(caller, "Usage: /bandit  |  /bandit <kit>  |  /bandit kits  |  "
-                + "/bandit stance stand|crouch|prone|free  |  /bandit cover start|stop  "
+            Reply(caller, "Usage: /bandit  |  /bandit <kit>  |  /bandit <kit> team:<team>  |  "
+                + "/bandit kits  |  /bandit stance stand|crouch|prone|free  |  /bandit cover start|stop  "
                 + "|  /bandit peek start|stop  |  /bandit shoot start|stop", Color.yellow);
         }
 

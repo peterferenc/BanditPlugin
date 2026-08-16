@@ -66,6 +66,11 @@ namespace BanditPlugin.Commands
         {
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
+            // Taken out of the words before anything else reads them, because everything else this
+            // command takes is positional and a bare team name could not be told from a type or a
+            // distance. "team:blue" can therefore sit anywhere in the line.
+            command = BanditTeams.ExtractTeamArgument(command, out string requestedTeam);
+
             if (command.Length > 0 && IsListRequest(command[0]))
             {
                 ReplySquads(caller, config);
@@ -96,6 +101,19 @@ namespace BanditPlugin.Commands
             if (composition == null || composition.Count == 0)
             {
                 UnturnedChat.Say(caller, $"Squad type '{profile.TypeName}' has no members - nothing to spawn.", Color.red);
+                return;
+            }
+
+            // The side it fights on: what the caller typed, else the type's own, else the default.
+            // A name nobody recognises is refused rather than quietly spawning the squad onto the
+            // default team - a squad on the wrong side is the one mistake here you find out about
+            // by being shot by it.
+            string teamName = !string.IsNullOrEmpty(requestedTeam) ? requestedTeam : profile.Team;
+            BanditTeam team = BanditTeams.Find(config, teamName);
+            if (team == null && !string.IsNullOrEmpty(requestedTeam))
+            {
+                UnturnedChat.Say(caller, $"No team called '{requestedTeam}'. Teams: "
+                    + $"{string.Join(", ", BanditTeams.Names(config).ToArray())}.", Color.red);
                 return;
             }
 
@@ -196,7 +214,11 @@ namespace BanditPlugin.Commands
                 }
 
                 Vector3 slot = FormationSlot(centre, right, forward, i, composition.Count, profile.Spacing);
-                Player bandit = FakePlayerSpawner.Spawn(slot, facing, $"Bandit {kit.Name}", kit);
+
+                // The team in the name, not just the class: with two sides on the ground, which
+                // side a man is on is the first thing you need to read off him through a scope.
+                string displayName = team != null ? $"{team.Label} {kit.Name}" : $"Bandit {kit.Name}";
+                Player bandit = FakePlayerSpawner.Spawn(slot, facing, displayName, kit, team);
                 if (bandit == null)
                 {
                     continue;
@@ -228,6 +250,7 @@ namespace BanditPlugin.Commands
             UnturnedChat.Say(caller, $"Squad {squad.Id} '{profile.TypeName}' up {placedRange:0}m "
                 + (useMarker ? "at your marker" : "that way")
                 + $": {string.Join(", ", spawned.ToArray())}"
+                + (team != null ? $", team {team.Label}" : ", no team")
                 + (profile.WeaponsFree ? ", weapons free." : ", holding fire."), Color.green);
 
             if (unknown.Count > 0)
@@ -279,7 +302,8 @@ namespace BanditPlugin.Commands
                     ? string.Join(", ", profile.Members.ToArray())
                     : "nobody";
 
-                UnturnedChat.Say(caller, $"  {name}: {members} - {profile.SpawnDistance:0}m out, "
+                UnturnedChat.Say(caller, $"  {name}: {members} - team {profile.Team}, "
+                    + $"{profile.SpawnDistance:0}m out, "
                     + $"{profile.Spacing:0}m apart, holds contact {profile.ContactMemorySeconds:0}s, "
                     + $"repositions after {profile.RepositionAfterNoShotSeconds:0.#}s"
                     + (profile.WeaponsFree ? string.Empty : ", holding fire"), Color.grey);
@@ -289,8 +313,10 @@ namespace BanditPlugin.Commands
         private static void ReplyUsage(IRocketPlayer caller, BanditConfiguration config)
         {
             UnturnedChat.Say(caller, "Usage: /squadspawn  |  /squadspawn <type>  |  "
-                + "/squadspawn <type> <metres>  |  /squadspawn <type> marker  |  /squadspawn squads. "
-                + $"Types: {string.Join(", ", config.SquadNames().ToArray())}.", Color.yellow);
+                + "/squadspawn <type> <metres>  |  /squadspawn <type> marker  |  "
+                + "/squadspawn <type> team:<team>  |  /squadspawn squads. "
+                + $"Types: {string.Join(", ", config.SquadNames().ToArray())}. "
+                + $"Teams: {string.Join(", ", BanditTeams.Names(config).ToArray())}.", Color.yellow);
         }
 
         /// <summary>

@@ -32,6 +32,10 @@ namespace BanditPlugin
         public BanditStance ContactStance;
         public bool SuppressiveFire;
 
+        /// <summary>Shoot breakable cover out from in front of a target instead of holding fire.
+        /// See <see cref="BanditKit.DestroysCover"/>.</summary>
+        public bool DestroysCover;
+
         /// <summary>
         /// What a bandit spawned with no kit gets: the global configuration exactly as it was
         /// before kits existed, including the legacy top-level Loadout. Keeping this path means an
@@ -56,7 +60,8 @@ namespace BanditPlugin
                 Prone = false,
                 AdvanceOnTarget = config.AdvanceOnTarget,
                 ContactStance = BanditStance.Free,
-                SuppressiveFire = false
+                SuppressiveFire = false,
+                DestroysCover = false
             };
         }
 
@@ -89,7 +94,8 @@ namespace BanditPlugin
                 Prone = kit.Prone,
                 AdvanceOnTarget = kit.AdvanceOnTarget,
                 ContactStance = kit.ContactStance,
-                SuppressiveFire = kit.SuppressiveFire
+                SuppressiveFire = kit.SuppressiveFire,
+                DestroysCover = kit.DestroysCover
             };
         }
 

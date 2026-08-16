@@ -13,9 +13,16 @@ namespace BanditPlugin
         {
             Instance = this;
             BackfillEmptyCollections();
+
+            // Create the group behind every team up front, so "/banditteam join red" works before
+            // any bandit has been spawned onto red. Lookups create one on demand as well - this is
+            // only so a team exists as soon as the server does.
+            BanditTeams.Ensure(Configuration.Instance);
+
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
             Logger.Log("[Bandit] Loaded. /squadspawn <type> puts a whole squad down fighting - "
-                + "/squadspawn squads lists the types; "
+                + "/squadspawn squads lists the types, and team:<team> puts one on a side; "
+                + "/banditteam join <team> puts you on one, and bandits on it stop shooting at you; "
                 + "/bandit spawns one - it just stands until ordered. "
                 + "/bandit shoot|cover|peek start|stop are the standing orders; /banditgoto sends one somewhere, "
                 + "/banditpatrol sets it walking a route, /banditprone lies one down, "
@@ -50,10 +57,16 @@ namespace BanditPlugin
                 changed = true;
             }
 
+            if (config.Teams == null || config.Teams.Count == 0)
+            {
+                config.Teams = BanditTeam.BuildDefaults();
+                changed = true;
+            }
+
             if (changed)
             {
                 Configuration.Save();
-                Logger.Log("[Bandit] Wrote the default kits and squad types into the configuration.");
+                Logger.Log("[Bandit] Wrote the default kits, squad types and teams into the configuration.");
             }
         }
 
