@@ -24,7 +24,10 @@ namespace BanditPlugin.FakePlayer
             Travel,
             Investigate,
             Engage,
-            TakeCover
+            TakeCover,
+
+            /// <summary>Getting out from in front of a friendly vehicle. See OrderEvade.</summary>
+            Evade
         }
 
         public BanditState State { get; private set; } = BanditState.Idle;
@@ -333,6 +336,35 @@ namespace BanditPlugin.FakePlayer
             }
         }
 
+        /// <summary>
+        /// Get out of the way, now, in this world direction.
+        ///
+        /// Ordered by a squadmate driving a vehicle whose path runs over this bandit. It outranks
+        /// everything - cover, patrol, the fight it is in, a /banditgoto, even MovementEnabled being
+        /// off - because everything else it could be doing is survivable and being run over by its
+        /// own side is not. A bandit lying prone in cover stands up and sprints out of the lane, and
+        /// goes back to what it was doing a second later.
+        ///
+        /// Re-ordered every packet while the bandit is still in the lane, so the hold is short: the
+        /// order expires on its own the moment the vehicle stops threatening it.
+        /// </summary>
+        public void OrderEvade(Vector3 worldDirection, float seconds)
+        {
+            worldDirection.y = 0f;
+            if (worldDirection.sqrMagnitude < 0.0001f)
+            {
+                return;
+            }
+
+            _evadeDirection = worldDirection.normalized;
+            _evadeUntil = Time.time + seconds;
+        }
+
+        public bool IsEvading => Time.time < _evadeUntil;
+
+        private Vector3 _evadeDirection;
+        private float _evadeUntil;
+
         public void Tick(float deltaTime, Player target)
         {
             MoveDirection = Vector3.zero;
@@ -349,6 +381,19 @@ namespace BanditPlugin.FakePlayer
             {
                 Navigator.Stop();
                 State = BanditState.Idle;
+                return;
+            }
+
+            // Before MovementEnabled and before every state below, deliberately. The stance flags
+            // were just cleared, so a prone bandit stands up on this same tick simply by not being
+            // told to stay down, and the weapon comes down so vanilla will let it sprint -
+            // PlayerStance refuses to sprint while aiming.
+            if (IsEvading)
+            {
+                State = BanditState.Evade;
+                MoveDirection = _evadeDirection;
+                WantsSprint = true;
+                WantsWeaponDown = true;
                 return;
             }
 

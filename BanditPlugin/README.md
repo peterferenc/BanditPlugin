@@ -177,10 +177,27 @@ broken tracking.
 `/banditvgoto` routes with the same A* the bandits walk on, then does something the navmesh cannot
 help with. That mesh was baked for a walking zombie; it says nothing about whether a 3m-wide truck
 fits through a gap it will happily route a person through. So before any heading is driven, a plate
-the width of the vehicle is swept along it (`Physics.BoxCast`, bumper height, self-hits filtered),
+the width **and height** of the vehicle is swept along it (`Physics.BoxCast`, self-hits filtered),
 and a fan of ±20/40/60/80° is tried when the direct line is blocked. Terrain is deliberately left
-out of that sweep - at bumper height every upslope reads as a wall - and handled by a separate climb
-test that refuses anything over 35°.
+out of that sweep - it would read every upslope as a wall - and handled by a separate climb test
+that refuses anything over 35°.
+
+Two things about that sweep were wrong at first and are worth recording, because both let the
+vehicle drive through solid objects:
+
+- **`RayMasks.CLIP` was missing.** Unturned objects carry their collision on separate clip volumes
+  rather than on the visible mesh, and vanilla's own `BLOCK_COLLISION` includes that layer. A fence,
+  railing or barrier can therefore be completely solid to the game and completely invisible to a
+  sweep that only looks at `LARGE`/`MEDIUM`. This is why thin things were being driven through.
+  `SMALL` is still left out and stays out - it is not in `BLOCK_COLLISION` either, so it stops
+  nothing in vanilla, and a truck should drive through a bush.
+- **The probe was a thin band at bumper height**, so anything whose collision sat above or below
+  that one slice was missed. It is now the body's full height, starting 35cm above the underside so
+  the road ahead isn't mistaken for a wall.
+
+A collider the sweep starts *inside* now counts as blocking, too. Forgiving those meant a vehicle
+pressed against something reported every direction as clear and kept pushing; the way out is
+reverse, and the reverse sweep is the one place overlap is still forgiven.
 
 When nothing in the fan fits, the vehicle **stops** rather than grinding into the gap, and
 `/banditstatus` reports `blocked 40m out`. That is a real outcome, not a failure: the vehicle is the
@@ -193,6 +210,81 @@ next physics step, so the transform can be a packet behind what the server has a
 `InteractableVehicle.real` - stepping from it would hand the server a delta of up to two steps and
 trip the very check the step size exists to respect. The two are resynced whenever they drift
 further apart than a step can explain, which is also how a bandit recovers from a rejected packet.
+
+### Reverse
+
+Two different reasons to back up, and they are not the same behaviour:
+
+- **The destination is behind and close.** Swinging a lorry round to cover ten metres takes longer
+  than reversing, so past 110° of heading error and within 18m it goes tail-first. Further than that
+  it turns around, because nobody reverses two hundred metres. The choice is sticky - without that
+  it flips gear every time the heading error crosses the threshold and never goes anywhere.
+- **It has stopped making progress.** Stuck means exactly one thing: the vehicle was supposed to be
+  getting closer to where it was sent and, for 2.5s, hasn't. It is deliberately *not* "is something
+  in front of me" - the navigator already sweeps for that and drives round it, and most of what it
+  finds is a fact about the route rather than a failure of it. Distance to the destination is the
+  only measure that catches every real case: grinding along a fence at full speed, circling a rock
+  the fan keeps deflecting off, or sitting still because nothing fits all look identical from here
+  and all want the same answer.
+
+  That answer is a 1.6s reverse **plus a ban on the direction that failed** (50° arc, 7s) and a
+  forced repath, so the route that comes back goes a different way instead of taking another run at
+  the same gap. Bounded to three attempts per trip, because reversing counts as movement and would
+  otherwise keep the trip alive forever; after that it gives up and says so. A route that suddenly
+  gets 15m longer is treated as a new route rather than a failure, so repathing round a building
+  doesn't read as being stuck.
+
+The clearance sweep doesn't care which way the vehicle faces - it sweeps a *world* direction through
+a box the body's width - so a heading the navigator already approved is as safe to reverse along as
+to drive along. Only the wedged case picks its own direction, and that one gets swept before it's
+taken.
+
+### Not running over your own squad
+
+The vehicle does not brake and does not steer round friendly infantry: a bandit isn't in any of the
+masks the width sweep uses, and giving way to your own side would mean a vehicle that can never move
+through its own squad. **The bandit moves instead.**
+
+While driving, any squadmate inside the lane - the vehicle's own width plus a margin, from its nose
+to about two seconds' driving ahead - is given `BanditBrain.OrderEvade` toward the nearer side. That
+order outranks everything: cover, patrol, the fight it is in, a `/banditgoto`, even `MovementEnabled`
+being off. A bandit lying prone in cover stands up and sprints out of the lane, then goes back to
+what it was doing about a second later, because the order is short and re-issued every packet only
+while it is still in the way. Squadmates riding in a vehicle are skipped, and so is anyone more than
+3m above or below - a bandit on a roof over the lane is in no danger.
+
+Two loose bandits both have a null squad, which puts them in the same "ours" pool, so this works when
+testing with `/bandit` as well as with `/squadspawn`.
+
+### Firing a turret
+
+A turret seat auto-equips its gun (`equipment.turretEquipServer`), so the trigger is the same
+`equipment.simulate` path the bandits already use on foot. What differs is the aim and the reports:
+
+- The muzzle line is computed from the angles **this packet is about to carry**, converted out of
+  seat space, rather than read off `player.look.aim` - which still holds the previous packet's aim,
+  because the packet hasn't been simulated yet.
+- **Hitscan turrets** need hit reports injected, exactly like a rifle: the server raycasts nothing
+  itself, so an unreported round damages nothing. One report per round that could leave the barrel
+  during the packet.
+- **Projectile turrets** (rocket pods, cannon) need none - `fire()` spawns the projectile server-side
+  along the seat's own aim. Sending reports for one would be ignored.
+- The trigger is **latched down** through a burst (1.2s on, 1.4s off) rather than pulsed, because
+  vanilla sets `equipment.isBusy` for 150ms per shot and a re-pulled trigger caps at about four
+  rounds a second whatever the gun is.
+- It fires only when **the round actually connects** - the shot is traced first, and the trigger
+  goes down only if that trace reaches the target (or, for an explosive round, lands within 2.5m of
+  them). An angular tolerance cannot do this job: vanilla clamps a seat's aim to the turret's own
+  `pitchMin`/`pitchMax`, so a gun that cannot depress far enough sits at its limit with the target
+  well inside any tolerance and every round sailing overhead. Since it is the same ray
+  `AttachHitReports` traces, passing it also guarantees the report is a hit on the target rather
+  than on the bandit's own hull - which it would otherwise be, because a tank's seat puts the
+  bandit's head *inside* its own armour. The muzzle now comes from the seat's turret aim transform
+  rather than that head.
+
+Firing respects the same `/banditstop` / `/banditshoot` standing order as on foot - so with
+`HoldFireByDefault` on, a fresh gunner tracks but holds its fire until told otherwise - and it will
+not shoot with one of its own within 1.5m of the firing line.
 
 Ground vehicles only for now. Boats and aircraft are refused with a reason rather than half-driven:
 every step snaps the vehicle onto the ground beneath it, which under a boat is the seabed and under a

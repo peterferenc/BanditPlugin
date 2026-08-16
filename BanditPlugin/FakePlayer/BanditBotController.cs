@@ -54,6 +54,13 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private static readonly List<BanditBotController> Live = new List<BanditBotController>();
 
+        /// <summary>
+        /// Every live bandit, for the code that has to look at the others - the friendly-fire check
+        /// and, from a vehicle, working out which squadmates are about to be run over. Exposed as
+        /// the list itself rather than a copy because both callers run per packet.
+        /// </summary>
+        internal static List<BanditBotController> LiveBandits => Live;
+
         /// <summary>Decides where the bot wants to walk. Created in Start, once Self is set.</summary>
         public BanditBrain Brain { get; private set; }
 
@@ -314,7 +321,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             Brain = new BanditBrain(this, Self);
-            Driver = new BanditVehicleDriver(Self);
+            Driver = new BanditVehicleDriver(this, Self);
             Live.Add(this);
         }
 
@@ -1679,7 +1686,7 @@ namespace BanditPlugin.FakePlayer
         /// Deliberately does NOT check equipment.isBusy: that flag is set while a shot is in
         /// flight, and vanilla's own startPrimary() already guards on it.
         /// </summary>
-        private bool IsGunReady()
+        internal bool IsGunReady()
         {
             PlayerEquipment equipment = Self.equipment;
             if (equipment == null)
@@ -1720,7 +1727,7 @@ namespace BanditPlugin.FakePlayer
             return Vector3.Angle(aimDirection, toTarget.normalized) <= AimToleranceDegrees;
         }
 
-        private void TopUpAmmoIfNeeded()
+        internal void TopUpAmmoIfNeeded()
         {
             if (!InfiniteAmmo)
             {
@@ -1914,20 +1921,32 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private void AttachHitReports(WalkingPlayerInputPacket packet, int count)
         {
-            if (PlayerInputInputsField == null)
-            {
-                return;
-            }
-
             // Server-created bullets (fire() for a non-local player) get no spread - they travel
             // straight along the aim direction - so this raycast matches the bullet exactly.
             // It must use the packet's own yaw/pitch, aim error and all: those are the angles
             // PlayerLook will be simulated to, so a wobbled shot reports the hit it really made
             // (often nothing, which is the point) instead of the one it was aiming for.
-            Vector3 origin = Self.look.aim.position;
-            Vector3 direction = Quaternion.Euler(packet.pitch - 90f, packet.yaw, 0f) * Vector3.forward;
+            AttachHitReports(packet, count, Self.look.aim.position,
+                Quaternion.Euler(packet.pitch - 90f, packet.yaw, 0f) * Vector3.forward, FireRange);
+        }
 
-            RaycastInfo raycastInfo = DamageTool.raycast(new Ray(origin, direction), FireRange, RayMasks.DAMAGE_CLIENT, Self);
+        /// <summary>
+        /// The same, along a muzzle line the caller worked out for itself.
+        ///
+        /// A turret's angles are seat-local, so the packet's yaw and pitch mean nothing in world
+        /// space and the overload above cannot be used from a vehicle. The gunner converts them
+        /// through the seat transform and passes the result here, which keeps one implementation of
+        /// the awkward part - borrowing PlayerInput.inputs so vanilla's own sendRaycast does the
+        /// RaycastInfo to InputInfo conversion.
+        /// </summary>
+        internal void AttachHitReports(WalkingPlayerInputPacket packet, int count, Vector3 origin, Vector3 direction, float range)
+        {
+            if (PlayerInputInputsField == null)
+            {
+                return;
+            }
+
+            RaycastInfo raycastInfo = DamageTool.raycast(new Ray(origin, direction), range, RayMasks.DAMAGE_CLIENT, Self);
             if (Self.input.isRaycastInvalid(raycastInfo))
             {
                 return; // genuine miss - hit nothing at all

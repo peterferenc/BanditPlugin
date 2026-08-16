@@ -236,13 +236,20 @@ namespace BanditPlugin.Navigation
             }
         }
 
-        // Bumper height: above kerbs, ruts and the lip of a road, below the roofline. The probe is a
-        // thin plate the full width of the vehicle swept along the candidate heading, rather than
-        // the whole body box - a full-body sweep clips terrain on every slope and reads as blocked
-        // everywhere. Slopes are handled by the climb test instead.
-        private const float ProbeHeightAboveBottom = 0.7f;
-        private const float ProbeHalfHeight = 0.55f;
+        /// <summary>
+        /// How far above the vehicle's underside the probe starts. Above kerbs, ruts and the lip of
+        /// a road - roads and bridges are objects on the same layers as obstacles, so a probe that
+        /// reached the ground would read the road ahead as a wall.
+        /// </summary>
+        private const float ProbeFloorClearance = 0.35f;
+
+        // A plate the full width and height of the body, swept along the candidate heading. It was
+        // a thin band at bumper height, which is what let fence rails, railings and barriers through
+        // - anything whose collision sits above or below that one slice was invisible to it.
+        // Terrain is what a full-height plate would normally trip over, and terrain is not in the
+        // mask at all; slopes are the climb test's job instead.
         private const float ProbePlateHalfDepth = 0.05f;
+        private const float MinProbeHalfHeight = 0.35f;
 
         /// <summary>How far ahead to look for something in the way, at minimum. Longer for a long
         /// vehicle, because it needs the room to swing.</summary>
@@ -251,14 +258,30 @@ namespace BanditPlugin.Navigation
         /// <summary>Steeper than this counts as a wall rather than a hill.</summary>
         private const float MaxClimbDegrees = 35f;
 
-        /// <summary>Trees, rocks, buildings, player builds and other vehicles. Not terrain: a rise
-        /// in the ground is a climb test, not an obstacle, or every hill reads as a wall.</summary>
+        /// <summary>
+        /// Trees, rocks, buildings, player builds and other vehicles. Not terrain: a rise in the
+        /// ground is a climb test, not an obstacle, or every hill reads as a wall.
+        ///
+        /// CLIP is the one that matters and the one that was missing. Unturned objects carry their
+        /// collision on separate clip volumes rather than on the visible mesh, and vanilla's own
+        /// BLOCK_COLLISION includes that layer - so a fence, a railing or a barrier can be perfectly
+        /// solid to everything in the game and completely invisible to a sweep that only looks at
+        /// LARGE and MEDIUM. That is why thin things were being driven straight through.
+        ///
+        /// SMALL is still left out, and stays out: it is not in BLOCK_COLLISION either, so it does
+        /// not stop players or vehicles in vanilla, and a truck should drive through a bush.
+        /// </summary>
         private const int ObstacleMask = RayMasks.LARGE | RayMasks.MEDIUM | RayMasks.RESOURCE
-            | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE;
+            | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE | RayMasks.CLIP
+            | RayMasks.ENVIRONMENT;
 
         // Wider fan than the on-foot navigator's 35/65/90: a vehicle cannot strafe, so a detour it
         // can actually drive has to start as a turn it can actually make.
         private static readonly float[] AvoidanceAngles = { 20f, 40f, 60f, 80f };
+
+        /// <summary>How wide the arc around a banned direction is. Wide enough that "go round it"
+        /// means a genuinely different way, narrow enough to leave the fan somewhere to go.</summary>
+        private const float BannedArcDegrees = 50f;
 
         private const float CornerArriveRadius = 4f;
 
@@ -283,9 +306,8 @@ namespace BanditPlugin.Navigation
         private int _avoidSign;
         private float _avoidSignExpiry;
 
-        private Vector3 _lastStuckSamplePosition;
-        private float _nextStuckSampleTime;
-        private int _stuckSamples;
+        private Vector3 _bannedDirection;
+        private float _bannedUntil;
 
         public BanditVehicleNavigator(Player self)
         {
@@ -307,9 +329,58 @@ namespace BanditPlugin.Navigation
             _corners.Clear();
             _cornerIndex = 0;
             _nextRepathTime = 0f;
-            _stuckSamples = 0;
-            _nextStuckSampleTime = Time.time + 1f;
-            _lastStuckSamplePosition = _lastPosition;
+            _bannedUntil = 0f;
+        }
+
+        /// <summary>
+        /// Ends the trip, reporting it as abandoned rather than arrived.
+        ///
+        /// The decision belongs to the driver now, not here: "stuck" means the vehicle stopped
+        /// getting closer to where it was sent, which is a fact about the route, and this class only
+        /// ever sees one packet's heading. Whether the vehicle moved at all is beside the point - it
+        /// can grind along a wall all day without ever arriving.
+        /// </summary>
+        public void GiveUp()
+        {
+            HasGivenUp = true;
+            Stop();
+        }
+
+        /// <summary>
+        /// Refuses to steer anywhere near this world direction for a while, and throws away the
+        /// current route.
+        ///
+        /// Called by the driver when a trip has stopped making progress: whatever is out that way
+        /// has already been proven not to work, so the point of backing up is to try a *different*
+        /// way, not to take another run at the same one. The ban is on a world direction rather than
+        /// on a place, which is what makes it survive the vehicle turning round to reverse.
+        /// </summary>
+        public void BanDirection(Vector3 direction, float seconds)
+        {
+            direction.y = 0f;
+            if (direction.sqrMagnitude < 0.0001f)
+            {
+                return;
+            }
+
+            _bannedDirection = direction.normalized;
+            _bannedUntil = Time.time + seconds;
+            ForceRepath();
+        }
+
+        /// <summary>Drops the current route and asks for a fresh one on the next tick.</summary>
+        public void ForceRepath()
+        {
+            _hasPath = false;
+            _corners.Clear();
+            _cornerIndex = 0;
+            _nextRepathTime = 0f;
+        }
+
+        private bool IsBanned(Vector3 heading)
+        {
+            return Time.time < _bannedUntil
+                && Vector3.Angle(heading, _bannedDirection) < BannedArcDegrees;
         }
 
         public void Stop()
@@ -385,8 +456,6 @@ namespace BanditPlugin.Navigation
             }
             desired.Normalize();
 
-            UpdateStuckDetection(position);
-
             DesiredDirection = ChooseClearHeading(vehicle, footprint, desired);
         }
 
@@ -397,7 +466,7 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private Vector3 ChooseClearHeading(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 desired)
         {
-            if (IsHeadingClear(vehicle, footprint, desired))
+            if (!IsBanned(desired) && IsHeadingClear(vehicle, footprint, desired, ignoreOverlap: false))
             {
                 if (Time.time > _avoidSignExpiry)
                 {
@@ -416,7 +485,7 @@ namespace BanditPlugin.Navigation
                 for (int i = 0; i < AvoidanceAngles.Length; i++)
                 {
                     Vector3 candidate = Quaternion.Euler(0f, AvoidanceAngles[i] * sign, 0f) * desired;
-                    if (IsHeadingClear(vehicle, footprint, candidate))
+                    if (!IsBanned(candidate) && IsHeadingClear(vehicle, footprint, candidate, ignoreOverlap: false))
                     {
                         _avoidSign = sign;
                         _avoidSignExpiry = Time.time + 2f;
@@ -433,18 +502,40 @@ namespace BanditPlugin.Navigation
         /// <summary>
         /// Sweeps a plate the width of the vehicle along a heading, and checks the ground it would
         /// climb on the way.
+        ///
+        /// Public because reversing needs it too: which way the vehicle is pointing has nothing to
+        /// do with this test - it sweeps a world direction - so backing out of somewhere asks the
+        /// same question about the space behind as driving forward asks about the space ahead.
         /// </summary>
-        private bool IsHeadingClear(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading)
+        /// <param name="ignoreOverlap">
+        /// Whether to forgive something the body is already touching. Backing out of a wall the
+        /// vehicle has driven into has to be allowed, or the one manoeuvre that could free it is the
+        /// one thing it refuses to do; choosing a heading to drive *into* must not be.
+        /// </param>
+        public bool IsTravelClear(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading, bool ignoreOverlap = false)
+        {
+            return vehicle != null
+                && heading.sqrMagnitude > 0.0001f
+                && IsHeadingClear(vehicle, footprint, heading.normalized, ignoreOverlap);
+        }
+
+        private bool IsHeadingClear(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading, bool ignoreOverlap)
         {
             Transform root = vehicle.transform;
             float lookahead = Mathf.Max(MinLookaheadMetres, footprint.HalfLength * 2f);
 
+            // The band the body really occupies, minus the bottom few centimetres so the road under
+            // it is not mistaken for the wall in front of it.
+            float bottom = footprint.LocalBottom + ProbeFloorClearance;
+            float top = Mathf.Max(bottom + MinProbeHalfHeight * 2f, footprint.LocalCentre.y + footprint.HalfExtents.y);
+            float halfHeight = (top - bottom) * 0.5f;
+
             Vector3 centre = root.TransformPoint(new Vector3(
                 footprint.LocalCentre.x,
-                footprint.LocalBottom + ProbeHeightAboveBottom,
+                bottom + halfHeight,
                 footprint.LocalCentre.z));
 
-            Vector3 halfExtents = new Vector3(footprint.HalfWidth, ProbeHalfHeight, ProbePlateHalfDepth);
+            Vector3 halfExtents = new Vector3(footprint.HalfWidth, halfHeight, ProbePlateHalfDepth);
             Quaternion orientation = Quaternion.LookRotation(heading, Vector3.up);
             float distance = footprint.HalfLength + lookahead;
 
@@ -459,10 +550,10 @@ namespace BanditPlugin.Navigation
                     continue; // our own body, clip colliders and wheels
                 }
 
-                // A zero-distance hit means the sweep started already overlapping. That is usually
-                // the vehicle's own trailer or something it spawned inside, and treating it as a
-                // wall would leave the bandit convinced every direction is blocked.
-                if (hit.distance <= 0.01f)
+                // A zero-distance hit is a collider the sweep started inside. That used to be
+                // forgiven, which meant a vehicle pressed against something reported every direction
+                // as clear and kept pushing. It is a wall, and the way out of it is reverse.
+                if (ignoreOverlap && hit.distance <= 0.01f)
                 {
                     continue;
                 }
@@ -610,37 +701,6 @@ namespace BanditPlugin.Navigation
             snapped = info.position;
             return FlatDistance(snapped, point) <= NavmeshSnapDistance
                 && Mathf.Abs(snapped.y - point.y) <= NavmeshSnapDistance + 2f;
-        }
-
-        /// <summary>
-        /// A vehicle that has been asked to move and hasn't for several seconds is wedged on
-        /// something the width sweep cannot see - a kerb, a fence post between the wheels, a slope
-        /// it keeps sliding off. There is no sidestep to try, so it gives up and lets the command
-        /// report where it got to.
-        /// </summary>
-        private void UpdateStuckDetection(Vector3 position)
-        {
-            if (Time.time < _nextStuckSampleTime)
-            {
-                return;
-            }
-            _nextStuckSampleTime = Time.time + 1f;
-
-            float moved = FlatDistance(position, _lastStuckSamplePosition);
-            _lastStuckSamplePosition = position;
-
-            if (moved > 0.5f)
-            {
-                _stuckSamples = 0;
-                return;
-            }
-
-            _stuckSamples++;
-            if (_stuckSamples >= 5)
-            {
-                HasGivenUp = true;
-                Stop();
-            }
         }
 
         private static Vector3 Flatten(Vector3 v)
