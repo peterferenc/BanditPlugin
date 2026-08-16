@@ -51,6 +51,12 @@
       <HintPath>$(UnturnedManagedPath)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- WheelCollider lives here rather than in PhysicsModule, and the vehicle footprint has to
+         measure wheels: their undersides are what the vehicle rests on. -->
+    <Reference Include="UnityEngine.VehiclesModule">
+      <HintPath>$(UnturnedManagedPath)\UnityEngine.VehiclesModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
       <HintPath>$(UnturnedManagedPath)\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>

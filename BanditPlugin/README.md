@@ -18,7 +18,7 @@ zombies. See "Why not zombies?" below.
 | `/banditcover` | `bandit.spawn` | Makes the last spawned bandit take cover from you now, and reports what it found. |
 | `/banditstop` | `bandit.spawn` | All bandits hold fire. They still move and track you. |
 | `/banditshoot` | `bandit.spawn` | Weapons free again. |
-| `/banditv drive\|gunner\|exit` (alias `/bv`) | `bandit.spawn` | Puts the last spawned bandit in the nearest vehicle's driver seat (holds station) or F2 seat (tracks the nearest player), or gets it out. |
+| `/banditv drive\|gunner[2\|3\|…]\|exit` (alias `/bv`) | `bandit.spawn` | Puts the last spawned bandit in the nearest vehicle's driver seat (holds station) or a gun seat - `gunner` is F2, `gunner2` is F3, `gunner3` is F4 - where it tracks and engages the nearest player. Or gets it out. |
 | `/banditvgoto [stop]` (alias `/bvgoto`) | `bandit.spawn` | Drives that bandit's vehicle to the point you are looking at. |
 | `/banditstatus` | `bandit.spawn` | What each bandit is doing - state, target, destination, A* or steering. |
 | `/banditclear` (alias `/clearbandits`) | `bandit.spawn` | Removes all spawned bandits. |
@@ -257,6 +257,21 @@ while it is still in the way. Squadmates riding in a vehicle are skipped, and so
 Two loose bandits both have a null squad, which puts them in the same "ours" pool, so this works when
 testing with `/bandit` as well as with `/squadspawn`.
 
+### The footprint has to be measured in local space
+
+`Collider.bounds` is a **world-space AABB**, and folding its corners back into vehicle space
+inflates the result by however much the vehicle happens to be rotated. A tank parked at 45° measured
+about 40% too wide and, worse, reported an underside well below its real one - which the drive step
+reads as ride height, so it drove half a metre in the air and glided over everything, while the
+over-wide sweep made the navigation useless. It only showed on some vehicles because one parked
+square to the world axes measures correctly.
+
+Each collider's own local geometry is used instead (`BoxCollider.center/size`, `MeshCollider
+.sharedMesh.bounds`, `WheelCollider.center/radius`, …) carried through its own transform into
+vehicle space. On top of that, ride height is **calibrated from the vehicle itself** at the moment it
+is given somewhere to go - the gap between its origin and the ground it is resting on - clamped
+against the footprint figure so an already-floating vehicle cannot bake its float in.
+
 ### Firing a turret
 
 A turret seat auto-equips its gun (`equipment.turretEquipServer`), so the trigger is the same
@@ -286,6 +301,24 @@ A turret seat auto-equips its gun (`equipment.turretEquipServer`), so the trigge
 Firing respects the same `/banditstop` / `/banditshoot` standing order as on foot - so with
 `HoldFireByDefault` on, a fresh gunner tracks but holds its fire until told otherwise - and it will
 not shoot with one of its own within 1.5m of the firing line.
+
+`gunner` is F2, `gunner2` is F3, `gunner3` is F4, and so on: the number is the seat *key*, not a
+count of turrets, so a command can be checked by pressing the key yourself. That is how you find out
+which seat a modded vehicle's second turret is really on.
+
+### Reloads are served, not skipped
+
+`InfiniteAmmo` used to refill the magazine the instant it ran dry, which gave every bandit an
+endless belt with no pause in it. Wrong everywhere, absurd on a vehicle: a tank cannon with a
+one-round magazine and a six-second `Reload_Time` fired at the burst cadence, several times faster
+than the gun can physically manage.
+
+The magazine is still refilled - a bot has no client to play a reload animation - but only after the
+gun's own `Reload_Time` has elapsed, which is the same figure vanilla measures its own reload
+against (the animation length only wins where an animation exists, which on a dedicated server it
+never does; a gun that declares none gets 2.5s). The bandit holds its fire for the duration instead
+of dry-firing through it, on foot and in a turret alike, and `/banditstatus` reports
+`reloading (4.2s)`.
 
 Ground vehicles only for now. Boats and aircraft are refused with a reason rather than half-driven:
 every step snaps the vehicle onto the ground beneath it, which under a boat is the seabed and under a

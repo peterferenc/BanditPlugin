@@ -398,6 +398,10 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
+            // Every packet, not only when about to shoot: an empty magazine has a reload to sit
+            // through, and that has to run down whether or not the bandit currently has a target.
+            TickAmmo();
+
             // Before MaintainEquippedWeapon, which is the thing being suppressed while a gesture
             // runs - so the tick that ends the gesture is also the tick the rifle comes back out.
             TickGesture();
@@ -1068,7 +1072,6 @@ namespace BanditPlugin.FakePlayer
                 return EAttackInputFlags.None;
             }
 
-            TopUpAmmoIfNeeded();
             SnapAimErrorForRound(0);
 
             _nextFireTime = Time.time + FireIntervalSeconds;
@@ -1103,7 +1106,6 @@ namespace BanditPlugin.FakePlayer
                 // A fresh draw every packet, so each round of the burst is its own hit-or-miss
                 // rather than the whole burst inheriting the first round's luck, and each one is
                 // fired with a little more error than the last.
-                TopUpAmmoIfNeeded();
                 SnapAimErrorForRound(_burstRoundsFired);
                 _hitReportsForThisPacket = PlanHitReportCount();
 
@@ -1121,7 +1123,6 @@ namespace BanditPlugin.FakePlayer
             _burstRoundsFired = 0;
             _burstDeadline = Time.time + BurstTimeoutSeconds(_burstTarget);
 
-            TopUpAmmoIfNeeded();
             SnapAimErrorForRound(0);
             _hitReportsForThisPacket = PlanHitReportCount();
             return EAttackInputFlags.Start;
@@ -1179,6 +1180,14 @@ namespace BanditPlugin.FakePlayer
             // firing during the equip animation makes the bot throw punches instead of shooting.
             // simulate_UseableInput also ignores input until IsEquipAnimationFinished.
             if (!IsGunReady())
+            {
+                return false;
+            }
+
+            // Empty, and waiting out the gun's own reload. Vanilla would refuse the shot anyway once
+            // the magazine is dry; holding here is what stops the bandit standing there dry-firing
+            // through the whole reload.
+            if (IsReloading)
             {
                 return false;
             }
@@ -1324,6 +1333,11 @@ namespace BanditPlugin.FakePlayer
             if (!IsGunReady())
             {
                 return "gun not ready";
+            }
+
+            if (IsReloading)
+            {
+                return $"reloading ({ReloadSecondsRemaining:0.0}s)";
             }
 
             float range = (_aimPoint - EyePosition).magnitude;
@@ -1727,23 +1741,78 @@ namespace BanditPlugin.FakePlayer
             return Vector3.Angle(aimDirection, toTarget.normalized) <= AimToleranceDegrees;
         }
 
-        internal void TopUpAmmoIfNeeded()
+        /// <summary>
+        /// True while the bandit is standing there with an empty magazine, waiting out the gun's own
+        /// reload before it can fire again.
+        /// </summary>
+        public bool IsReloading { get; private set; }
+
+        /// <summary>How much of that reload is left, for /banditstatus.</summary>
+        public float ReloadSecondsRemaining => Mathf.Max(0f, _reloadReadyTime - Time.time);
+
+        private float _reloadReadyTime;
+
+        /// <summary>
+        /// What to wait when a gun's asset declares no Reload_Time at all. Vanilla takes the longer
+        /// of the asset figure and the reload animation's own length, and the animation only exists
+        /// in the client's bundle - so on a server a zero here means "unknown", not "instant".
+        /// </summary>
+        private const float UnknownReloadSeconds = 2.5f;
+
+        /// <summary>
+        /// Keeps the magazine topped up, and makes the bandit wait the gun's reload to do it.
+        ///
+        /// Called once per packet rather than at the moment of firing, because the wait has to run
+        /// down whether or not the bandit is currently trying to shoot.
+        ///
+        /// The wait is the point. Refilling the instant the magazine ran dry gave every bandit an
+        /// infinite belt with no pause in it, which is wrong everywhere but absurd on a vehicle: a
+        /// tank cannon with a one-round magazine and a six-second Reload_Time was firing at the
+        /// burst cadence, several times faster than the gun can physically manage. The bot has no
+        /// client to play a reload animation, so the delay is served here instead - the same
+        /// Reload_Time vanilla measures its own reload against.
+        /// </summary>
+        internal void TickAmmo()
         {
             if (!InfiniteAmmo)
             {
+                IsReloading = false;
                 return;
             }
 
             byte[] state = Self.equipment.state;
             if (state == null || state.Length <= AmmoStateIndex)
             {
+                IsReloading = false;
                 return;
             }
 
             if (state[AmmoStateIndex] > 0)
             {
+                IsReloading = false;
                 return;
             }
+
+            ItemGunAsset dryGun = Self.equipment.asset as ItemGunAsset;
+            if (dryGun == null)
+            {
+                IsReloading = false;
+                return;
+            }
+
+            if (!IsReloading)
+            {
+                IsReloading = true;
+                _reloadReadyTime = Time.time + ResolveReloadSeconds(dryGun);
+                return;
+            }
+
+            if (Time.time < _reloadReadyTime)
+            {
+                return;
+            }
+
+            IsReloading = false;
 
             // Taken from the gun in hand rather than one configured number, because the bot can be
             // holding a rifle one moment and a sidearm the next.
@@ -1767,6 +1836,16 @@ namespace BanditPlugin.FakePlayer
             {
                 UseableGunAmmoField.SetValue(gun, capacity);
             }
+        }
+
+        /// <summary>
+        /// How long this gun takes to reload, from its own asset. Reload_Time is what vanilla holds
+        /// its own reload against - the animation length only wins where an animation exists, which
+        /// on a dedicated server it never does.
+        /// </summary>
+        private static float ResolveReloadSeconds(ItemGunAsset gun)
+        {
+            return gun.reloadTime > 0.01f ? gun.reloadTime : UnknownReloadSeconds;
         }
 
         /// <summary>

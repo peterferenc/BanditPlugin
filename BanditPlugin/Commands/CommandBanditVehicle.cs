@@ -45,25 +45,76 @@ namespace BanditPlugin.Commands
                 return;
             }
 
-            switch (command[0].ToLowerInvariant())
+            string subcommand = command[0].ToLowerInvariant();
+
+            switch (subcommand)
             {
                 case "drive":
                     Drive(caller, bandit);
                     return;
 
-                case "gunner":
-                case "gun":
-                    Gun(caller, bandit);
-                    return;
-
                 case "exit":
                     Exit(caller, bandit);
                     return;
-
-                default:
-                    Reply(caller, "Usage: /banditv <drive|gunner|exit>", Color.yellow);
-                    return;
             }
+
+            if (subcommand.StartsWith("gun"))
+            {
+                if (!TryParseGunnerSeat(subcommand, command, out byte seat))
+                {
+                    Reply(caller, "Gunner seats are gunner (F2), gunner2 (F3), gunner3 (F4) and so on.", Color.yellow);
+                    return;
+                }
+
+                Gun(caller, bandit, seat);
+                return;
+            }
+
+            Reply(caller, "Usage: /banditv <drive|gunner[2|3|...]|exit>", Color.yellow);
+        }
+
+        /// <summary>
+        /// Reads which gun seat was asked for out of "gunner", "gunner2", "gun3" or "gunner 2".
+        ///
+        /// The number is the seat key, not the seat index counted from the guns: gunner2 is F3, is
+        /// seat 2. Keeping those the same means the command can be checked against the vehicle by
+        /// pressing the key yourself, which is how you find out which seat a modded vehicle's second
+        /// turret is actually on.
+        /// </summary>
+        private static bool TryParseGunnerSeat(string subcommand, string[] command, out byte seat)
+        {
+            seat = 0;
+
+            int digits = 0;
+            bool hasDigits = false;
+            for (int i = 0; i < subcommand.Length; i++)
+            {
+                if (!char.IsDigit(subcommand[i]))
+                {
+                    continue;
+                }
+
+                digits = digits * 10 + (subcommand[i] - '0');
+                hasDigits = true;
+            }
+
+            if (!hasDigits && command.Length > 1 && !int.TryParse(command[1], out digits))
+            {
+                return false;
+            }
+
+            if (!hasDigits && command.Length <= 1)
+            {
+                digits = 1; // plain "gunner" is the first gun seat, F2
+            }
+
+            if (digits < 1 || digits > byte.MaxValue - 1)
+            {
+                return false;
+            }
+
+            seat = (byte)digits;
+            return true;
         }
 
         private static void Drive(IRocketPlayer caller, BanditBotController bandit)
@@ -82,20 +133,20 @@ namespace BanditPlugin.Commands
                 + "/banditvgoto sends it somewhere.", Color.green);
         }
 
-        private static void Gun(IRocketPlayer caller, BanditBotController bandit)
+        private static void Gun(IRocketPlayer caller, BanditBotController bandit, byte seat)
         {
             string reason;
-            if (!bandit.Driver.TryGun(out reason))
+            if (!bandit.Driver.TryGun(seat, out reason))
             {
                 Reply(caller, $"Bandit stayed on foot: {reason}.", Color.red);
                 return;
             }
 
-            // Seat 1 is whatever the vehicle's second seat happens to be. In anything with a turret
-            // behind the driver that is the gun; in a plain car it is the passenger seat, and the
-            // bandit rides along watching instead. Which one it turned out to be is only knowable
-            // once vanilla has applied the seat change, so /banditstatus is the honest answer.
-            Reply(caller, $"Bandit into the F2 seat of {reason}, tracking the nearest player.", Color.green);
+            // The seat is whatever that vehicle's Nth seat happens to be. In anything with a turret
+            // there it is the gun; in a plain car it is a passenger seat, and the bandit rides along
+            // watching instead. Which one it turned out to be is only knowable once vanilla has
+            // applied the seat change, so /banditstatus is the honest answer.
+            Reply(caller, $"Bandit into the F{seat + 1} seat of {reason}, tracking the nearest player.", Color.green);
         }
 
         private static void Exit(IRocketPlayer caller, BanditBotController bandit)

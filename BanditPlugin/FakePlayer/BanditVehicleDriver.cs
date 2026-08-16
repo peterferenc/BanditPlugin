@@ -143,6 +143,10 @@ namespace BanditPlugin.FakePlayer
         private float _speed;
         private Vector3 _groundNormal = Vector3.up;
 
+        // How high this vehicle's origin sits above the ground when it is resting on it, measured
+        // from the vehicle itself at the moment it is given somewhere to go. See CalibrateRideHeight.
+        private float _rideHeight;
+
         // The pose this bandit last told the server the vehicle was in.
         //
         // Steps are taken from here rather than from vehicle.transform, because the transform can be
@@ -234,13 +238,16 @@ namespace BanditPlugin.FakePlayer
         public bool TryDrive(out string reason) => TryEnter(DriverSeat, out reason);
 
         /// <summary>
-        /// Seats the bandit in the F2 seat and leaves it tracking whoever is nearest. That seat is
-        /// the gunner's in anything with a turret behind the driver; in something without one the
-        /// bandit simply rides along and watches.
+        /// Seats the bandit in a gun seat and leaves it tracking whoever is nearest.
+        ///
+        /// Seat 1 is F2, seat 2 is F3, and so on - the same numbering a player's own seat keys use,
+        /// which is what makes "gunner2" mean the thing you get by pressing F3. A vehicle with
+        /// several turrets simply has several of these; in a seat with no turret at all the bandit
+        /// rides along and watches, which is harmless and occasionally useful.
         /// </summary>
-        public bool TryGun(out string reason)
+        public bool TryGun(byte seatIndex, out string reason)
         {
-            if (!TryEnter(GunnerSeat, out reason))
+            if (!TryEnter(seatIndex, out reason))
             {
                 return false;
             }
@@ -335,6 +342,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             EnsureFootprint(vehicle);
+            CalibrateRideHeight(vehicle);
 
             // A vehicle cannot put its centre on a point the way a person can stand on one. Arriving
             // is its nose being there, which is its own length away from its origin.
@@ -404,6 +412,11 @@ namespace BanditPlugin.FakePlayer
         public PlayerInputPacket BuildPacket(uint frameNumber, float deltaTime)
         {
             InteractableVehicle vehicle = Vehicle;
+
+            // The turret's magazine and its reload, on the same per-packet footing as on foot - a
+            // cannon that takes six seconds to reload has to spend them, whatever the burst timer
+            // would otherwise allow.
+            _controller.TickAmmo();
 
             TopUpConsumables(vehicle, force: false);
             UpdateSeatAim(vehicle, deltaTime);
@@ -625,7 +638,7 @@ namespace BanditPlugin.FakePlayer
             {
                 float maxRise = vehicle.asset.validSpeedUp * deltaTime * ValidationSafetyFactor;
                 float maxFall = vehicle.asset.validSpeedDown * deltaTime * ValidationSafetyFactor;
-                next.y = Mathf.Clamp(ground.y + _footprint.RideHeight, position.y - maxFall, position.y + maxRise);
+                next.y = Mathf.Clamp(ground.y + _rideHeight, position.y - maxFall, position.y + maxRise);
 
                 // Smoothed, because a wheel crossing a kerb flips the raw normal for one frame and
                 // the vehicle would visibly jolt.
@@ -996,8 +1009,6 @@ namespace BanditPlugin.FakePlayer
                 input = EAttackInputFlags.Start;
             }
 
-            _controller.TopUpAmmoIfNeeded();
-
             if (gun.projectile == null)
             {
                 hitReports = PlanHitReportCount(gun);
@@ -1039,6 +1050,14 @@ namespace BanditPlugin.FakePlayer
             // simulate_PunchInput while there is no valid useable, so firing during the equip
             // animation makes the bandit throw punches from the gunner's seat.
             if (!_controller.IsGunReady())
+            {
+                return false;
+            }
+
+            // Waiting out the gun's reload. This is the one that matters most on a vehicle: a tank
+            // cannon's Reload_Time dwarfs any burst timing, and without it the turret fires several
+            // times faster than the gun can manage.
+            if (_controller.IsReloading)
             {
                 return false;
             }
@@ -1225,6 +1244,32 @@ namespace BanditPlugin.FakePlayer
             }
         }
 
+        /// <summary>
+        /// Works out how high to hold the vehicle by measuring where it is sitting right now, while
+        /// it is still resting on the ground of its own accord.
+        ///
+        /// Deriving this from the footprint alone means trusting collider geometry to agree with
+        /// where the vehicle physically settles, and suspension, tracks and odd collider layouts all
+        /// make that a guess. Measuring the real gap is exact for the vehicle actually being driven.
+        ///
+        /// Clamped against the footprint's own figure so a vehicle that is already floating - left
+        /// there by an earlier trip, or dropped in by a spawn - cannot bake its float in and keep it
+        /// forever.
+        /// </summary>
+        private void CalibrateRideHeight(InteractableVehicle vehicle)
+        {
+            Transform vehicleTransform = vehicle.transform;
+            float fromFootprint = Mathf.Max(0f, _footprint.RideHeight);
+
+            if (VehicleTerrain.TrySample(vehicleTransform.position, vehicleTransform, out Vector3 ground, out Vector3 _))
+            {
+                _rideHeight = Mathf.Clamp(vehicleTransform.position.y - ground.y, 0f, fromFootprint + 0.5f);
+                return;
+            }
+
+            _rideHeight = fromFootprint;
+        }
+
         private void EnsureFootprint(InteractableVehicle vehicle)
         {
             if (vehicle == null || _footprintMeasuredFor == vehicle)
@@ -1249,7 +1294,14 @@ namespace BanditPlugin.FakePlayer
 
             if (TrackNearestPlayer)
             {
-                seat += _triggerLatched ? ", firing" : ", tracking";
+                if (_controller != null && _controller.IsReloading)
+                {
+                    seat += $", reloading ({_controller.ReloadSecondsRemaining:0.0}s)";
+                }
+                else
+                {
+                    seat += _triggerLatched ? ", firing" : ", tracking";
+                }
             }
 
             if (_navigator.HasDestination)

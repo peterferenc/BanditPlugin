@@ -67,11 +67,22 @@ namespace BanditPlugin.Navigation
                     continue;
                 }
 
-                // The collider's own world AABB, folded back into vehicle space corner by corner.
-                // Rounds outward on a rotated vehicle, which is the safe direction to be wrong in.
-                Bounds world = collider.bounds;
-                Vector3 min = world.min;
-                Vector3 max = world.max;
+                if (!TryGetLocalGeometry(collider, out Bounds geometry))
+                {
+                    continue;
+                }
+
+                // The collider's own geometry, carried into vehicle space through its own transform.
+                //
+                // Emphatically NOT collider.bounds: that is a world-space AABB, and folding its
+                // corners into vehicle space inflates the result by however much the vehicle happens
+                // to be rotated. A tank sitting at 45 degrees measured about 40% too wide and, worse,
+                // reported an underside well below its real one - which the drive step reads as ride
+                // height, so the tank drove half a metre in the air and glided over everything. It
+                // only showed on some vehicles because a vehicle parked square to the world axes
+                // measures correctly.
+                Vector3 min = geometry.min;
+                Vector3 max = geometry.max;
 
                 for (int corner = 0; corner < 8; corner++)
                 {
@@ -80,7 +91,7 @@ namespace BanditPlugin.Navigation
                         (corner & 2) == 0 ? min.y : max.y,
                         (corner & 4) == 0 ? min.z : max.z);
 
-                    Vector3 localPoint = root.InverseTransformPoint(point);
+                    Vector3 localPoint = root.InverseTransformPoint(collider.transform.TransformPoint(point));
                     if (!any)
                     {
                         local = new Bounds(localPoint, Vector3.zero);
@@ -104,6 +115,56 @@ namespace BanditPlugin.Navigation
                 HalfExtents = local.extents,
                 LocalBottom = local.min.y
             };
+        }
+
+        /// <summary>
+        /// A collider's shape in its own local space, which is the only form that survives being
+        /// rotated into somebody else's.
+        ///
+        /// Handled per type because there is no general accessor for it - Collider only offers the
+        /// world AABB. Anything unrecognised is skipped rather than guessed at: a vehicle has plenty
+        /// of colliders, and one silently over-sized box would put the whole footprint wrong.
+        /// </summary>
+        private static bool TryGetLocalGeometry(Collider collider, out Bounds bounds)
+        {
+            switch (collider)
+            {
+                case BoxCollider box:
+                    bounds = new Bounds(box.center, box.size);
+                    return true;
+
+                case SphereCollider sphere:
+                    bounds = new Bounds(sphere.center, Vector3.one * (sphere.radius * 2f));
+                    return true;
+
+                case CapsuleCollider capsule:
+                {
+                    float diameter = capsule.radius * 2f;
+                    Vector3 size = new Vector3(diameter, diameter, diameter);
+
+                    // direction: 0 = x, 1 = y, 2 = z
+                    if (capsule.direction == 0) size.x = Mathf.Max(capsule.height, diameter);
+                    else if (capsule.direction == 1) size.y = Mathf.Max(capsule.height, diameter);
+                    else size.z = Mathf.Max(capsule.height, diameter);
+
+                    bounds = new Bounds(capsule.center, size);
+                    return true;
+                }
+
+                case MeshCollider mesh when mesh.sharedMesh != null:
+                    bounds = mesh.sharedMesh.bounds;
+                    return true;
+
+                case WheelCollider wheel:
+                    // The tyre, at the position the suspension holds it. Its underside is what the
+                    // vehicle actually rests on, so this is the collider that sets the ride height.
+                    bounds = new Bounds(wheel.center, Vector3.one * (wheel.radius * 2f));
+                    return true;
+
+                default:
+                    bounds = default;
+                    return false;
+            }
         }
     }
 
