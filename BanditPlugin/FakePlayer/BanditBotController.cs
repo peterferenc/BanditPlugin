@@ -57,6 +57,13 @@ namespace BanditPlugin.FakePlayer
         /// <summary>Decides where the bot wants to walk. Created in Start, once Self is set.</summary>
         public BanditBrain Brain { get; private set; }
 
+        /// <summary>
+        /// Getting into and out of vehicles, and holding one still once seated. Created in Start
+        /// alongside the brain, and never null afterwards. A bandit that has never been ordered into
+        /// a vehicle simply reports IsSeated false and nothing here runs.
+        /// </summary>
+        public BanditVehicleDriver Driver { get; private set; }
+
         /// <summary>Whoever the bot is currently shooting at, or null.</summary>
         public Player CurrentTarget => _target;
 
@@ -245,6 +252,10 @@ namespace BanditPlugin.FakePlayer
         // EnqueueInputPacket; see AttachHitReports() for why the count is not always one.
         private int _hitReportsForThisPacket;
 
+        // Whether the bandit was in a seat as of the last packet, so getting in and getting out are
+        // each noticed once rather than tested for everywhere. See TickSeated().
+        private bool _wasSeated;
+
         /// <summary>Where a one-off gesture has got to. See TickGesture().</summary>
         private enum GesturePhase
         {
@@ -303,6 +314,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             Brain = new BanditBrain(this, Self);
+            Driver = new BanditVehicleDriver(Self);
             Live.Add(this);
         }
 
@@ -371,6 +383,14 @@ namespace BanditPlugin.FakePlayer
             float elapsed = _packetAccumulator;
             _packetAccumulator = 0f;
 
+            // A seated bandit is driven by a different packet entirely, and none of the on-foot work
+            // below applies to it: the brain's steering has no feet to steer, vanilla will not let a
+            // driver equip anything, and a gesture cannot play from a seat.
+            if (TickSeated(elapsed))
+            {
+                return;
+            }
+
             // Before MaintainEquippedWeapon, which is the thing being suppressed while a gesture
             // runs - so the tick that ends the gesture is also the tick the rifle comes back out.
             TickGesture();
@@ -388,6 +408,50 @@ namespace BanditPlugin.FakePlayer
             EAttackInputFlags secondary = DecideAimInput();
             EAttackInputFlags primary = DecideAttackInput();
             EnqueueInputPacket(primary, secondary);
+        }
+
+        /// <summary>
+        /// Sends one "hold this vehicle where it is" packet if the bandit is in a seat, and returns
+        /// whether it did - i.e. whether the rest of the on-foot tick should be skipped.
+        ///
+        /// Also the one place the two modes hand over to each other. Climbing into a seat takes the
+        /// gun out of the bandit's hands, so a latched trigger, a shouldered rifle or a half-played
+        /// gesture all belong to a weapon it is no longer holding. Left set, the burst that was
+        /// running when it got in would pick up mid-magazine the moment it climbed back out.
+        /// </summary>
+        private bool TickSeated(float elapsed)
+        {
+            bool seated = Driver.IsSeated;
+
+            if (seated != _wasSeated)
+            {
+                _wasSeated = seated;
+                _aimingActive = false;
+                _triggerHeld = false;
+                CancelBurst();
+                CancelGesture();
+
+                // So the bandit re-arms on the first tick back on its feet rather than waiting out
+                // a retry interval that started before it ever got in.
+                _nextEquipAttemptTime = 0f;
+
+                if (!seated)
+                {
+                    // Thrown out by a death, a wreck or someone else's /banditv exit, rather than by
+                    // the order that put it there. Standing orders that only mean anything from a
+                    // seat go with the seat.
+                    Driver.TrackNearestPlayer = false;
+                    Driver.StopDriving();
+                }
+            }
+
+            if (!seated)
+            {
+                return false;
+            }
+
+            _serversidePackets.Enqueue(Driver.BuildPacket(_clientSimulationFrameNumber++, elapsed));
+            return true;
         }
 
         /// <summary>
@@ -1216,6 +1280,13 @@ namespace BanditPlugin.FakePlayer
             if (Self == null || Self.life == null || Self.life.isDead)
             {
                 return "dead";
+            }
+
+            // Before every standing order, because it outranks all of them: a seated bandit is not
+            // being driven by the on-foot tick at all, so none of the reasons below are the reason.
+            if (Driver != null && Driver.IsSeated)
+            {
+                return $"in a vehicle ({Driver.Describe()})";
             }
 
             if (HoldFire)

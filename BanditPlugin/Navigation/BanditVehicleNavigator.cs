@@ -1,0 +1,659 @@
+using System.Collections.Generic;
+using Pathfinding;
+using SDG.Unturned;
+using UnityEngine;
+
+namespace BanditPlugin.Navigation
+{
+    /// <summary>
+    /// The box a vehicle actually occupies, measured in its own local space.
+    ///
+    /// This is the whole reason vehicle pathing is not on-foot pathing with a bigger number: a
+    /// bandit is a 0.4m capsule that can sidestep and jump, and an APC is a 3x7m box that can do
+    /// neither. Every clearance test below is this box, not a radius.
+    ///
+    /// Measured from the colliders rather than the asset, because the asset has no single size
+    /// field and the colliders are what the world will actually stop against.
+    /// </summary>
+    public struct BanditVehicleFootprint
+    {
+        /// <summary>Centre of the body box, in vehicle-local space.</summary>
+        public Vector3 LocalCentre;
+
+        /// <summary>x is half the width, y half the height, z half the length.</summary>
+        public Vector3 HalfExtents;
+
+        /// <summary>Local y of the underside - where the wheels are, and what sits on the ground.</summary>
+        public float LocalBottom;
+
+        public float HalfWidth => HalfExtents.x;
+        public float HalfLength => HalfExtents.z;
+
+        /// <summary>How far the vehicle's origin sits above its underside. Ground snapping puts the
+        /// origin this far above whatever it finds, so the body lands on the surface rather than
+        /// half inside it.</summary>
+        public float RideHeight => -LocalBottom;
+
+        /// <summary>
+        /// A body-sized box for a vehicle with no usable colliders. Deliberately car-sized: too
+        /// small and a bandit drives a tank through a gate it does not fit in, which is the failure
+        /// this whole struct exists to prevent.
+        /// </summary>
+        public static BanditVehicleFootprint Default => new BanditVehicleFootprint
+        {
+            LocalCentre = new Vector3(0f, 0.9f, 0f),
+            HalfExtents = new Vector3(1.2f, 0.9f, 2.5f),
+            LocalBottom = 0f
+        };
+
+        public static BanditVehicleFootprint Measure(InteractableVehicle vehicle)
+        {
+            if (vehicle == null)
+            {
+                return Default;
+            }
+
+            Transform root = vehicle.transform;
+            Collider[] colliders = vehicle.GetComponentsInChildren<Collider>(includeInactive: false);
+
+            bool any = false;
+            Bounds local = new Bounds();
+
+            for (int i = 0; i < colliders.Length; i++)
+            {
+                Collider collider = colliders[i];
+                if (collider == null || collider.isTrigger)
+                {
+                    continue;
+                }
+
+                // The collider's own world AABB, folded back into vehicle space corner by corner.
+                // Rounds outward on a rotated vehicle, which is the safe direction to be wrong in.
+                Bounds world = collider.bounds;
+                Vector3 min = world.min;
+                Vector3 max = world.max;
+
+                for (int corner = 0; corner < 8; corner++)
+                {
+                    Vector3 point = new Vector3(
+                        (corner & 1) == 0 ? min.x : max.x,
+                        (corner & 2) == 0 ? min.y : max.y,
+                        (corner & 4) == 0 ? min.z : max.z);
+
+                    Vector3 localPoint = root.InverseTransformPoint(point);
+                    if (!any)
+                    {
+                        local = new Bounds(localPoint, Vector3.zero);
+                        any = true;
+                    }
+                    else
+                    {
+                        local.Encapsulate(localPoint);
+                    }
+                }
+            }
+
+            if (!any)
+            {
+                return Default;
+            }
+
+            return new BanditVehicleFootprint
+            {
+                LocalCentre = local.center,
+                HalfExtents = local.extents,
+                LocalBottom = local.min.y
+            };
+        }
+    }
+
+    /// <summary>
+    /// Ground sampling shared by the navigator and the driving step.
+    /// </summary>
+    public static class VehicleTerrain
+    {
+        /// <summary>
+        /// What a vehicle can rest on: terrain, roads and bridges (objects), and player structures.
+        /// Not other vehicles - a bandit should drive around a parked truck, not up onto it - and
+        /// not trees, which are obstacles rather than surfaces.
+        /// </summary>
+        public const int GroundMask = RayMasks.GROUND | RayMasks.GROUND2 | RayMasks.LARGE
+            | RayMasks.MEDIUM | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.ENVIRONMENT;
+
+        private static readonly RaycastHit[] Hits = new RaycastHit[16];
+
+        /// <summary>
+        /// Finds the surface under a point, ignoring anything belonging to <paramref name="ignoreRoot"/>.
+        ///
+        /// The ray starts well above the point rather than at it, because the position being tested
+        /// is usually where the vehicle is *about* to be, which may be a metre into a rise.
+        /// </summary>
+        public static bool TrySample(Vector3 position, Transform ignoreRoot, out Vector3 point, out Vector3 normal)
+        {
+            point = position;
+            normal = Vector3.up;
+
+            const float startHeight = 6f;
+            const float probeLength = 24f;
+
+            Ray ray = new Ray(position + Vector3.up * startHeight, Vector3.down);
+            int count = Physics.RaycastNonAlloc(ray, Hits, probeLength, GroundMask, QueryTriggerInteraction.Ignore);
+
+            float bestDistance = float.MaxValue;
+            bool found = false;
+
+            for (int i = 0; i < count; i++)
+            {
+                RaycastHit hit = Hits[i];
+                if (hit.transform == null || (ignoreRoot != null && hit.transform.IsChildOf(ignoreRoot)))
+                {
+                    continue;
+                }
+
+                if (hit.distance < bestDistance)
+                {
+                    bestDistance = hit.distance;
+                    point = hit.point;
+                    normal = hit.normal;
+                    found = true;
+                }
+            }
+
+            return found;
+        }
+    }
+
+    /// <summary>
+    /// Turns "drive this vehicle to that point" into a world-space heading, and says when the way
+    /// ahead is too tight to take.
+    ///
+    /// The routing half is the same trick the on-foot navigator uses - the server's own A*
+    /// (AstarPathfindingProject, one RecastGraph per Nav volume) for the corner list, straight
+    /// steering when either end is off the mesh, because the navmesh only covers the towns.
+    ///
+    /// The steering half is not, and cannot be. That navmesh was baked for a walking zombie: it
+    /// says nothing about whether a 3m-wide truck fits between two trees on a corner it is happy to
+    /// route a person through. So every heading is tested by sweeping the vehicle's actual width
+    /// through it before it is used, and if none of the fan is clear the vehicle stops rather than
+    /// grinding into the gap. That is the honest answer to "it might not fit": a bandit that gets
+    /// as close as the vehicle can go and reports being stuck beats one that wedges itself in a
+    /// doorway and keeps pushing.
+    /// </summary>
+    public sealed class BanditVehicleNavigator
+    {
+        public float RepathIntervalSeconds = 2.5f;
+
+        /// <summary>
+        /// How far a point may be from the navmesh and still snap onto it. Looser than the on-foot
+        /// 3m: roads are frequently at the very edge of a Nav volume, or just outside one, and a
+        /// vehicle that refuses to path because its start point is 4m off the mesh would steer
+        /// blind through the one place pathing is most useful.
+        /// </summary>
+        public float NavmeshSnapDistance = 8f;
+
+        /// <summary>World-space unit vector on the XZ plane, or zero when there is nowhere safe to go.</summary>
+        public Vector3 DesiredDirection { get; private set; }
+
+        public Vector3 Destination { get; private set; }
+        public bool HasDestination { get; private set; }
+
+        /// <summary>Latched on arrival; the driver reads and clears it.</summary>
+        public bool HasArrived { get; private set; }
+
+        /// <summary>Latched when the vehicle has been wedged long enough to stop trying.</summary>
+        public bool HasGivenUp { get; private set; }
+
+        /// <summary>True while every heading in the fan is blocked - i.e. it does not fit.</summary>
+        public bool IsBlocked { get; private set; }
+
+        public bool IsFollowingPath => _hasPath;
+
+        /// <summary>How close counts as arrived. Scaled to the vehicle, because a bandit can walk
+        /// onto a point and a lorry can only get its nose near it.</summary>
+        public float ArriveRadius { get; private set; } = 6f;
+
+        public float RemainingDistance
+        {
+            get
+            {
+                if (!HasDestination)
+                {
+                    return 0f;
+                }
+
+                Vector3 position = _lastPosition;
+                if (!_hasPath || _corners.Count == 0 || _cornerIndex >= _corners.Count)
+                {
+                    return FlatDistance(position, Destination);
+                }
+
+                float total = FlatDistance(position, _corners[_cornerIndex]);
+                for (int i = _cornerIndex; i < _corners.Count - 1; i++)
+                {
+                    total += FlatDistance(_corners[i], _corners[i + 1]);
+                }
+                return total;
+            }
+        }
+
+        // Bumper height: above kerbs, ruts and the lip of a road, below the roofline. The probe is a
+        // thin plate the full width of the vehicle swept along the candidate heading, rather than
+        // the whole body box - a full-body sweep clips terrain on every slope and reads as blocked
+        // everywhere. Slopes are handled by the climb test instead.
+        private const float ProbeHeightAboveBottom = 0.7f;
+        private const float ProbeHalfHeight = 0.55f;
+        private const float ProbePlateHalfDepth = 0.05f;
+
+        /// <summary>How far ahead to look for something in the way, at minimum. Longer for a long
+        /// vehicle, because it needs the room to swing.</summary>
+        private const float MinLookaheadMetres = 7f;
+
+        /// <summary>Steeper than this counts as a wall rather than a hill.</summary>
+        private const float MaxClimbDegrees = 35f;
+
+        /// <summary>Trees, rocks, buildings, player builds and other vehicles. Not terrain: a rise
+        /// in the ground is a climb test, not an obstacle, or every hill reads as a wall.</summary>
+        private const int ObstacleMask = RayMasks.LARGE | RayMasks.MEDIUM | RayMasks.RESOURCE
+            | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE;
+
+        // Wider fan than the on-foot navigator's 35/65/90: a vehicle cannot strafe, so a detour it
+        // can actually drive has to start as a turn it can actually make.
+        private static readonly float[] AvoidanceAngles = { 20f, 40f, 60f, 80f };
+
+        private const float CornerArriveRadius = 4f;
+
+        private static readonly RaycastHit[] Hits = new RaycastHit[16];
+
+        private readonly Player _self;
+        private readonly OnPathDelegate _onPathComplete;
+        private readonly List<Vector3> _corners = new List<Vector3>();
+
+        private Seeker _seeker;
+        private bool _seekerUnavailable;
+        private bool _hasPath;
+        private int _cornerIndex;
+        private bool _pathPending;
+        private float _pathRequestedTime;
+        private float _nextRepathTime;
+        private int _pathGeneration;
+        private int _pendingPathGeneration = -1;
+
+        private Vector3 _lastPosition;
+
+        private int _avoidSign;
+        private float _avoidSignExpiry;
+
+        private Vector3 _lastStuckSamplePosition;
+        private float _nextStuckSampleTime;
+        private int _stuckSamples;
+
+        public BanditVehicleNavigator(Player self)
+        {
+            _self = self;
+            _onPathComplete = OnPathComplete;
+            _lastPosition = self != null ? self.transform.position : Vector3.zero;
+        }
+
+        public void SetDestination(Vector3 destination, float arriveRadius)
+        {
+            Destination = destination;
+            ArriveRadius = Mathf.Max(2f, arriveRadius);
+            HasDestination = true;
+            HasArrived = false;
+            HasGivenUp = false;
+            IsBlocked = false;
+            _pathGeneration++;
+            _hasPath = false;
+            _corners.Clear();
+            _cornerIndex = 0;
+            _nextRepathTime = 0f;
+            _stuckSamples = 0;
+            _nextStuckSampleTime = Time.time + 1f;
+            _lastStuckSamplePosition = _lastPosition;
+        }
+
+        public void Stop()
+        {
+            HasDestination = false;
+            IsBlocked = false;
+            _pathGeneration++;
+            _hasPath = false;
+            _corners.Clear();
+            DesiredDirection = Vector3.zero;
+
+            if (_seeker != null && _pathPending)
+            {
+                _seeker.CancelCurrentPathRequest();
+                _pathPending = false;
+            }
+        }
+
+        public bool ConsumeArrived()
+        {
+            bool arrived = HasArrived;
+            HasArrived = false;
+            return arrived;
+        }
+
+        public bool ConsumeGaveUp()
+        {
+            bool gaveUp = HasGivenUp;
+            HasGivenUp = false;
+            return gaveUp;
+        }
+
+        public void Tick(InteractableVehicle vehicle, BanditVehicleFootprint footprint, float deltaTime)
+        {
+            DesiredDirection = Vector3.zero;
+
+            if (vehicle == null || !HasDestination)
+            {
+                return;
+            }
+
+            Vector3 position = vehicle.transform.position;
+            _lastPosition = position;
+
+            if (FlatDistance(position, Destination) <= ArriveRadius)
+            {
+                HasArrived = true;
+                Stop();
+                return;
+            }
+
+            RefreshPath(position);
+
+            Vector3 steerTarget = Destination;
+            if (_hasPath && _corners.Count > 0)
+            {
+                while (_cornerIndex < _corners.Count - 1
+                    && FlatDistance(position, _corners[_cornerIndex]) < CornerArriveRadius)
+                {
+                    _cornerIndex++;
+                }
+                steerTarget = _corners[_cornerIndex];
+            }
+
+            Vector3 desired = Flatten(steerTarget - position);
+            if (desired.sqrMagnitude < 0.0001f)
+            {
+                desired = Flatten(Destination - position);
+            }
+            if (desired.sqrMagnitude < 0.0001f)
+            {
+                return;
+            }
+            desired.Normalize();
+
+            UpdateStuckDetection(position);
+
+            DesiredDirection = ChooseClearHeading(vehicle, footprint, desired);
+        }
+
+        /// <summary>
+        /// The wanted heading if the vehicle fits through it, otherwise the nearest one in the fan
+        /// that it does. Zero when nothing does - which stops the vehicle rather than shoving it
+        /// into the gap, and is what /banditvgoto reports as "it doesn't fit".
+        /// </summary>
+        private Vector3 ChooseClearHeading(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 desired)
+        {
+            if (IsHeadingClear(vehicle, footprint, desired))
+            {
+                if (Time.time > _avoidSignExpiry)
+                {
+                    _avoidSign = 0;
+                }
+                IsBlocked = false;
+                return desired;
+            }
+
+            // Keep turning the same way around an obstacle for a moment, or a vehicle sitting in
+            // front of a wall picks left and right on alternate packets and drives straight into it.
+            int firstSign = _avoidSign != 0 && Time.time <= _avoidSignExpiry ? _avoidSign : 1;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                int sign = attempt == 0 ? firstSign : -firstSign;
+                for (int i = 0; i < AvoidanceAngles.Length; i++)
+                {
+                    Vector3 candidate = Quaternion.Euler(0f, AvoidanceAngles[i] * sign, 0f) * desired;
+                    if (IsHeadingClear(vehicle, footprint, candidate))
+                    {
+                        _avoidSign = sign;
+                        _avoidSignExpiry = Time.time + 2f;
+                        IsBlocked = false;
+                        return candidate;
+                    }
+                }
+            }
+
+            IsBlocked = true;
+            return Vector3.zero;
+        }
+
+        /// <summary>
+        /// Sweeps a plate the width of the vehicle along a heading, and checks the ground it would
+        /// climb on the way.
+        /// </summary>
+        private bool IsHeadingClear(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading)
+        {
+            Transform root = vehicle.transform;
+            float lookahead = Mathf.Max(MinLookaheadMetres, footprint.HalfLength * 2f);
+
+            Vector3 centre = root.TransformPoint(new Vector3(
+                footprint.LocalCentre.x,
+                footprint.LocalBottom + ProbeHeightAboveBottom,
+                footprint.LocalCentre.z));
+
+            Vector3 halfExtents = new Vector3(footprint.HalfWidth, ProbeHalfHeight, ProbePlateHalfDepth);
+            Quaternion orientation = Quaternion.LookRotation(heading, Vector3.up);
+            float distance = footprint.HalfLength + lookahead;
+
+            int count = Physics.BoxCastNonAlloc(centre, halfExtents, heading, Hits, orientation, distance,
+                ObstacleMask, QueryTriggerInteraction.Ignore);
+
+            for (int i = 0; i < count; i++)
+            {
+                RaycastHit hit = Hits[i];
+                if (hit.transform == null || hit.transform.IsChildOf(root))
+                {
+                    continue; // our own body, clip colliders and wheels
+                }
+
+                // A zero-distance hit means the sweep started already overlapping. That is usually
+                // the vehicle's own trailer or something it spawned inside, and treating it as a
+                // wall would leave the bandit convinced every direction is blocked.
+                if (hit.distance <= 0.01f)
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return IsGroundClimbable(vehicle, footprint, heading, lookahead);
+        }
+
+        /// <summary>
+        /// Whether the ground a step ahead is a hill or a cliff. Terrain is deliberately kept out of
+        /// the obstacle sweep - at bumper height every upslope would read as a wall - so this is the
+        /// only thing stopping a bandit from driving up the side of a mountain.
+        /// </summary>
+        private static bool IsGroundClimbable(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading, float lookahead)
+        {
+            Transform root = vehicle.transform;
+            Vector3 here = root.position;
+            Vector3 ahead = here + heading * Mathf.Min(lookahead, footprint.HalfLength + 4f);
+
+            if (!VehicleTerrain.TrySample(here, root, out Vector3 groundHere, out Vector3 _)
+                || !VehicleTerrain.TrySample(ahead, root, out Vector3 groundAhead, out Vector3 _))
+            {
+                // No ground under one end of the step: a bridge edge, a cliff lip, or deep water.
+                // Not somewhere to drive.
+                return false;
+            }
+
+            float run = FlatDistance(groundHere, groundAhead);
+            if (run < 0.01f)
+            {
+                return true;
+            }
+
+            float climb = groundAhead.y - groundHere.y;
+            return Mathf.Atan2(climb, run) * Mathf.Rad2Deg <= MaxClimbDegrees;
+        }
+
+        private void RefreshPath(Vector3 position)
+        {
+            if (_pathPending)
+            {
+                if (Time.time - _pathRequestedTime > 5f)
+                {
+                    _pathPending = false;
+                }
+                return;
+            }
+
+            if (Time.time < _nextRepathTime)
+            {
+                return;
+            }
+            _nextRepathTime = Time.time + RepathIntervalSeconds;
+
+            if (AstarPath.active == null || AstarPath.active.isScanning)
+            {
+                _hasPath = false;
+                return;
+            }
+
+            if (!TrySnapToNavmesh(position, out Vector3 start) || !TrySnapToNavmesh(Destination, out Vector3 end))
+            {
+                _hasPath = false;
+                _corners.Clear();
+                return;
+            }
+
+            if (!EnsureSeeker())
+            {
+                _hasPath = false;
+                return;
+            }
+
+            _pathPending = true;
+            _pathRequestedTime = Time.time;
+            _pendingPathGeneration = _pathGeneration;
+            _seeker.StartPath(ABPath.Construct(start, end), _onPathComplete);
+        }
+
+        private void OnPathComplete(Path path)
+        {
+            _pathPending = false;
+
+            if (_pendingPathGeneration != _pathGeneration)
+            {
+                return;
+            }
+
+            _corners.Clear();
+            _cornerIndex = 0;
+
+            if (path == null || path.error || path.vectorPath == null || path.vectorPath.Count == 0)
+            {
+                _hasPath = false;
+                return;
+            }
+
+            for (int i = 0; i < path.vectorPath.Count; i++)
+            {
+                _corners.Add(path.vectorPath[i]);
+            }
+            _hasPath = true;
+        }
+
+        /// <summary>
+        /// Borrows the Seeker the on-foot navigator puts on the bandit. They never run at once - a
+        /// seated bandit's brain is not ticked - so one path request is in flight at a time.
+        /// </summary>
+        private bool EnsureSeeker()
+        {
+            if (_seeker != null)
+            {
+                return true;
+            }
+            if (_seekerUnavailable || _self == null)
+            {
+                return false;
+            }
+
+            GameObject gameObject = _self.gameObject;
+            _seeker = gameObject.GetComponent<Seeker>();
+            if (_seeker == null)
+            {
+                _seeker = gameObject.AddComponent<Seeker>();
+                _seeker.drawGizmos = false;
+                gameObject.AddComponent<FunnelModifier>();
+            }
+
+            _seekerUnavailable = _seeker == null;
+            return _seeker != null;
+        }
+
+        private bool TrySnapToNavmesh(Vector3 point, out Vector3 snapped)
+        {
+            snapped = point;
+
+            NNInfo info = AstarPath.active.GetNearest(point, NNConstraint.Walkable);
+            if (info.node == null)
+            {
+                return false;
+            }
+
+            snapped = info.position;
+            return FlatDistance(snapped, point) <= NavmeshSnapDistance
+                && Mathf.Abs(snapped.y - point.y) <= NavmeshSnapDistance + 2f;
+        }
+
+        /// <summary>
+        /// A vehicle that has been asked to move and hasn't for several seconds is wedged on
+        /// something the width sweep cannot see - a kerb, a fence post between the wheels, a slope
+        /// it keeps sliding off. There is no sidestep to try, so it gives up and lets the command
+        /// report where it got to.
+        /// </summary>
+        private void UpdateStuckDetection(Vector3 position)
+        {
+            if (Time.time < _nextStuckSampleTime)
+            {
+                return;
+            }
+            _nextStuckSampleTime = Time.time + 1f;
+
+            float moved = FlatDistance(position, _lastStuckSamplePosition);
+            _lastStuckSamplePosition = position;
+
+            if (moved > 0.5f)
+            {
+                _stuckSamples = 0;
+                return;
+            }
+
+            _stuckSamples++;
+            if (_stuckSamples >= 5)
+            {
+                HasGivenUp = true;
+                Stop();
+            }
+        }
+
+        private static Vector3 Flatten(Vector3 v)
+        {
+            v.y = 0f;
+            return v;
+        }
+
+        private static float FlatDistance(Vector3 a, Vector3 b)
+        {
+            a.y = 0f;
+            b.y = 0f;
+            return (a - b).magnitude;
+        }
+    }
+}

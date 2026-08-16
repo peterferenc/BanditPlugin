@@ -258,6 +258,22 @@ namespace BanditPlugin
         public float PreferredEngagementRange = 25f;
 
         /// <summary>
+        /// Keep the tank full while a bandit occupies a vehicle. On for testing, and it is not only
+        /// convenience: an empty tank is the one case vanilla tightens the anti-teleport check on a
+        /// car from the asset's own delta down to half a metre a packet, so a bandit that runs dry
+        /// mid-drive stops being able to move at anything like a sensible speed.
+        /// </summary>
+        public bool VehicleInfiniteFuel = true;
+
+        /// <summary>
+        /// Keep the battery charged while a bandit occupies a vehicle. Vanilla only turns the engine
+        /// on when the battery has charge, so a flat one leaves the bandit sitting in a dead vehicle
+        /// with its lights off. Health is deliberately not topped up - a bandit's vehicle is meant
+        /// to be destructible.
+        /// </summary>
+        public bool VehicleInfiniteBattery = true;
+
+        /// <summary>
         /// Spawn bandits already looking for cover when a target can see them or they are being
         /// shot. Off by default, so a fresh bandit stands where you put it until /bandit cover
         /// start. Like fire control, this is a per-bandit standing order rather than a global

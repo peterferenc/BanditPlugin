@@ -17,6 +17,8 @@ zombies. See "Why not zombies?" below.
 | `/banditcover` | `bandit.spawn` | Makes the last spawned bandit take cover from you now, and reports what it found. |
 | `/banditstop` | `bandit.spawn` | All bandits hold fire. They still move and track you. |
 | `/banditshoot` | `bandit.spawn` | Weapons free again. |
+| `/banditv drive\|gunner\|exit` (alias `/bv`) | `bandit.spawn` | Puts the last spawned bandit in the nearest vehicle's driver seat (holds station) or F2 seat (tracks the nearest player), or gets it out. |
+| `/banditvgoto [stop]` (alias `/bvgoto`) | `bandit.spawn` | Drives that bandit's vehicle to the point you are looking at. |
 | `/banditstatus` | `bandit.spawn` | What each bandit is doing - state, target, destination, A* or steering. |
 | `/banditclear` (alias `/clearbandits`) | `bandit.spawn` | Removes all spawned bandits. |
 
@@ -136,6 +138,84 @@ looking afterwards.
 hand-editable). With no recorded route, patrol falls back to the map's `LocationDevkitNode`s - the
 named places official maps mark in the editor. Bandits start at whichever waypoint is nearest,
 loiter on arrival, and break off to fight anything they see on the way, resuming afterwards.
+
+## Vehicles
+
+`/banditv drive` seats the last spawned bandit in the driver seat of the nearest vehicle within
+50m and holds it there. `/banditv exit` gets it out.
+
+**The driver is the physics.** A server never simulates a driven vehicle: `PlayerInput` branches on
+the packet type, and a `DrivingPlayerInputPacket` carries a position and a rotation where the
+walking one carries an analog byte. `InteractableVehicle.simulate()` ends in
+`rootRigidbody.MovePosition(point)` / `MoveRotation(angle)`, and `updatePhysics()` makes the
+rigidbody kinematic the moment seat 0 is occupied. So the bot doesn't press W - whatever its packets
+say the vehicle's pose is, is where the vehicle is.
+
+With no destination that is all it does: holding station means echoing the vehicle's own transform
+straight back at it every packet with the four motion values zeroed. The delta is nothing, so it
+sits. Nothing shoots from a vehicle yet.
+
+### Which packet depends on the seat
+
+A driver's stance is `DRIVING` and only a `DrivingPlayerInputPacket` reaches
+`InteractableVehicle.simulate`. Every other seat's stance is `SITTING`, and it is the **walking**
+packet's `SITTING` branch that calls `PlayerMovement.ServerUpdateTurretAim()` - the one thing that
+replicates where a gunner is pointing. Send a driving packet from a turret seat and the turret never
+moves for anyone watching. So `/banditv gunner` sends walking packets carrying nothing but a look
+angle, and `/banditv drive` sends driving packets carrying a pose.
+
+Those look angles are **seat-local**. `PlayerLook` assigns yaw to the seat's own local rotation and
+clamps it - a driver to ±160°, a turret seat to the asset's `yawMin`/`yawMax` and
+`pitchMin`/`pitchMax` - so the gunner converts the direction to its target into the seat transform's
+space before sending it, and slews at a fixed rate rather than snapping. There is deliberately no
+line-of-sight test on that target: from inside a vehicle the first thing a ray hits is usually the
+vehicle, and a gunner that dropped its target whenever the hull came between them would read as
+broken tracking.
+
+### Driving somewhere, and not fitting
+
+`/banditvgoto` routes with the same A* the bandits walk on, then does something the navmesh cannot
+help with. That mesh was baked for a walking zombie; it says nothing about whether a 3m-wide truck
+fits through a gap it will happily route a person through. So before any heading is driven, a plate
+the width of the vehicle is swept along it (`Physics.BoxCast`, bumper height, self-hits filtered),
+and a fan of ±20/40/60/80° is tried when the direct line is blocked. Terrain is deliberately left
+out of that sweep - at bumper height every upslope reads as a wall - and handled by a separate climb
+test that refuses anything over 35°.
+
+When nothing in the fan fits, the vehicle **stops** rather than grinding into the gap, and
+`/banditstatus` reports `blocked 40m out`. That is a real outcome, not a failure: the vehicle is the
+size it is, and a bandit that gets as close as it can and says so beats one wedged in a doorway
+still pushing.
+
+The step itself is clamped to both validation gates every packet, and is taken from the pose last
+*reported* rather than from `vehicle.transform`. `MovePosition` on a kinematic body lands at the
+next physics step, so the transform can be a packet behind what the server has already accepted into
+`InteractableVehicle.real` - stepping from it would hand the server a delta of up to two steps and
+trip the very check the step size exists to respect. The two are resynced whenever they drift
+further apart than a step can explain, which is also how a bandit recovers from a rejected packet.
+
+Ground vehicles only for now. Boats and aircraft are refused with a reason rather than half-driven:
+every step snaps the vehicle onto the ground beneath it, which under a boat is the seabed and under a
+helicopter is where it is meant not to be. Holding station already works for all of them.
+
+Fuel and battery are topped up while a bandit occupies a vehicle (`VehicleInfiniteFuel`,
+`VehicleInfiniteBattery`; health deliberately is not). The fuel one is not just convenience - vanilla
+tightens a car's anti-teleport delta from the asset's own figure to half a metre per packet once the
+tank is empty, so a bandit that runs dry mid-drive stops being able to move at any sensible speed.
+
+Two gates decide whether the server believes a driving packet (off LAN, with `ForceTrustClient`
+unset): the horizontal step must be within `asset.sqrDelta`, and the vertical speed within
+`asset.validSpeedUp`/`validSpeedDown`. Failing either starts a *recovery* - the vehicle is snapped
+back and further packets ignored for a few seconds. Neither can fire while the reported position is
+the one the vehicle already holds, which makes this the safe first step before anything moves.
+
+Getting in is `VehicleManager.ServerForcePassengerIntoVehicle`, vanilla's own server-side seating
+call: it broadcasts `SendEnterVehicle` so every client renders the bandit in the seat, and skips the
+lock and line-of-sight checks a real player's request goes through - so a bandit will happily drive
+a locked vehicle. What it will not do is let you name a seat; it takes the first free one, which is
+why the driver seat is confirmed empty before the call rather than after. Trains are excluded: they
+replicate a road position packed into all three channels of the position vector, and the packing is
+an `internal` method.
 
 ## Non-obvious things this had to work around
 

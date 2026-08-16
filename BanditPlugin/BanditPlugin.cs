@@ -18,6 +18,7 @@ namespace BanditPlugin
                 + "/bandit spawns one - it just stands until ordered. "
                 + "/bandit shoot|cover|peek start|stop are the standing orders; /banditgoto sends one somewhere, "
                 + "/banditpatrol sets it walking a route, /banditprone lies one down, "
+                + "/banditv drive|gunner|exit puts one in the nearest vehicle and /banditvgoto drives it, "
                 + "/banditstatus reports what each is doing.");
         }
 

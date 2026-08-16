@@ -42,6 +42,15 @@ namespace BanditPlugin.Commands
                 return;
             }
 
+            // A seated bandit has no feet to steer, so this order would be accepted and then do
+            // nothing at all - which is exactly how it looked before this check existed.
+            if (bandit.Driver != null && bandit.Driver.IsSeated)
+            {
+                UnturnedChat.Say(caller, "That bandit is in a vehicle - use /banditvgoto to drive it, "
+                    + "or /banditv exit first.", Color.red);
+                return;
+            }
+
             Player callerPlayer = ((UnturnedPlayer)caller).Player;
             Vector3 origin = callerPlayer.look.aim.position;
             Vector3 direction = callerPlayer.look.aim.forward;
