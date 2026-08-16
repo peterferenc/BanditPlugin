@@ -14,7 +14,8 @@ namespace BanditPlugin
             Instance = this;
             BackfillEmptyCollections();
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
-            Logger.Log("[Bandit] Loaded. /squadspawn puts a whole squad down fighting; "
+            Logger.Log("[Bandit] Loaded. /squadspawn <type> puts a whole squad down fighting - "
+                + "/squadspawn squads lists the types; "
                 + "/bandit spawns one - it just stands until ordered. "
                 + "/bandit shoot|cover|peek start|stop are the standing orders; /banditgoto sends one somewhere, "
                 + "/banditpatrol sets it walking a route, /banditprone lies one down, "
@@ -43,16 +44,16 @@ namespace BanditPlugin
                 changed = true;
             }
 
-            if (config.SquadComposition == null || config.SquadComposition.Count == 0)
+            if (config.Squads == null || config.Squads.Count == 0)
             {
-                config.SquadComposition = BanditConfiguration.DefaultSquadComposition();
+                config.Squads = BanditSquadType.BuildDefaults();
                 changed = true;
             }
 
             if (changed)
             {
                 Configuration.Save();
-                Logger.Log("[Bandit] Wrote the default kits and squad composition into the configuration.");
+                Logger.Log("[Bandit] Wrote the default kits and squad types into the configuration.");
             }
         }
 

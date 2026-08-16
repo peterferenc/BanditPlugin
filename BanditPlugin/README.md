@@ -11,6 +11,7 @@ zombies. See "Why not zombies?" below.
 | Command | Permission | Description |
 |---|---|---|
 | `/bandit` | `bandit.spawn` | Spawns a bandit where you're looking, facing you. |
+| `/squadspawn [<type>] [<metres>\|marker]` (aliases `/spawnsquad`, `/squad`) | `bandit.spawn` | Puts a whole squad down fighting - `basic`, `rifle` or `sniper` by default. Each type names the kits it is built from and its own spacing, spawn distance and group behaviour. `/squadspawn squads` lists them. |
 | `/banditgoto` (alias `/bgoto`) | `bandit.spawn` | Sends the last spawned bandit to the point you're looking at (up to 512m). |
 | `/banditpatrol [on\|off]` | `bandit.spawn` | Starts/stops **all** bandits patrolling this map's waypoints. No argument toggles. |
 | `/banditwp add\|remove\|clear\|list` | `bandit.spawn` | Records this map's patrol route at your feet. |

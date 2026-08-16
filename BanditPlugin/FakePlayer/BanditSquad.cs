@@ -29,6 +29,20 @@ namespace BanditPlugin.FakePlayer
         /// <summary>Shown by /banditstatus, so two squads on the ground can be told apart.</summary>
         public int Id { get; }
 
+        /// <summary>Which squad type put this one down - "sniper", "rifle" - for /banditstatus.</summary>
+        public string TypeName { get; }
+
+        /// <summary>
+        /// This squad's own group figures, resolved from its type at spawn rather than read out of
+        /// the configuration on every tick. That is what lets a sniper pair hold a contact for
+        /// twenty-five seconds while a rifle section a hundred metres away forgets one in twelve,
+        /// under the same configuration - and it means editing a type does nothing to a squad
+        /// already in the field. See <see cref="BanditSquadProfile"/>.
+        /// </summary>
+        public float ContactMemorySeconds { get; }
+        public float CoverSeparation { get; }
+        public float RepositionAfterNoShotSeconds { get; }
+
         private readonly List<BanditBotController> _members = new List<BanditBotController>();
 
         private readonly Dictionary<BanditBotController, Vector3> _coverClaims =
@@ -65,14 +79,23 @@ namespace BanditPlugin.FakePlayer
         /// <summary>Which member reported it, purely so /banditstatus can say who is spotting.</summary>
         public string ContactSpotter { get; private set; } = string.Empty;
 
-        private BanditSquad()
+        private BanditSquad(BanditSquadProfile profile)
         {
             Id = _nextId++;
+            TypeName = profile.TypeName;
+            ContactMemorySeconds = profile.ContactMemorySeconds;
+            CoverSeparation = profile.CoverSeparation;
+            RepositionAfterNoShotSeconds = profile.RepositionAfterNoShotSeconds;
         }
 
-        public static BanditSquad Create()
+        /// <summary>
+        /// Opens a squad running the figures in <paramref name="profile"/>. Null falls back to the
+        /// global squad settings, which is what a squad spawned without a type gets.
+        /// </summary>
+        public static BanditSquad Create(BanditSquadProfile profile)
         {
-            BanditSquad squad = new BanditSquad();
+            BanditSquad squad = new BanditSquad(
+                profile ?? BanditSquadProfile.FromConfiguration(BanditPlugin.Instance.Configuration.Instance));
             All.Add(squad);
             return squad;
         }
@@ -111,14 +134,15 @@ namespace BanditPlugin.FakePlayer
         /// The window is what turns a sighting into a firefight rather than a flicker: cover is
         /// held, the machinegunner keeps suppressing, and nobody stands up the instant the target
         /// steps behind a tree. It is deliberately longer than one bandit's own target memory,
-        /// because a squad that loses sight of someone has not stopped being in contact.
+        /// because a squad that loses sight of someone has not stopped being in contact - and it is
+        /// per squad, because how long a type keeps watching a spot is part of what that type is.
         /// </summary>
         public bool HasFreshContact
         {
             get
             {
                 return ContactTarget != null
-                    && Time.time - LastContactTime <= BanditPlugin.Instance.Configuration.Instance.SquadContactMemorySeconds;
+                    && Time.time - LastContactTime <= ContactMemorySeconds;
             }
         }
 

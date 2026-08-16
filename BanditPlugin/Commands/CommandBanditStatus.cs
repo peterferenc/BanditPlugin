@@ -59,7 +59,11 @@ namespace BanditPlugin.Commands
                     : "unknown";
 
                 string kit = bandit.Profile != null ? bandit.Profile.KitName : "default";
-                string squad = bandit.Squad != null ? $" sq{bandit.Squad.Id}" : string.Empty;
+                // The type as well as the number: two squads on the ground are usually two different
+                // types, and which one a bandit belongs to explains the figures it is fighting with.
+                string squad = bandit.Squad != null
+                    ? $" sq{bandit.Squad.Id} {bandit.Squad.TypeName}"
+                    : string.Empty;
 
                 Reply(caller,
                     $"#{i + 1} [{kit}{squad}]: {brain.State}, target {target}, dest {destination}, " +

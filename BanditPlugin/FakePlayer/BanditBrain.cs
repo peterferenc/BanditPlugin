@@ -181,6 +181,13 @@ namespace BanditPlugin.FakePlayer
         private float _repositionUntil;
         private float _nextRepositionTime;
 
+        /// <summary>
+        /// When this bandit's current contact began, and whether it is still in one. Used as the
+        /// floor on the reposition dry spell - see <see cref="MaybeReposition"/>.
+        /// </summary>
+        private float _contactSinceTime = float.MinValue;
+        private bool _hadThreat;
+
         private float _nextAdvanceRepathTime;
         private float _nextScanTime;
         private float _scanYaw;
@@ -417,6 +424,17 @@ namespace BanditPlugin.FakePlayer
             // shared contact, or the direction the last bullet came from. Working it out once here
             // is what lets a bandit who can see nothing at all still take cover from something.
             bool hasThreat = TryResolveThreatEye(target, out Vector3 threatEye);
+
+            // When this contact started, which is what stops a fresh one being treated as a dry
+            // spell that began at the start of time. See MaybeReposition.
+            if (hasThreat != _hadThreat)
+            {
+                _hadThreat = hasThreat;
+                if (hasThreat)
+                {
+                    _contactSinceTime = Time.time;
+                }
+            }
 
             // Before the cover check, so a bandit that has just given up its spot searches for a
             // new one on this same tick rather than standing in the open for a few seconds first.
@@ -734,7 +752,10 @@ namespace BanditPlugin.FakePlayer
                 out stats,
                 reports,
                 claimed,
-                _config.SquadCoverSeparation);
+                // The squad's own separation, so a sniper pair spreads along a ridge while a rifle
+                // section stays behind one wall. Falls back to the global for a lone bandit, which
+                // has no claims to steer around anyway.
+                squad != null ? squad.CoverSeparation : _config.SquadCoverSeparation);
 
             if (!found)
             {
@@ -882,18 +903,37 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            float idleSeconds = _config.RepositionAfterNoShotSeconds;
+            // The squad's own patience: a rifle section gives up a useless position in seconds,
+            // where a sniper pair sits in its hide. SquadInContact above guarantees the squad.
+            BanditSquad squad = _controller.Squad;
+            float idleSeconds = squad != null ? squad.RepositionAfterNoShotSeconds : _config.RepositionAfterNoShotSeconds;
             if (idleSeconds <= 0f || Time.time < _nextRepositionTime)
             {
                 return;
             }
 
-            if (Time.time - _controller.LastShotOpportunityTime < idleSeconds)
+            // The dry spell runs from the later of "last had a shot" and "this contact started",
+            // and the second half is not a refinement - without it the whole squad charges the
+            // moment it sees anyone. LastShotOpportunityTime is float.MinValue until a bandit has
+            // had its first shot, so a squad that has only just made contact is already in a dry
+            // spell several billion seconds long: every member repositions on the very first tick,
+            // and since the advance outranks cover in TickMovement, nobody takes cover, nobody
+            // holds its range, and a marksman that has never pulled a trigger walks at you from
+            // two hundred metres. Measuring from the start of contact gives them the same
+            // idleSeconds of actually fighting that a bandit which HAS been shooting gets.
+            float dryStart = Mathf.Max(_controller.LastShotOpportunityTime, _contactSinceTime);
+            if (Time.time - dryStart < idleSeconds)
             {
-                return; // it has had a shot recently, so where it is standing is doing its job
+                return; // it has had a shot recently, or has not been in this fight long enough
             }
 
-            _nextRepositionTime = Time.time + idleSeconds;
+            // The next push cannot be considered until this one has finished and the bandit has had
+            // another dry spell's worth of standing its ground. Adding only idleSeconds re-armed the
+            // window before the previous one expired whenever idleSeconds was under
+            // RepositionMoveSeconds - which every default is - so a bandit that could not find a
+            // shot never stopped advancing, and a temporary push to find an angle became a charge
+            // that only ended when it arrived.
+            _nextRepositionTime = Time.time + RepositionMoveSeconds + idleSeconds;
             _repositionUntil = Time.time + RepositionMoveSeconds;
 
             if (_hasCover)

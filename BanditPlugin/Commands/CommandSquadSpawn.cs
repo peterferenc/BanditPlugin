@@ -11,13 +11,24 @@ namespace BanditPlugin.Commands
     /// <summary>
     /// "/squadspawn" - puts a whole squad on the ground in front of you, already switched on.
     ///
-    ///   /squadspawn           down your sightline, at SquadSpawnDistance (200m by default)
-    ///   /squadspawn 60        the same, at a distance you name
-    ///   /squadspawn marker    wherever you have placed your map marker
+    ///   /squadspawn                 the default type, down your sightline at its own distance
+    ///   /squadspawn sniper          a type by name - see /squadspawn squads
+    ///   /squadspawn sniper 300      the same, at a distance you name
+    ///   /squadspawn rifle marker    wherever you have placed your map marker
+    ///   /squadspawn 60              the default type at 60m, as before types existed
+    ///   /squadspawn squads          list the types, who is in them and where they are placed
     ///
-    /// Placed far off on purpose - well past every kit's TargetAcquireRange - so the squad spawns
+    /// The type is the whole point: "rifle" and "sniper" are not the same five men at different
+    /// ranges, they are different men - a squad type names the kits it is built from, so it brings
+    /// their weapons, their accuracy and their engagement ranges with it, and adds the things that
+    /// only mean anything to a group: how far apart they stand and take cover, how long they hold a
+    /// sighting between them, and how long they will sit without a shot before moving. See
+    /// <see cref="BanditSquadType"/>.
+    ///
+    /// Placed far off on purpose - past that type's own TargetAcquireRange - so the squad spawns
     /// unaware and you walk in on it. A squad that appears on top of you skips the only part worth
-    /// watching, which is the moment they notice.
+    /// watching, which is the moment they notice. The distance is per type because "past their
+    /// eyes" is 130m for a rifle section and 260m for a pair of marksmen.
     ///
     /// Unlike "/bandit", which spawns one inert bandit for you to order about a command at a time,
     /// a squad comes out fighting: weapons free, each class under its own standing orders. That is
@@ -35,8 +46,8 @@ namespace BanditPlugin.Commands
     {
         public AllowedCaller AllowedCaller => AllowedCaller.Player;
         public string Name => "squadspawn";
-        public string Help => "Spawns a full squad in formation down your sightline (200m by default), or at your map marker.";
-        public string Syntax => "[<metres>|marker]";
+        public string Help => "Spawns a squad of a given type in formation down your sightline, or at your map marker.";
+        public string Syntax => "[<type>] [<metres>|marker]";
         public List<string> Aliases => new List<string> { "spawnsquad", "squad" };
         public List<string> Permissions => new List<string> { "bandit.spawn" };
 
@@ -55,28 +66,52 @@ namespace BanditPlugin.Commands
         {
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
-            List<string> composition = config.SquadComposition;
+            if (command.Length > 0 && IsListRequest(command[0]))
+            {
+                ReplySquads(caller, config);
+                return;
+            }
+
+            // The first word is a type name unless it is one of the two things the command took
+            // before types existed - a distance or "marker" - so "/squadspawn 60" still means what
+            // it always did, and a type is never mistaken for one because neither parses as a name.
+            int placementArgument = 0;
+            string requestedType = config.DefaultSquad;
+            if (command.Length > 0 && !IsMarkerRequest(command[0]) && !float.TryParse(command[0], out _))
+            {
+                requestedType = command[0];
+                placementArgument = 1;
+            }
+
+            BanditSquadType type = config.FindSquad(requestedType);
+            if (type == null)
+            {
+                UnturnedChat.Say(caller, $"No squad type called '{requestedType}'. Known types: "
+                    + $"{string.Join(", ", config.SquadNames().ToArray())}. Try /squadspawn squads.", Color.red);
+                return;
+            }
+
+            BanditSquadProfile profile = BanditSquadProfile.FromType(config, type);
+            List<string> composition = profile.Members;
             if (composition == null || composition.Count == 0)
             {
-                UnturnedChat.Say(caller, "SquadComposition is empty - nothing to spawn.", Color.red);
+                UnturnedChat.Say(caller, $"Squad type '{profile.TypeName}' has no members - nothing to spawn.", Color.red);
                 return;
             }
 
             Player callerPlayer = ((UnturnedPlayer)caller).Player;
             Vector3 origin = callerPlayer.transform.position;
 
-            // Where the squad goes: your map marker, a distance you name, or the configured one
-            // down your sightline.
-            bool useMarker = command.Length > 0
-                && (command[0].Equals("marker", System.StringComparison.OrdinalIgnoreCase)
-                    || command[0].Equals("map", System.StringComparison.OrdinalIgnoreCase));
+            // Where the squad goes: your map marker, a distance you name, or the type's own down
+            // your sightline.
+            bool useMarker = command.Length > placementArgument && IsMarkerRequest(command[placementArgument]);
 
-            float distance = config.SquadSpawnDistance;
-            if (!useMarker && command.Length > 0)
+            float distance = profile.SpawnDistance;
+            if (!useMarker && command.Length > placementArgument)
             {
-                if (!float.TryParse(command[0], out distance))
+                if (!float.TryParse(command[placementArgument], out distance))
                 {
-                    UnturnedChat.Say(caller, "Usage: /squadspawn  |  /squadspawn <metres>  |  /squadspawn marker", Color.yellow);
+                    ReplyUsage(caller, config);
                     return;
                 }
 
@@ -146,7 +181,7 @@ namespace BanditPlugin.Commands
             // spending its first second turning round before it can see anything.
             float facing = Mathf.Atan2(-forward.x, -forward.z) * Mathf.Rad2Deg;
 
-            BanditSquad squad = BanditSquad.Create();
+            BanditSquad squad = BanditSquad.Create(profile);
             List<string> spawned = new List<string>();
             List<string> unknown = new List<string>();
 
@@ -160,7 +195,7 @@ namespace BanditPlugin.Commands
                     continue;
                 }
 
-                Vector3 slot = FormationSlot(centre, right, forward, i, composition.Count, config.SquadSpacing);
+                Vector3 slot = FormationSlot(centre, right, forward, i, composition.Count, profile.Spacing);
                 Player bandit = FakePlayerSpawner.Spawn(slot, facing, $"Bandit {kit.Name}", kit);
                 if (bandit == null)
                 {
@@ -175,7 +210,7 @@ namespace BanditPlugin.Commands
 
                 squad.Add(controller);
 
-                if (config.SquadWeaponsFree)
+                if (profile.WeaponsFree)
                 {
                     controller.HoldFire = false;
                 }
@@ -190,16 +225,72 @@ namespace BanditPlugin.Commands
             }
 
             float placedRange = Vector3.Distance(origin, centre);
-            UnturnedChat.Say(caller, $"Squad {squad.Id} up {placedRange:0}m "
+            UnturnedChat.Say(caller, $"Squad {squad.Id} '{profile.TypeName}' up {placedRange:0}m "
                 + (useMarker ? "at your marker" : "that way")
                 + $": {string.Join(", ", spawned.ToArray())}"
-                + (config.SquadWeaponsFree ? ", weapons free." : ", holding fire."), Color.green);
+                + (profile.WeaponsFree ? ", weapons free." : ", holding fire."), Color.green);
 
             if (unknown.Count > 0)
             {
                 UnturnedChat.Say(caller, $"Skipped unknown kit(s): {string.Join(", ", unknown.ToArray())}. "
-                    + "Check SquadComposition against /bandit kits.", Color.yellow);
+                    + $"Check the '{profile.TypeName}' squad's Members against /bandit kits.", Color.yellow);
             }
+        }
+
+        /// <summary>
+        /// The two words the command took as a placement before squad types existed, kept working
+        /// so "/squadspawn marker" is still a marker rather than a lookup for a squad called that.
+        /// </summary>
+        private static bool IsMarkerRequest(string argument)
+        {
+            return argument.Equals("marker", System.StringComparison.OrdinalIgnoreCase)
+                || argument.Equals("map", System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsListRequest(string argument)
+        {
+            return argument.Equals("squads", System.StringComparison.OrdinalIgnoreCase)
+                || argument.Equals("types", System.StringComparison.OrdinalIgnoreCase)
+                || argument.Equals("list", System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// The types, who is in each and where it puts them. The figures are read off the resolved
+        /// profile rather than the type, so one that leaves a number at -1 to inherit reports the
+        /// distance it will actually spawn at rather than a -1 nobody can act on. Same reason
+        /// "/bandit kits" resolves through BanditProfile.
+        /// </summary>
+        private static void ReplySquads(IRocketPlayer caller, BanditConfiguration config)
+        {
+            List<string> names = config.SquadNames();
+            if (names.Count == 0)
+            {
+                UnturnedChat.Say(caller, "No squad types configured.", Color.red);
+                return;
+            }
+
+            UnturnedChat.Say(caller, $"Squad types: {string.Join(", ", names.ToArray())}. "
+                + $"'/squadspawn' alone puts down '{config.DefaultSquad}'.", Color.white);
+
+            foreach (string name in names)
+            {
+                BanditSquadProfile profile = BanditSquadProfile.FromType(config, config.FindSquad(name));
+                string members = profile.Members.Count > 0
+                    ? string.Join(", ", profile.Members.ToArray())
+                    : "nobody";
+
+                UnturnedChat.Say(caller, $"  {name}: {members} - {profile.SpawnDistance:0}m out, "
+                    + $"{profile.Spacing:0}m apart, holds contact {profile.ContactMemorySeconds:0}s, "
+                    + $"repositions after {profile.RepositionAfterNoShotSeconds:0.#}s"
+                    + (profile.WeaponsFree ? string.Empty : ", holding fire"), Color.grey);
+            }
+        }
+
+        private static void ReplyUsage(IRocketPlayer caller, BanditConfiguration config)
+        {
+            UnturnedChat.Say(caller, "Usage: /squadspawn  |  /squadspawn <type>  |  "
+                + "/squadspawn <type> <metres>  |  /squadspawn <type> marker  |  /squadspawn squads. "
+                + $"Types: {string.Join(", ", config.SquadNames().ToArray())}.", Color.yellow);
         }
 
         /// <summary>

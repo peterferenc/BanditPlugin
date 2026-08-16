@@ -351,47 +351,50 @@ namespace BanditPlugin
         public float CoverPeekSeconds = 2f;
 
         /// <summary>
-        /// Which classes "/squadspawn" puts on the ground, in the order they are laid out from
-        /// left to right. Any kit name is valid, and repeats are how you get two riflemen.
+        /// The kinds of squad "/squadspawn" can put on the ground: "/squadspawn sniper",
+        /// "/squadspawn rifle". Each names the kits it is built from and carries its own spacing,
+        /// spawn distance and group behaviour, resolved once at spawn, so two squads of different
+        /// types can be fighting at once under one configuration. See <see cref="BanditSquadType"/>.
         ///
-        /// Empty for the same reason <see cref="Kits"/> is - a seeded list gets the file's entries
-        /// appended to it rather than replacing it, which is what turned a five-man squad into ten.
+        /// Starts EMPTY, and must, for the same reason <see cref="Kits"/> does - XmlSerializer adds
+        /// to a collection it finds populated rather than replacing it, so a seeded list ends up
+        /// holding the defaults and the file's entries both, and gets written back doubled.
+        /// BanditPlugin.Load fills it in after the fact instead.
         /// </summary>
-        public List<string> SquadComposition = new List<string>();
-
-        /// <summary>The squad a fresh configuration starts with. See <see cref="SquadComposition"/>.</summary>
-        public static List<string> DefaultSquadComposition()
-        {
-            return new List<string> { "rifleman", "rifleman", "mg", "marksman", "breacher" };
-        }
+        public List<BanditSquadType> Squads = new List<BanditSquadType>();
 
         /// <summary>
-        /// Metres between squad members as they are placed. Also the depth of the wedge, so the
-        /// flanks sit back from the centre rather than the whole squad standing on one line.
+        /// Which type a plain "/squadspawn" puts down. An unknown name here leaves the bare command
+        /// reporting the types it does know rather than guessing at one.
+        /// </summary>
+        public string DefaultSquad = "basic";
+
+        /// <summary>
+        /// Metres between squad members as they are placed, for a type that does not state its own.
+        /// Also the depth of the wedge, so the flanks sit back from the centre rather than the whole
+        /// squad standing on one line.
         /// </summary>
         public float SquadSpacing = 5f;
 
         /// <summary>
-        /// How far down your sightline "/squadspawn" puts the squad.
+        /// How far down your sightline "/squadspawn" puts a squad whose type does not name its own
+        /// distance.
         ///
         /// Deliberately well past every kit's TargetAcquireRange, so a squad spawns unaware and you
         /// get to walk in on it rather than arriving mid-firefight. Spawning one on top of yourself
-        /// skips the only part of the behaviour worth watching - the moment they notice.
+        /// skips the only part of the behaviour worth watching - the moment they notice. Which is
+        /// why the types override it: how far "past their eyes" is depends on whose eyes.
         /// </summary>
         public float SquadSpawnDistance = 200f;
-
-        /// <summary>
-        /// Spawn a squad weapons free and already under its classes' standing orders, unlike a
-        /// lone "/bandit" which stands inert until told. A squad exists to be watched fighting, and
-        /// one that has to be switched on a command at a time is not a squad.
-        /// </summary>
-        public bool SquadWeaponsFree = true;
 
         /// <summary>
         /// How long a squad keeps acting on a sighting after the last member loses sight of it -
         /// cover held, machinegun still firing at the spot, nobody standing up. Longer than one
         /// bandit's own target memory on purpose: a squad that loses eyes on someone for a moment
         /// has not stopped being in contact with them.
+        ///
+        /// The fallback for a squad type that does not state its own - see
+        /// <see cref="BanditSquadType.ContactMemorySeconds"/>.
         /// </summary>
         public float SquadContactMemorySeconds = 12f;
 
@@ -403,6 +406,9 @@ namespace BanditPlugin
         /// alone, so bandits standing together facing the same way all pick the same coordinate.
         /// Worth keeping at least a couple of metres wide - close enough that they are still one
         /// squad behind one wall, far enough that one grenade is not all of them.
+        ///
+        /// The fallback for a squad type that does not state its own - see
+        /// <see cref="BanditSquadType.CoverSeparation"/>.
         /// </summary>
         public float SquadCoverSeparation = 4f;
 
@@ -419,6 +425,9 @@ namespace BanditPlugin
         ///
         /// Only applies to bandits in a squad. A lone one keeps holding the position it was given,
         /// which is what makes it useful for testing one behaviour at a time. 0 disables it.
+        ///
+        /// The fallback for a squad type that does not state its own - see
+        /// <see cref="BanditSquadType.RepositionAfterNoShotSeconds"/>.
         /// </summary>
         public float RepositionAfterNoShotSeconds = 5f;
 
@@ -495,6 +504,48 @@ namespace BanditPlugin
             return names;
         }
 
+        /// <summary>
+        /// The squad type of that name, or null. Case-insensitive, because these are typed into
+        /// chat alongside the kit names.
+        /// </summary>
+        public BanditSquadType FindSquad(string name)
+        {
+            if (Squads == null || string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+
+            foreach (BanditSquadType squad in Squads)
+            {
+                if (squad != null && string.Equals(squad.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    return squad;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Every squad type name, for the usage line and "/squadspawn squads".</summary>
+        public List<string> SquadNames()
+        {
+            List<string> names = new List<string>();
+            if (Squads == null)
+            {
+                return names;
+            }
+
+            foreach (BanditSquadType squad in Squads)
+            {
+                if (squad != null && !string.IsNullOrEmpty(squad.Name))
+                {
+                    names.Add(squad.Name);
+                }
+            }
+
+            return names;
+        }
+
         public void LoadDefaults()
         {
             ApplyLoadout = true;
@@ -549,10 +600,10 @@ namespace BanditPlugin
             CoverHideSeconds = 2.5f;
             CoverPeekSeconds = 2f;
 
-            SquadComposition = DefaultSquadComposition();
+            Squads = BanditSquadType.BuildDefaults();
+            DefaultSquad = "basic";
             SquadSpacing = 5f;
             SquadSpawnDistance = 200f;
-            SquadWeaponsFree = true;
             SquadContactMemorySeconds = 12f;
             SquadCoverSeparation = 4f;
             RepositionAfterNoShotSeconds = 5f;
