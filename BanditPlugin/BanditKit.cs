@@ -210,7 +210,13 @@ namespace BanditPlugin
                     TargetAcquireRange = 140f,
                     PreferredEngagementRange = 45f,
                     BurstFire = true,
-                    BurstIntervalSeconds = 1.4f,
+                    // The lever that actually decides a machinegun's volume, and the one the cost
+                    // model showed was set wrong. The gun's own Firerate of 5 is already among the
+                    // fastest in the game and cannot be raised without editing a shared vanilla
+                    // asset; what was throttling this class was its own pause between bursts. At
+                    // 1.4s it spent two thirds of every cycle silent, which for the one weapon whose
+                    // entire job is continuous fire was backwards.
+                    BurstIntervalSeconds = 0.9f,
                     // Cover off on purpose: this class does not go looking for a rock, it gets low
                     // where it stands and fires. The stance and the suppression are both driven by
                     // contact rather than set at spawn, so it walks upright until there is
@@ -222,9 +228,17 @@ namespace BanditPlugin
                     Loadout = MilitaryForest(new BanditWeapon
                     {
                         Item = "126",
-                        AimHitChance = 0.22f,
-                        BurstMinRounds = 6,
-                        BurstMaxRounds = 9
+                        // Was 0.22, on the reasoning that a machinegun wins by volume rather than
+                        // marksmanship. True as far as it goes, but 11 damage a round at 0.22 came
+                        // to 8 damage a second - less than half a rifleman's - so the class was not
+                        // winning by volume either. Kept a shade under the rifleman's 0.35 so it is
+                        // still the least accurate of the four.
+                        AimHitChance = 0.38f,
+                        // Only slightly longer. BurstErrorRampPerRound degrades accuracy through a
+                        // burst, so rounds eight and nine are already spraying - the volume is
+                        // better bought by pausing less than by firing longer.
+                        BurstMinRounds = 7,
+                        BurstMaxRounds = 10
                     })
                 },
 

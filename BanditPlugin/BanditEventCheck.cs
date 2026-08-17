@@ -84,12 +84,14 @@ namespace BanditPlugin
                     + $"weight {type.Weight:0.#} - "
                     + (asset != null ? asset.FriendlyName : $"UNRESOLVED ({assetError})")
                     + (turrets != null ? $", turret seat(s) {turrets}" : ", no turret")
-                    + (type.DriveAtCaller ? ", drives in and unloads" : ", holds position"), Color.grey);
+                    + Behaviour(type, turrets != null), Color.grey);
             }
 
+            // Deliberately not reported against the server's player slots. Bandits are spawned
+            // through reflection and never pass the maxPlayers test, so free slots have nothing to
+            // do with how many an event can put down.
             UnturnedChat.Say(caller, $"Limits: at most {config.EventVehicleCap} vehicle(s) and "
-                + $"{config.EventMaxBandits} bandit(s) per event, {config.EventSpread:0}m apart. "
-                + $"{Provider.maxPlayers - Provider.clients.Count} player slot(s) free right now.", Color.white);
+                + $"{config.EventMaxBandits} bandit(s) per event, {config.EventSpread:0}m apart.", Color.white);
 
             if (problems.Count == 0)
             {
@@ -102,6 +104,28 @@ namespace BanditPlugin
             {
                 UnturnedChat.Say(caller, $"  {problem}", Color.yellow);
             }
+        }
+
+        /// <summary>
+        /// What this vehicle will actually do, in one phrase. Reads off the turret seats rather than
+        /// the configuration, because whether it ends up a taxi or a gun platform is decided by
+        /// whether the asset has a turret for its crew to sit in - which is the one thing about a
+        /// vehicle entry people cannot check from in game.
+        /// </summary>
+        private static string Behaviour(BanditVehicleType type, bool hasTurret)
+        {
+            if (!type.DriveAtCaller)
+            {
+                return ", holds where it spawns";
+            }
+
+            string wake = type.ContactTriggerRange > 0f
+                ? $", waits for contact or {type.ContactTriggerRange:0}m"
+                : ", waits for contact";
+
+            return hasTurret
+                ? wake + $", closes to {type.EngageRange:0}m and fights, riders out at {type.DismountRange:0}m"
+                : wake + $", unloads everyone at {type.DismountRange:0}m";
         }
 
         /// <summary>

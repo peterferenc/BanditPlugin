@@ -508,13 +508,13 @@ namespace BanditPlugin
         public float EventSpread = 35f;
 
         /// <summary>
-        /// Most bandits one event may spawn, before the server's own free player slots are taken
-        /// into account.
+        /// Most bandits one event may spawn.
         ///
-        /// Bandits are real clients and occupy real slots, so a large budget can genuinely run a
-        /// server out of room - and the failure that produces is the tail of an event silently not
-        /// existing. The command checks this and the free slots up front and says so; see
-        /// <see cref="BanditEventDraw"/>.
+        /// The only ceiling there is, and it has nothing to do with the server's player slots:
+        /// bandits are spawned through reflection straight into Provider.addPlayer, below the
+        /// maxPlayers test in the connection path, so they neither consume nor are limited by a
+        /// slot. What this guards is frame time and your own patience - every bandit is a
+        /// MonoBehaviour feeding input packets - so raise it as far as the server can carry.
         /// </summary>
         public int EventMaxBandits = 24;
 
@@ -535,6 +535,38 @@ namespace BanditPlugin
         /// BanditBotController.RequestSeat.
         /// </summary>
         public float VehicleSeatRetrySeconds = 6f;
+
+        /// <summary>
+        /// The kit "/banditcost" scales every other price against, and the number of points it is
+        /// worth. Blank uses <see cref="DefaultKit"/>.
+        ///
+        /// The model's raw output is an abstract quantity nobody has intuition for, so the whole
+        /// table is expressed as multiples of one class you have already priced by hand. Setting the
+        /// anchor to your ordinary soldier at 10 makes every suggestion read as "this is worth 2.6
+        /// riflemen", which is a claim you can actually agree or disagree with.
+        /// </summary>
+        public string CostModelAnchorKit = string.Empty;
+        public float CostModelAnchorPoints = 10f;
+
+        /// <summary>
+        /// The engagement range that counts as ordinary, in metres. Reach is scored against it, so
+        /// this decides how strongly the model rewards a class for being able to shoot at you from
+        /// further away than it can be shot back at.
+        ///
+        /// Raising it flattens the difference between a marksman and a breacher; lowering it makes
+        /// range the dominant term. 100 puts a rifleman at roughly 1.
+        /// </summary>
+        public float CostModelReachBaseline = 100f;
+
+        /// <summary>
+        /// How much a vehicle's health counts toward its price, where 1 means a vehicle that takes
+        /// twenty bandits' worth of shooting to destroy is worth twenty bandits.
+        ///
+        /// Worth turning down if your bandits fight mostly on foot: an armoured truck's health is
+        /// only worth what it stops, and a vehicle nobody can be bothered to shoot is soaking
+        /// nothing. Set to 0 to price vehicles purely on their guns.
+        /// </summary>
+        public float CostModelVehicleSoakWeight = 1f;
 
         /// <summary>Start newly spawned bandits patrolling immediately.</summary>
         public bool PatrolByDefault = false;
@@ -822,6 +854,11 @@ namespace BanditPlugin
             EventMaxBandits = 24;
             VehicleSpawnDistance = 6f;
             VehicleSeatRetrySeconds = 6f;
+
+            CostModelAnchorKit = string.Empty;
+            CostModelAnchorPoints = 10f;
+            CostModelReachBaseline = 100f;
+            CostModelVehicleSoakWeight = 1f;
 
             PatrolByDefault = false;
             PatrolWaypointDwellSeconds = 3f;

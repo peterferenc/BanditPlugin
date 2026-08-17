@@ -43,8 +43,14 @@ namespace BanditPlugin.FakePlayer
         public readonly List<Ride> Rides = new List<Ride>();
 
         /// <summary>
-        /// One spawned vehicle and the men in it, plus where it has got to in the short life of a
-        /// transport: waiting for its crew to climb aboard, driving, and then done with.
+        /// One spawned vehicle and the men in it, plus where it has got to in its short life:
+        /// waiting for contact, driving, and then either emptied or dug in and shooting.
+        ///
+        /// Which of those two endings it gets is decided by whether anybody aboard is in a turret.
+        /// An unarmed vehicle is a taxi and its whole worth is the delivery, so it stops and empties.
+        /// An armed one is a weapon that happens to have wheels, and emptying it would be throwing
+        /// the weapon away - so it keeps its driver and its gunners, holds at a distance it can
+        /// shoot from, and only the men riding in the back get out.
         /// </summary>
         public sealed class Ride
         {
@@ -54,20 +60,65 @@ namespace BanditPlugin.FakePlayer
             /// <summary>Whoever is meant to be in seat 0. Null for a vehicle spawned empty.</summary>
             public BanditBotController Driver;
 
-            /// <summary>Everyone else aboard - the men who get out at the far end.</summary>
-            public readonly List<BanditBotController> Passengers = new List<BanditBotController>();
+            /// <summary>Crew in a turret seat. These fight from the vehicle and never get out.</summary>
+            public readonly List<BanditBotController> Gunners = new List<BanditBotController>();
 
-            /// <summary>Whether this one drives at the caller and unloads, or holds where it is.</summary>
+            /// <summary>Everyone else aboard - the men who get out at the far end.</summary>
+            public readonly List<BanditBotController> Riders = new List<BanditBotController>();
+
+            /// <summary>Whether this one drives at contact, or simply holds where it spawned.</summary>
             public bool DriveAtCaller;
 
-            /// <summary>Where it is going, if it is going anywhere.</summary>
+            /// <summary>Whether the driver gets out too. Only ever consulted for an unarmed vehicle;
+            /// an armed one needs its driver to keep the gun pointed somewhere useful.</summary>
+            public bool DriverDismounts = true;
+
+            /// <summary>How far short of the contact the riders get out.</summary>
+            public float DismountRange;
+
+            /// <summary>How close an armed vehicle closes before stopping to shoot.</summary>
+            public float EngageRange;
+
+            /// <summary>How near an enemy must come to start a waiting vehicle with nobody's eyes on
+            /// them. See <see cref="BanditVehicleType.ContactTriggerRange"/>.</summary>
+            public float ContactTriggerRange;
+
+            /// <summary>Where it is heading - the freshest contact the event has, not a fixed point.</summary>
             public Vector3 Destination;
 
-            /// <summary>Set once the drive order has actually been accepted, so it is given once.</summary>
+            /// <summary>Set once something has been seen and the vehicle is allowed to move at all.</summary>
+            public bool Released;
+
+            /// <summary>Set once a drive order has been accepted, so it is not re-issued every tick.</summary>
             public bool Driving;
 
-            /// <summary>Set once the passengers are out, after which this ride is left alone.</summary>
+            /// <summary>Set once the riders are out. The vehicle may still be fighting.</summary>
             public bool Unloaded;
+
+            /// <summary>Set once there is nothing further to do with this ride at all.</summary>
+            public bool Finished;
+
+            /// <summary>
+            /// Whether anybody is still alive in a turret. Checked rather than cached because a
+            /// gunner dying turns the vehicle from a weapon back into a taxi, and the driver should
+            /// then get out and fight rather than sit in a hull with a dead gun.
+            /// </summary>
+            public bool IsArmed
+            {
+                get
+                {
+                    foreach (BanditBotController gunner in Gunners)
+                    {
+                        if (gunner != null && gunner.Self != null
+                            && (gunner.Self.life == null || !gunner.Self.life.isDead))
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+            }
         }
 
         private BanditEvent(float budget)
@@ -109,29 +160,33 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Moves every transport along by one step: order the drive once the crew is aboard, and
-        /// put the passengers out when it gets there.
+        /// Moves every vehicle along by one step: hold until the event sees something, drive at it,
+        /// then either empty out or settle down and shoot.
         ///
-        /// Deliberately driven by the driver's own navigator rather than by measuring the distance
-        /// here. ConsumeArrived and ConsumeGaveUp are what the vehicle itself concluded about the
-        /// trip, and "gave up" has to unload as surely as "arrived" does - a truck stuck against a
-        /// rock two hundred metres out with four men sat inside it is the exact failure this whole
-        /// mechanism exists to avoid.
+        /// The hold is the important part and it was learned by watching one without it. A vehicle
+        /// that sets off the moment it spawns drives at where you were standing while the infantry
+        /// it spawned beside are still on foot two hundred metres back - so the event arrives in two
+        /// halves, and the first half is a lorry by itself. Waiting for contact keeps it together:
+        /// the instant any part of the event sees you, all of it starts moving at once.
+        ///
+        /// Arrival is measured here rather than left to the navigator, whose idea of arriving is
+        /// having its bumper on the point. That is exactly the behaviour worth avoiding - it wastes
+        /// the entire approach and puts the fight on top of the player.
         /// </summary>
         private void Tick()
         {
             foreach (Ride ride in Rides)
             {
-                if (ride.Unloaded || !ride.DriveAtCaller)
+                if (ride.Finished || !ride.DriveAtCaller)
                 {
                     continue;
                 }
 
                 if (ride.Vehicle == null || ride.Vehicle.isDead || ride.Vehicle.isExploded)
                 {
-                    // Nothing left to unload from. Anyone who was inside was thrown out by vanilla
-                    // when it blew up, and is now a bandit on foot like any other.
-                    ride.Unloaded = true;
+                    // Anyone inside was thrown clear by vanilla when it went up, and is now a bandit
+                    // on foot like any other.
+                    ride.Finished = true;
                     continue;
                 }
 
@@ -141,77 +196,233 @@ namespace BanditPlugin.FakePlayer
 
                 if (driverGone)
                 {
-                    // The truck is not going anywhere else. Better to put the passengers out here,
-                    // wherever "here" is, than to leave a squad riding in a stationary vehicle for
-                    // the rest of the round.
-                    Unload(ride);
+                    // Not going anywhere else. Better to put the riders out here, wherever here is,
+                    // than to leave them sitting in a stationary vehicle for the rest of the round.
+                    UnloadRiders(ride);
+                    ride.Finished = true;
                     continue;
                 }
 
-                // Created in the controller's Start, which has not necessarily run yet: this
-                // director can tick in the same frame the event spawned its crew. Nothing to do
-                // until it exists.
+                // Created in the controller's Start, which has not necessarily run yet - this
+                // director can tick in the same frame the crew was spawned.
                 if (driver.Driver == null)
                 {
                     continue;
                 }
 
-                if (!ride.Driving)
+                // Still climbing aboard. RequestSeat retries for several seconds, and a destination
+                // cannot be given from outside a vehicle anyway.
+                if (!driver.Driver.IsSeated || driver.HasPendingSeat)
                 {
-                    // Not yet - the driver is still working its way into the seat. RequestSeat
-                    // retries for several seconds, and TrySetDestination refuses from outside a
-                    // vehicle, so the order is simply re-offered each tick until it is accepted.
-                    if (!driver.Driver.IsSeated || driver.HasPendingSeat)
+                    continue;
+                }
+
+                if (!TryUpdateTarget(ride, driver.Self))
+                {
+                    continue; // nothing seen yet - sit still with the engine running
+                }
+
+                Vector3 offset = ride.Vehicle.transform.position - ride.Destination;
+                offset.y = 0f;
+                float distance = offset.magnitude;
+
+                // The riders get out once they are near enough to be useful on foot, whatever the
+                // vehicle does next.
+                if (!ride.Unloaded && distance <= ride.DismountRange)
+                {
+                    UnloadRiders(ride);
+                }
+
+                // An armed vehicle keeps its driver and its gunners and holds at a range it can
+                // shoot from; an unarmed one has done its whole job the moment the riders are out.
+                float stopAt = ride.IsArmed ? ride.EngageRange : ride.DismountRange;
+
+                if (distance <= stopAt)
+                {
+                    driver.Driver.StopDriving();
+                    ride.Driving = false;
+
+                    if (!ride.IsArmed)
                     {
-                        continue;
+                        UnloadRiders(ride);
+                        if (ride.DriverDismounts)
+                        {
+                            Disembark(ride.Driver);
+                        }
+
+                        ride.Finished = true;
                     }
 
+                    continue;
+                }
+
+                // Further off than it wants to be - close the gap. Re-issued whenever the contact
+                // moves far enough to matter, which is what lets an armed vehicle follow someone
+                // who has backed away instead of sitting where it first stopped.
+                if (!ride.Driving)
+                {
                     if (driver.Driver.TrySetDestination(ride.Destination, out string reason))
                     {
                         ride.Driving = true;
                     }
                     else
                     {
-                        // Something that will not become true by waiting - a boat asked to drive
-                        // overland, most often. Put the men out where they are and let them walk.
-                        Logger.Log($"[Bandit] Event {Id}: {ride.TypeName} cannot drive to the caller "
+                        // Not something that becomes true by waiting - a boat asked to cross a
+                        // field, most often. Put the men out and let them walk.
+                        Logger.Log($"[Bandit] Event {Id}: {ride.TypeName} cannot drive to contact "
                             + $"({reason}) - unloading where it stands.");
-                        Unload(ride);
+                        UnloadRiders(ride);
+                        ride.Finished = true;
+                        continue;
                     }
-
-                    continue;
                 }
 
-                if (driver.Driver.ConsumeArrived() || driver.Driver.ConsumeGaveUp())
+                if (driver.Driver.ConsumeGaveUp())
                 {
-                    Unload(ride);
+                    // Stuck. Everyone out here rather than riding a wedged vehicle indefinitely.
+                    UnloadRiders(ride);
+                    if (!ride.IsArmed && ride.DriverDismounts)
+                    {
+                        Disembark(ride.Driver);
+                    }
+
+                    ride.Finished = true;
+                }
+                else if (driver.Driver.ConsumeArrived())
+                {
+                    ride.Driving = false;
                 }
             }
         }
 
         /// <summary>
-        /// Puts everyone but the driver out. The driver stays at the wheel: it still has a vehicle
-        /// worth keeping, and a man who has just climbed out of one is a man who spent the fight
-        /// getting out of it.
+        /// Where this event currently thinks the enemy is, and whether it has any business moving
+        /// yet.
+        ///
+        /// Contact is taken from the whole event rather than from the vehicle's own crew, because a
+        /// bandit sitting inside a hull may have no line of sight out of it - the infantry standing
+        /// in the open are the ones who can actually see. That also gives the behaviour worth
+        /// having: whoever spots you starts everything moving, vehicles included.
+        ///
+        /// The proximity trigger underneath it is the backstop for a vehicle spawned with no
+        /// infantry alongside, which would otherwise wait forever on eyes it does not have.
         /// </summary>
-        private void Unload(Ride ride)
+        private bool TryUpdateTarget(Ride ride, Player crewman)
         {
+            foreach (BanditSquad squad in Squads)
+            {
+                if (squad.HasFreshContact)
+                {
+                    ride.Destination = squad.ContactPosition;
+                    ride.Released = true;
+                    return true;
+                }
+            }
+
+            if (ride.ContactTriggerRange > 0f)
+            {
+                Player near = NearestEnemyTo(crewman, ride.Vehicle.transform.position, ride.ContactTriggerRange);
+                if (near != null)
+                {
+                    ride.Destination = near.transform.position;
+                    ride.Released = true;
+                    return true;
+                }
+            }
+
+            // Once it has been woken it stays awake, heading for the last place anything was seen -
+            // otherwise a vehicle would stop dead every time the squad lost sight of you.
+            return ride.Released;
+        }
+
+        /// <summary>
+        /// The nearest live player this event would shoot at, within a radius. No line-of-sight test:
+        /// this is deliberately "somebody has come close enough to notice", not "somebody is visible",
+        /// since the whole reason it exists is that the crew cannot see out.
+        /// </summary>
+        private static Player NearestEnemyTo(Player self, Vector3 position, float radius)
+        {
+            BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
+
+            Player nearest = null;
+            float nearestSquared = radius * radius;
+
+            foreach (SteamPlayer client in Provider.clients)
+            {
+                if (client?.player == null || ReferenceEquals(client.playerID, null))
+                {
+                    continue;
+                }
+
+                Player candidate = client.player;
+                if (candidate.life == null || candidate.life.isDead)
+                {
+                    continue;
+                }
+
+                // The driver is the yardstick for which side this vehicle is on. It has to be a
+                // real player rather than null: IsHostile answers "no" to a null self, so passing
+                // one would have made this trigger quietly never fire.
+                float distanceSquared = (candidate.transform.position - position).sqrMagnitude;
+                if (distanceSquared >= nearestSquared)
+                {
+                    continue;
+                }
+
+                if (FakePlayerSpawner.SpawnedBotSteamIds.Contains(client.playerID.steamID.m_SteamID))
+                {
+                    continue; // never wake a vehicle up over one of our own
+                }
+
+                if (!BanditTeams.IsHostile(self, candidate, otherIsBandit: false, config.HostileToUngrouped))
+                {
+                    continue;
+                }
+
+                nearestSquared = distanceSquared;
+                nearest = candidate;
+            }
+
+            return nearest;
+        }
+
+        /// <summary>
+        /// Puts the men riding in the back out. Gunners are never included - they are the reason the
+        /// vehicle is worth anything - and the driver is handled by the caller, since whether it
+        /// leaves depends on whether there is still a gun to drive.
+        /// </summary>
+        private void UnloadRiders(Ride ride)
+        {
+            if (ride.Unloaded)
+            {
+                return;
+            }
+
             ride.Unloaded = true;
 
-            foreach (BanditBotController passenger in ride.Passengers)
+            foreach (BanditBotController rider in ride.Riders)
             {
-                if (passenger == null || passenger.Self == null)
-                {
-                    continue;
-                }
-
-                if (passenger.Self.life != null && passenger.Self.life.isDead)
-                {
-                    continue;
-                }
-
-                passenger.Driver?.TryExit(out _);
+                Disembark(rider);
             }
+        }
+
+        private static void Disembark(BanditBotController crewman)
+        {
+            if (crewman == null || crewman.Self == null)
+            {
+                return;
+            }
+
+            if (crewman.Self.life != null && crewman.Self.life.isDead)
+            {
+                return;
+            }
+
+            // Stop holding the vehicle still first. A driver that climbs out with a destination
+            // still set would go on feeding driving packets to a seat it no longer occupies, and
+            // the men who just got out are standing at the bumper.
+            crewman.Driver?.StopDriving();
+            crewman.Driver?.TryExit(out _);
         }
 
         /// <summary>

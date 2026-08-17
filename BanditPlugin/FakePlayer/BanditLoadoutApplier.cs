@@ -258,6 +258,29 @@ namespace BanditPlugin.FakePlayer
         /// Anything that was configured and did not resolve is logged, because otherwise a typo'd
         /// identifier looks exactly like a slot that was deliberately left empty.
         /// </summary>
+        /// <summary>
+        /// The same lookup without the complaining, for callers that are inspecting a loadout rather
+        /// than equipping one - the cost model reads every kit's weapons and clothing, and a config
+        /// with one bad identifier would otherwise log the same error on every estimate.
+        /// </summary>
+        public static ItemAsset ResolveQuiet(string identifier)
+        {
+            string text = identifier?.Trim();
+            if (string.IsNullOrEmpty(text))
+            {
+                return null;
+            }
+
+            if (ushort.TryParse(text, out ushort legacyId))
+            {
+                return legacyId != 0 ? Assets.find(EAssetType.ITEM, legacyId) as ItemAsset : null;
+            }
+
+            return Guid.TryParse(text, out Guid guid) && guid != Guid.Empty
+                ? Assets.find(guid) as ItemAsset
+                : null;
+        }
+
         private static ItemAsset Resolve(string identifier, string slotName)
         {
             string text = identifier?.Trim();

@@ -97,6 +97,78 @@ namespace BanditPlugin
         public bool DriveAtCaller = true;
 
         /// <summary>
+        /// Whether the driver gets out with everyone else once the trip is over.
+        ///
+        /// On, which is right for a transport. The first version kept the driver at the wheel on the
+        /// reasoning that it still had a vehicle worth keeping - but watch it happen and the flaw is
+        /// obvious: the trip is the only thing the driver was for. Once the truck has stopped there
+        /// is no further order coming, so a driver left aboard is a man sitting in a parked car
+        /// through the whole fight, and in something unarmed he cannot even shoot out of it.
+        ///
+        /// Off leaves him aboard, which is only worth doing for something armed enough that sitting
+        /// in it beats standing next to it.
+        ///
+        /// Ignored entirely unless <see cref="DriveAtCaller"/> is on - a vehicle that holds position
+        /// never unloads at all.
+        /// </summary>
+        public bool DriverDismounts = true;
+
+        /// <summary>
+        /// How near an enemy has to get before a waiting vehicle sets off, in metres, whether or not
+        /// anybody has actually laid eyes on them.
+        ///
+        /// A vehicle does not drive the moment it spawns. It waits with its engine running until the
+        /// event makes contact - either a squad sees someone, or somebody comes inside this range -
+        /// and only then sets off. Without that hold, a transport spawned two hundred metres out
+        /// simply drives at where you were standing while the infantry it spawned beside are still
+        /// walking, so the event arrives in two halves and the first half is a lorry on its own.
+        ///
+        /// This range is the backstop rather than the main trigger. The main one is the squad's own
+        /// shared contact, which is what makes the whole event move together the instant any part of
+        /// it sees you. This exists because a bandit sitting inside a vehicle may have no line of
+        /// sight out of it, so a vehicle spawned with no infantry alongside could otherwise wait for
+        /// eyes it does not have. 0 turns it off and leaves the vehicle entirely dependent on
+        /// somebody seeing you.
+        /// </summary>
+        public float ContactTriggerRange = 120f;
+
+        /// <summary>
+        /// How far short of the destination the crew gets out, in metres.
+        ///
+        /// The setting that makes a transport worth having. Driving all the way onto the target and
+        /// only then opening the doors wastes the entire approach: the passengers can do nothing
+        /// from inside an unarmed vehicle, so the trip is dead time and the fight begins with a
+        /// truck parked on top of you and men appearing out of it. Stopping short turns the same
+        /// vehicle into what it should be - something that closes the ground quickly and then puts
+        /// a squad on its feet with an assault still to make.
+        ///
+        /// 60m by default: inside a rifleman's 110m acquire range, so they are in contact the moment
+        /// they land, but with enough ground left that the last stretch is fought on foot.
+        ///
+        /// 0 drives the whole way and unloads on arrival, which is the old behaviour and is only
+        /// really right for somewhere the vehicle itself needs to be.
+        /// </summary>
+        public float DismountRange = 60f;
+
+        /// <summary>
+        /// How close an *armed* vehicle closes before stopping to shoot, in metres. Ignored entirely
+        /// by anything with no turret.
+        ///
+        /// The difference between the two endings a vehicle can have. Something unarmed is a taxi:
+        /// it stops at <see cref="DismountRange"/>, everybody gets out, and the vehicle has done its
+        /// whole job. Something with a turret is a weapon that happens to have wheels, and emptying
+        /// it would be throwing the weapon away - so it keeps its driver and its gunners, holds at
+        /// this range, and fights from there while only the men in the back dismount.
+        ///
+        /// It also keeps moving as the fight does: the destination is the freshest thing the event
+        /// has seen, so a vehicle whose target has backed off closes the gap again rather than
+        /// sitting where it first stopped. Far enough out that it is using its reach, near enough
+        /// that it can see anything at all - which is why it is longer than the dismount range
+        /// rather than shorter.
+        /// </summary>
+        public float EngageRange = 110f;
+
+        /// <summary>
         /// The vehicles a fresh configuration starts with, priced against the rifleman's 10.
         ///
         /// All three are vanilla assets addressed by GUID, so they resolve on any map that loads
@@ -155,9 +227,11 @@ namespace BanditPlugin
                     Cost = 200f,
                     MinEventCost = 500f,
                     Weight = 1f,
-                    // Left where it spawns: it is armed, so it is a firing position rather than a
-                    // taxi, and its gunner engages from the turret without going anywhere.
-                    DriveAtCaller = false,
+                    // Now advances rather than sitting where it spawned. Being armed does not mean
+                    // being static - it means it never empties: it waits for contact, closes to
+                    // EngageRange, and fights from the turret with its crew still aboard.
+                    DriveAtCaller = true,
+                    DriverDismounts = false,
                     Crew = new List<BanditVehicleSeat>
                     {
                         new BanditVehicleSeat { Seat = 0, Kit = "rifleman" },

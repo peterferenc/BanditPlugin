@@ -79,16 +79,18 @@ namespace BanditPlugin.Commands
                 return;
             }
 
-            // Bandits are real clients holding real player slots, so the ceiling is whichever runs
-            // out first - the configured cap or the server's own room. Worked out before the draw
-            // rather than discovered during the spawn, because the failure that produces otherwise
-            // is the tail of an event silently not existing.
-            int freeSlots = Provider.maxPlayers - Provider.clients.Count;
-            int banditCap = Mathf.Max(0, Mathf.Min(config.EventMaxBandits, freeSlots));
+            // The configured cap and nothing else. An earlier version also clamped this to the
+            // server's free player slots, on the reasoning that a bandit is a real client and must
+            // therefore occupy one - which is wrong in the way that matters. FakePlayerSpawner goes
+            // in through Provider.addPlayer by reflection, and the maxPlayers test lives further up
+            // in the connection-accept path that a reflected spawn never touches. Bandits are
+            // genuinely not bounded by the slot count, and clamping to it only made large events
+            // quietly smaller on a busy server.
+            int banditCap = Mathf.Max(0, config.EventMaxBandits);
             if (banditCap < 1)
             {
-                UnturnedChat.Say(caller, $"No room for bandits: {freeSlots} free player slot(s), "
-                    + $"cap {config.EventMaxBandits}. Try /banditclear.", Color.red);
+                UnturnedChat.Say(caller, $"EventMaxBandits is {config.EventMaxBandits} - "
+                    + "no bandits can be spawned until it is raised.", Color.red);
                 return;
             }
 
@@ -108,7 +110,7 @@ namespace BanditPlugin.Commands
             BanditEvent banditEvent = BanditEvent.Create(budget);
             Spawn(config, plan, banditEvent, team, placed);
 
-            Reply(caller, config, plan, banditEvent, placed, team, freeSlots);
+            Reply(caller, config, plan, banditEvent, placed, team);
         }
 
         /// <summary>
@@ -220,6 +222,10 @@ namespace BanditPlugin.Commands
                 Vehicle = vehicle,
                 TypeName = type.Name,
                 DriveAtCaller = type.DriveAtCaller,
+                DriverDismounts = type.DriverDismounts,
+                DismountRange = Mathf.Max(0f, type.DismountRange),
+                EngageRange = Mathf.Max(0f, type.EngageRange),
+                ContactTriggerRange = Mathf.Max(0f, type.ContactTriggerRange),
                 // Where the caller was standing, not where they are now: the event was placed
                 // relative to that spot, and a destination that chases a moving player would make
                 // the arrival - and so the dismount - something that may never happen.
@@ -266,9 +272,15 @@ namespace BanditPlugin.Commands
                 {
                     ride.Driver = crewman;
                 }
+                else if (isGunner)
+                {
+                    // Never dismounted: this man is the reason an armed vehicle is worth more than
+                    // the sum of the men inside it.
+                    ride.Gunners.Add(crewman);
+                }
                 else
                 {
-                    ride.Passengers.Add(crewman);
+                    ride.Riders.Add(crewman);
                 }
             }
 
@@ -339,7 +351,7 @@ namespace BanditPlugin.Commands
         }
 
         private static void Reply(IRocketPlayer caller, BanditConfiguration config, BanditEventPlan plan,
-            BanditEvent banditEvent, BanditPlacement.Result placed, BanditTeam team, int freeSlots)
+            BanditEvent banditEvent, BanditPlacement.Result placed, BanditTeam team)
         {
             int spawned = banditEvent.BanditCount;
 
@@ -374,8 +386,9 @@ namespace BanditPlugin.Commands
             }
             else if (plan.LimitedByBanditCap)
             {
-                UnturnedChat.Say(caller, $"Stopped at the bandit ceiling, not the budget: {freeSlots} free "
-                    + $"slot(s), cap {config.EventMaxBandits}. {plan.Unspent:0} pts unspent.", Color.yellow);
+                UnturnedChat.Say(caller, $"Stopped at the bandit ceiling of {config.EventMaxBandits}, "
+                    + $"not the budget - {plan.Unspent:0} pts unspent. Raise EventMaxBandits to spend it.",
+                    Color.yellow);
             }
             else if (plan.Unspent >= SmallestCost(config) && plan.Unspent > 0f)
             {
