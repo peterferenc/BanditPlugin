@@ -479,6 +479,63 @@ namespace BanditPlugin
         /// </summary>
         public bool HostileToUngrouped = true;
 
+        /// <summary>
+        /// The vehicles "/banditevent" can draw, and that "/banditv &lt;name&gt;" can spawn by name.
+        /// See <see cref="BanditVehicleType"/>.
+        ///
+        /// Starts EMPTY for the same XmlSerializer reason as <see cref="Kits"/>; BanditPlugin.Load
+        /// fills it in after the file has been read.
+        /// </summary>
+        public List<BanditVehicleType> Vehicles = new List<BanditVehicleType>();
+
+        /// <summary>
+        /// Most vehicles one event may draw, however large its budget.
+        ///
+        /// A budget on its own has no opinion about shape: a big one can perfectly well buy four
+        /// trucks and almost no infantry, which is not the fight anybody typed the number for. This
+        /// is the cap that keeps an event's money going mostly into men.
+        /// </summary>
+        public int EventVehicleCap = 2;
+
+        /// <summary>
+        /// Metres between the things an event puts down - one squad and the next, or a squad and a
+        /// vehicle.
+        ///
+        /// Wide enough that two squads are two separate problems arriving from slightly different
+        /// places, rather than one crowd; narrow enough that they are still one event. Also the
+        /// radius a vehicle is kept clear of infantry by, so nothing spawns inside a truck.
+        /// </summary>
+        public float EventSpread = 35f;
+
+        /// <summary>
+        /// Most bandits one event may spawn, before the server's own free player slots are taken
+        /// into account.
+        ///
+        /// Bandits are real clients and occupy real slots, so a large budget can genuinely run a
+        /// server out of room - and the failure that produces is the tail of an event silently not
+        /// existing. The command checks this and the free slots up front and says so; see
+        /// <see cref="BanditEventDraw"/>.
+        /// </summary>
+        public int EventMaxBandits = 24;
+
+        /// <summary>
+        /// How far in front of a bandit "/banditv &lt;vehicle&gt;" puts the vehicle it spawns. Far
+        /// enough to clear the man standing there, close enough that he is inside the driver-seat
+        /// search radius.
+        /// </summary>
+        public float VehicleSpawnDistance = 6f;
+
+        /// <summary>
+        /// How long a bandit keeps trying to get into a seat it has been given before giving up and
+        /// staying on foot.
+        ///
+        /// There has to be a retry at all because vanilla refuses to seat anyone mid-equip, and a
+        /// bandit that has just spawned is doing exactly that - it is pulling out the rifle its kit
+        /// gave it. A single attempt at spawn time therefore fails almost every time. See
+        /// BanditBotController.RequestSeat.
+        /// </summary>
+        public float VehicleSeatRetrySeconds = 6f;
+
         /// <summary>Start newly spawned bandits patrolling immediately.</summary>
         public bool PatrolByDefault = false;
 
@@ -578,6 +635,119 @@ namespace BanditPlugin
             return names;
         }
 
+        /// <summary>
+        /// The vehicle type of that name, or null. Case-insensitive - these are typed into chat
+        /// alongside the kit and squad names.
+        /// </summary>
+        public BanditVehicleType FindVehicle(string name)
+        {
+            if (Vehicles == null || string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+
+            foreach (BanditVehicleType vehicle in Vehicles)
+            {
+                if (vehicle != null && string.Equals(vehicle.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    return vehicle;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Every vehicle type name, for the usage lines and "/banditevent check".</summary>
+        public List<string> VehicleNames()
+        {
+            List<string> names = new List<string>();
+            if (Vehicles == null)
+            {
+                return names;
+            }
+
+            foreach (BanditVehicleType vehicle in Vehicles)
+            {
+                if (vehicle != null && !string.IsNullOrEmpty(vehicle.Name))
+                {
+                    names.Add(vehicle.Name);
+                }
+            }
+
+            return names;
+        }
+
+        /// <summary>
+        /// What a kit is worth to an event, with anything nonsensical treated as unusable rather
+        /// than as free.
+        ///
+        /// Zero and negative are refused here, at the one place every price is read, because the
+        /// draw spends a budget down by these numbers - a class costing nothing is a class that can
+        /// be bought an unlimited number of times, and the loop that does the buying would never
+        /// end. Cheap to guard against and unrecoverable not to, since the file is hand-edited and
+        /// "0" is an obvious thing to type into a price you have not thought about yet. Reported by
+        /// "/banditevent check".
+        /// </summary>
+        public static float CostOf(BanditKit kit)
+        {
+            return kit != null && kit.Cost > 0f ? kit.Cost : 0f;
+        }
+
+        /// <summary>
+        /// What a squad type is worth: the sum of its members' kit costs.
+        ///
+        /// Derived rather than stated so a price cannot drift away from the men it describes -
+        /// adding a marksman to a type makes that type dearer with nothing else to edit. A member
+        /// naming a kit that does not exist contributes nothing, which matches what the spawn does
+        /// with it: skip it and carry on a man short.
+        ///
+        /// Returns 0 for a type with no usable members, which the draw reads as "not buyable".
+        /// </summary>
+        public float SquadCost(BanditSquadType type)
+        {
+            if (type == null || type.Members == null)
+            {
+                return 0f;
+            }
+
+            float total = 0f;
+            foreach (string member in type.Members)
+            {
+                total += CostOf(FindKit(member));
+            }
+
+            return total;
+        }
+
+        /// <summary>
+        /// What a crewed vehicle is worth: its platform cost plus every crewman's kit.
+        ///
+        /// The two are added here and nowhere else, so <see cref="BanditVehicleType.Cost"/> can stay
+        /// the honest cost of the metal while the draw still refuses to buy a vehicle it cannot
+        /// afford to fill.
+        /// </summary>
+        public float VehicleCost(BanditVehicleType type)
+        {
+            if (type == null || type.Cost <= 0f)
+            {
+                return 0f;
+            }
+
+            float total = type.Cost;
+            if (type.Crew != null)
+            {
+                foreach (BanditVehicleSeat seat in type.Crew)
+                {
+                    if (seat != null)
+                    {
+                        total += CostOf(FindKit(seat.Kit));
+                    }
+                }
+            }
+
+            return total;
+        }
+
         public void LoadDefaults()
         {
             ApplyLoadout = true;
@@ -645,6 +815,13 @@ namespace BanditPlugin
             Teams = BanditTeam.BuildDefaults();
             DefaultTeam = "bandits";
             HostileToUngrouped = true;
+
+            Vehicles = BanditVehicleType.BuildDefaults();
+            EventVehicleCap = 2;
+            EventSpread = 35f;
+            EventMaxBandits = 24;
+            VehicleSpawnDistance = 6f;
+            VehicleSeatRetrySeconds = 6f;
 
             PatrolByDefault = false;
             PatrolWaypointDwellSeconds = 3f;

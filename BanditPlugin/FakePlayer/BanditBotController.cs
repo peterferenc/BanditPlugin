@@ -71,6 +71,14 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public BanditVehicleDriver Driver { get; private set; }
 
+        // A seat this bandit has been told to take and has not managed to get into yet. See
+        // RequestSeat - the retry is the whole point of these existing rather than the caller
+        // simply calling Driver.TryEnter.
+        private InteractableVehicle _pendingSeatVehicle;
+        private byte _pendingSeat;
+        private bool _pendingSeatIsGunner;
+        private float _pendingSeatGiveUpTime;
+
         /// <summary>Whoever the bot is currently shooting at, or null.</summary>
         public Player CurrentTarget => _target;
 
@@ -107,6 +115,35 @@ namespace BanditPlugin.FakePlayer
 
         public float TurnSpeedDegreesPerSecond = 180f;
         public float ScanIntervalSeconds = 0.5f;
+
+        /// <summary>
+        /// How much closer than the bandit's current target somebody else has to be before they
+        /// are worth switching to: 0.8 means 20% closer.
+        ///
+        /// Without a margin the scan re-picked the nearest visible enemy from scratch twice a
+        /// second, so two players at similar range made the body flip between them every 0.5s.
+        /// Since a shot needs the aim inside AimToleranceDegrees and the turn is capped at
+        /// TurnSpeedDegreesPerSecond, a bandit caught between them spent its time slewing and
+        /// never settled long enough to fire - one player holding at equal range while the other
+        /// pushed was a free kill.
+        /// </summary>
+        private const float TargetStealDistanceFraction = 0.8f;
+
+        /// <summary>
+        /// How long the bandit keeps preferring a target it can no longer see.
+        ///
+        /// Only ever a *preference*, never a lock: while the engaged target is out of sight any
+        /// enemy the bandit can actually see is taken immediately, with no margin. All this window
+        /// buys is that someone ducking behind a corner and leaning back out is still the same
+        /// fight rather than a fresh scan - which is exactly the case the margin above exists for,
+        /// and it would be undone if one blocked scan reset the choice.
+        ///
+        /// Three seconds covers a peek cycle - drop behind cover, reposition, come back out - at
+        /// six scans' worth of grace, and is well short of the brain's own 8s TargetMemorySeconds,
+        /// so the layering is: prefer them for 3s, keep walking to where they were for 8s.
+        /// </summary>
+        private const float EngagementMemorySeconds = 3f;
+
         public float FireIntervalSeconds = 0.6f;
         public float AimToleranceDegrees = 10f;
         public float FireRange = 50f;
@@ -247,6 +284,13 @@ namespace BanditPlugin.FakePlayer
 
         private Queue<PlayerInputPacket> _serversidePackets;
         private Player _target;
+
+        // Who the bandit considers itself to be fighting, which is not the same thing as _target:
+        // _target is null the moment the enemy is out of sight, this survives EngagementMemorySeconds
+        // of that so a re-peek resumes the same engagement. Read only by FindNearestEnemy - nothing
+        // aims, shoots or navigates off it, which is what keeps it from becoming a wallhack.
+        private Player _engagedTarget;
+        private float _engagedLastSeenTime = float.MinValue;
         private float _nextScanTime;
         private float _packetAccumulator;
         private uint _clientSimulationFrameNumber;
@@ -354,6 +398,79 @@ namespace BanditPlugin.FakePlayer
             Brain?.NotifyDamaged(shotDirection);
         }
 
+        /// <summary>
+        /// Tells this bandit to get into a particular seat of a particular vehicle, and to keep
+        /// trying until it manages it.
+        ///
+        /// The retry is not defensive coding, it is the only thing that makes crewing a freshly
+        /// spawned vehicle work at all. Vanilla refuses to seat anyone whose equip animation is
+        /// still running - VehicleSeatTool restates that check, and it is right to - and a bandit
+        /// that has just been spawned is doing exactly that, because its kit has just handed it a
+        /// rifle. Ordering the seat on the same tick as the spawn therefore fails essentially every
+        /// time, and fails again for as long as the weapon takes to come up.
+        ///
+        /// So the order is recorded and retried every frame until it takes or until
+        /// BanditConfiguration.VehicleSeatRetrySeconds runs out, after which the bandit is left
+        /// standing where it is - beside the vehicle, armed, and perfectly able to fight on foot,
+        /// which is a far better failure than one that vanishes silently.
+        /// </summary>
+        public void RequestSeat(InteractableVehicle vehicle, byte seat, bool gunner)
+        {
+            if (vehicle == null)
+            {
+                return;
+            }
+
+            _pendingSeatVehicle = vehicle;
+            _pendingSeat = seat;
+            _pendingSeatIsGunner = gunner;
+            _pendingSeatGiveUpTime = Time.time
+                + Mathf.Max(0.5f, BanditPlugin.Instance.Configuration.Instance.VehicleSeatRetrySeconds);
+        }
+
+        /// <summary>Whether this bandit is still waiting to get into a seat it was given.</summary>
+        public bool HasPendingSeat => _pendingSeatVehicle != null;
+
+        private void TickPendingSeat()
+        {
+            if (_pendingSeatVehicle == null || Driver == null)
+            {
+                return;
+            }
+
+            // Nothing to retry into: the vehicle blew up, or somebody else took the seat and is not
+            // going to give it back. Dropped rather than retried to the deadline, because neither
+            // of those resolves itself by waiting.
+            if (_pendingSeatVehicle.isDead || _pendingSeatVehicle.isExploded)
+            {
+                _pendingSeatVehicle = null;
+                return;
+            }
+
+            if (Driver.TryEnter(_pendingSeatVehicle, _pendingSeat, out string reason))
+            {
+                // A turret crewman tracks and engages on its own from here; a driver holds the
+                // vehicle where it is until something gives it a destination. Set after the seat
+                // rather than before, so a bandit that never got in is never left aiming a turret
+                // it is not sitting in.
+                if (_pendingSeatIsGunner)
+                {
+                    Driver.TrackNearestPlayer = true;
+                }
+
+                _pendingSeatVehicle = null;
+                return;
+            }
+
+            if (Time.time >= _pendingSeatGiveUpTime)
+            {
+                Logger.Log($"[Bandit] {KitName} gave up on seat {_pendingSeat} of "
+                    + $"{(_pendingSeatVehicle.asset != null ? _pendingSeatVehicle.asset.FriendlyName : "a vehicle")} "
+                    + $"- {reason}. Fighting on foot instead.");
+                _pendingSeatVehicle = null;
+            }
+        }
+
         private void Update()
         {
             if (Self == null || _serversidePackets == null)
@@ -373,6 +490,8 @@ namespace BanditPlugin.FakePlayer
             {
                 return;
             }
+
+            TickPendingSeat();
 
             if (Time.time >= _nextScanTime)
             {
@@ -590,6 +709,11 @@ namespace BanditPlugin.FakePlayer
             // And done shooting. PlayerInput stops simulating a dead player, so the trigger is
             // already released as far as vanilla is concerned.
             CancelBurst();
+
+            // And done fighting anyone. The scan never runs while dead, so this would otherwise sit
+            // there and hand a bandit that got revived or respawned into the same body a stale
+            // preference for whoever killed it.
+            _engagedTarget = null;
 
             float despawnDelay = BanditPlugin.Instance.Configuration.Instance.DespawnSecondsAfterDeath;
             if (despawnDelay < 0f)
@@ -2218,21 +2342,43 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// The nearest visible player this bandit is at war with - which since teams exist means
-        /// another team's bandits as readily as it means a person. Its own side is skipped whether
-        /// that side is a squad of bots or the player who joined their team.
+        /// The visible player this bandit is at war with and should be shooting at - which since
+        /// teams exist means another team's bandits as readily as it means a person. Its own side
+        /// is skipped whether that side is a squad of bots or the player who joined their team.
+        ///
+        /// Nearest wins, but not by a hair: whoever the bandit is already fighting keeps the slot
+        /// unless somebody else is TargetStealDistanceFraction closer. See that constant for what
+        /// re-picking from scratch every scan actually did.
+        ///
+        /// The result is still only ever somebody visible right now, so the callers' assumption
+        /// that a non-null target is one this bandit can genuinely see holds exactly as before -
+        /// UpdateSuppression starts its clock on it, and the brain takes it as a live sighting.
+        /// The engagement outlives sight; the target does not.
         /// </summary>
         private Player FindNearestEnemy()
         {
+            // Time out an engagement nobody has laid eyes on for a while before it can influence
+            // this scan, so a target that broke contact and never came back stops being preferred.
+            if (_engagedTarget != null && Time.time - _engagedLastSeenTime >= EngagementMemorySeconds)
+            {
+                _engagedTarget = null;
+            }
+
+            Player engaged = _engagedTarget;
+            bool engagedEligible = false;
+            bool engagedVisible = false;
+            float engagedDistanceSq = float.MaxValue;
+
             Player nearest = null;
 
             // Doubles as the acquisition cap, so anyone beyond it can never become the nearest.
             // Without one the scan took the nearest visible player at any distance at all and
             // turned the body onto them, which is how a bandit ended up tracking someone across a
             // valley it had no hope of reaching. Per class, so a marksman really does see further.
-            float nearestDistanceSq = TargetAcquireRange > 0f
+            float acquireRangeSq = TargetAcquireRange > 0f
                 ? TargetAcquireRange * TargetAcquireRange
                 : float.MaxValue;
+            float nearestDistanceSq = acquireRangeSq;
 
             foreach (SteamPlayer steamPlayer in Provider.clients)
             {
@@ -2253,14 +2399,30 @@ namespace BanditPlugin.FakePlayer
                 }
 
                 float distanceSq = (candidate.transform.position - transform.position).sqrMagnitude;
-                if (distanceSq >= nearestDistanceSq)
+                if (distanceSq >= acquireRangeSq)
+                {
+                    continue;
+                }
+
+                bool isEngaged = candidate == engaged;
+                if (isEngaged)
+                {
+                    engagedEligible = true;
+                    engagedDistanceSq = distanceSq;
+                }
+
+                // The cheap way to skip a raycast, but never for the enemy already being fought:
+                // whether the bandit can still see that one decides whether its margin applies at
+                // all, so it has to be answered even when somebody nearer has already been found.
+                // Worst case one extra raycast per scan, twice a second.
+                if (!isEngaged && distanceSq >= nearestDistanceSq)
                 {
                     continue;
                 }
 
                 // Last, because it is the only test here that costs raycasts: a player the bot
-                // cannot see is not a target, so it locks onto the nearest *visible* player rather
-                // than tracking the nearest one through a wall and waiting for them to step out.
+                // cannot see is not a target, so it locks onto a *visible* player rather than
+                // tracking one through a wall and waiting for them to step out.
                 // To the point it would aim at, for the same reason the firing check is: a
                 // target whose head is visible over a wall its chest is behind is one this bandit
                 // cannot hit, and locking onto it only stops it looking for one it can.
@@ -2269,11 +2431,47 @@ namespace BanditPlugin.FakePlayer
                     continue;
                 }
 
-                nearest = candidate;
-                nearestDistanceSq = distanceSq;
+                if (isEngaged)
+                {
+                    engagedVisible = true;
+                }
+
+                if (distanceSq < nearestDistanceSq)
+                {
+                    nearest = candidate;
+                    nearestDistanceSq = distanceSq;
+                }
             }
 
-            return nearest;
+            // Dead, disconnected, switched sides or run clean out of acquisition range. That is a
+            // different thing from ducking behind a wall and the memory above is not for it, so
+            // the engagement ends now rather than spending three seconds being preferred by a scan
+            // it can never again win.
+            if (engaged != null && !engagedEligible)
+            {
+                _engagedTarget = null;
+                engaged = null;
+            }
+
+            Player chosen = nearest;
+
+            // Only a target the bandit can still see gets to hold the slot on seniority. An
+            // engagement the bandit has lost sight of is a tiebreak for when its man reappears,
+            // not a reason to ignore someone standing in the open in front of it - so while
+            // engagedVisible is false, `nearest` simply wins, and if nobody is visible at all the
+            // choice is null and the window keeps running down.
+            if (engagedVisible && nearestDistanceSq >= engagedDistanceSq * (TargetStealDistanceFraction * TargetStealDistanceFraction))
+            {
+                chosen = engaged;
+            }
+
+            if (chosen != null)
+            {
+                _engagedTarget = chosen;
+                _engagedLastSeenTime = Time.time;
+            }
+
+            return chosen;
         }
     }
 }

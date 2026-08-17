@@ -51,6 +51,42 @@ namespace BanditPlugin
         public BanditLoadout Loadout = new BanditLoadout();
 
         /// <summary>
+        /// What one of these is worth when "/banditevent &lt;cost&gt;" is spending its budget, and the
+        /// figure every squad's own cost is summed from.
+        ///
+        /// The scale is set by whatever you make the rifleman: it is the ordinary soldier in every
+        /// other respect, so it is the unit here too, and the rest of the classes are priced as
+        /// multiples of one. Nothing reads this as an absolute - halving every number in the file
+        /// and halving what you type on the command line gives identical events - so the only thing
+        /// that matters is what a marksman is worth *relative to* a rifleman.
+        ///
+        /// Must be greater than zero, and the draw refuses to consider anything that is not. A class
+        /// costing nothing stays affordable no matter how much has already been spent, so the loop
+        /// buying it would never make progress and never end; see BanditEventDraw.
+        /// </summary>
+        public float Cost = 10f;
+
+        /// <summary>
+        /// The smallest event budget this class may appear in at all.
+        ///
+        /// This is the setting that stops a big event from simply being a lot of riflemen. Cost
+        /// alone says what is affordable, not what belongs: with everything unlocked from the
+        /// start, a 400-point event rolls forty riflemen about as readily as it rolls marksmen and
+        /// a tank. Gating the specialists behind a floor is what makes a large event a different
+        /// *kind* of fight rather than the same fight with more men in it.
+        ///
+        /// 0 means always available, which is right for the class you want to see at every size.
+        /// </summary>
+        public float MinEventCost;
+
+        /// <summary>
+        /// How often this class is picked relative to the others, once it is affordable and
+        /// unlocked. 1 is ordinary, 0 excludes it from events entirely while leaving it spawnable
+        /// by name with "/bandit &lt;kit&gt;".
+        /// </summary>
+        public float Weight = 1f;
+
+        /// <summary>
         /// Furthest this class shoots. Worth keeping under the gun's own Range from its .dat, since
         /// past that the bullet stops before it arrives and the bandit is firing at nothing - which
         /// is why the breacher's shotgun is capped so much shorter than the rifles.
@@ -166,6 +202,10 @@ namespace BanditPlugin
                 new BanditKit
                 {
                     Name = "mg",
+                    // Twice a rifleman and held back until an event is worth a support weapon: one
+                    // gun that never stops firing changes a fight more than two more rifles do.
+                    Cost = 22f,
+                    MinEventCost = 60f,
                     FireRange = 120f,
                     TargetAcquireRange = 140f,
                     PreferredEngagementRange = 45f,
@@ -193,6 +233,10 @@ namespace BanditPlugin
                 new BanditKit
                 {
                     Name = "rifleman",
+                    // The unit every other price is quoted in, available at any size and drawn
+                    // several times as often as the specialists - most of an event should be these.
+                    Cost = 10f,
+                    Weight = 3f,
                     FireRange = 100f,
                     TargetAcquireRange = 110f,
                     PreferredEngagementRange = 25f,
@@ -216,6 +260,12 @@ namespace BanditPlugin
                 new BanditKit
                 {
                     Name = "marksman",
+                    // The dearest of the four and the latest to unlock. A marksman is the class that
+                    // makes an event feel different rather than bigger - it denies ground long
+                    // before anything else in the draw can reach you - so it is deliberately not
+                    // something a modest budget can stumble into.
+                    Cost = 26f,
+                    MinEventCost = 100f,
                     FireRange = 180f,
                     TargetAcquireRange = 200f,
                     PreferredEngagementRange = 70f,
@@ -243,6 +293,9 @@ namespace BanditPlugin
                 new BanditKit
                 {
                     Name = "breacher",
+                    // Barely above a rifleman and unlocked from the start: it only reaches 30m, so
+                    // it is dangerous when it arrives and free to ignore when it does not.
+                    Cost = 14f,
                     FireRange = 30f,
                     TargetAcquireRange = 60f,
                     PreferredEngagementRange = 8f,

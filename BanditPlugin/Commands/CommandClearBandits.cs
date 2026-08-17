@@ -26,14 +26,24 @@ namespace BanditPlugin.Commands
             // than waiting for the next prune keeps a cleared field from leaving squad objects
             // holding references to players that no longer exist.
             FakePlayer.BanditSquad.ClearAll();
+            FakePlayer.BanditEvent.ClearAll();
+
+            // Vehicles outlive their crews completely, so kicking the bots is not enough: without
+            // this, an afternoon of /banditevent leaves the map covered in abandoned trucks. Only
+            // the ones this plugin spawned are touched - anything a mapper placed stays put.
+            int vehicles = FakePlayer.BanditVehicleSpawner.DestroyAll();
+
+            string report = removed > 0 || vehicles > 0
+                ? $"Removed {removed} bandit(s) and {vehicles} spawned vehicle(s)."
+                : "No bandits or spawned vehicles to remove.";
 
             if (caller is Rocket.Unturned.Player.UnturnedPlayer)
             {
-                UnturnedChat.Say(caller, removed > 0 ? $"Removed {removed} bandit(s)." : "No bandits to remove.", Color.green);
+                UnturnedChat.Say(caller, report, Color.green);
             }
             else
             {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] Removed {removed} bandit(s).");
+                Rocket.Core.Logging.Logger.Log($"[Bandit] {report}");
             }
         }
     }

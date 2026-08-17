@@ -19,8 +19,16 @@ namespace BanditPlugin
             // only so a team exists as soon as the server does.
             BanditTeams.Ensure(Configuration.Instance);
 
+            // Everything an event draws is priced and gated in the configuration file, so a typo in
+            // it does not produce an error - it produces a thin event nobody can explain. The
+            // structural half of the check runs here; the half that needs a map loaded is
+            // /banditevent check.
+            BanditEventCheck.LogProblems(Configuration.Instance);
+
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
-            Logger.Log("[Bandit] Loaded. /squadspawn <type> puts a whole squad down fighting - "
+            Logger.Log("[Bandit] Loaded. /banditevent <cost> buys a whole fight - squads and crewed "
+                + "vehicles drawn against a points budget, /banditevent check prices everything; "
+                + "/squadspawn <type> puts a whole squad down fighting - "
                 + "/squadspawn squads lists the types, and team:<team> puts one on a side; "
                 + "/banditteam join <team> puts you on one, and bandits on it stop shooting at you; "
                 + "/bandit spawns one - it just stands until ordered. "
@@ -63,10 +71,16 @@ namespace BanditPlugin
                 changed = true;
             }
 
+            if (config.Vehicles == null || config.Vehicles.Count == 0)
+            {
+                config.Vehicles = BanditVehicleType.BuildDefaults();
+                changed = true;
+            }
+
             if (changed)
             {
                 Configuration.Save();
-                Logger.Log("[Bandit] Wrote the default kits, squad types and teams into the configuration.");
+                Logger.Log("[Bandit] Wrote the default kits, squad types, teams and vehicles into the configuration.");
             }
         }
 

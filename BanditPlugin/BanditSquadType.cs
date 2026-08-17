@@ -27,6 +27,12 @@ namespace BanditPlugin
     ///
     /// Everything is resolved into a <see cref="BanditSquadProfile"/> once, when the squad is
     /// spawned. Editing a type affects the next squad, not the one already in the field.
+    ///
+    /// There is deliberately no Cost field here. What a squad is worth to "/banditevent" is the sum
+    /// of its members' kit costs, worked out by <see cref="BanditConfiguration.SquadCost"/> - so
+    /// adding a marksman to a type makes it dearer on its own, and a price cannot drift out of step
+    /// with the men it is meant to describe. What the type *does* state is the two things that
+    /// cannot be derived: how large an event it belongs in, and how often it comes up.
     /// </summary>
     public class BanditSquadType
     {
@@ -54,6 +60,25 @@ namespace BanditPlugin
         /// it for one spawn.
         /// </summary>
         public string Team = string.Empty;
+
+        /// <summary>
+        /// The smallest "/banditevent &lt;cost&gt;" budget this type may be drawn into.
+        ///
+        /// Deliberately *not* the same thing as what it costs. A sniper pair is affordable long
+        /// before it is appropriate: two marksmen and a rifleman price out at 62, but an event
+        /// bought for 70 that happens to roll them is one you cannot approach at all. The floor is
+        /// how you say "this type belongs in a big fight", separately from what it is worth.
+        ///
+        /// 0 means always available. See <see cref="BanditKit.MinEventCost"/>, which is the same
+        /// setting one level down.
+        /// </summary>
+        public float MinEventCost;
+
+        /// <summary>
+        /// How often this type is drawn relative to the other eligible ones. 1 is ordinary, 0 keeps
+        /// it out of events while leaving "/squadspawn &lt;name&gt;" working.
+        /// </summary>
+        public float Weight = 1f;
 
         /// <summary>Metres between members as they are placed, and the depth of the wedge.</summary>
         public float Spacing = -1f;
@@ -113,7 +138,12 @@ namespace BanditPlugin
                 new BanditSquadType
                 {
                     Name = "basic",
-                    Members = new List<string> { "rifleman", "rifleman", "mg", "marksman", "breacher" }
+                    Members = new List<string> { "rifleman", "rifleman", "mg", "marksman", "breacher" },
+                    // Costs 82 off its members, and held back to events of 120 or more: it contains
+                    // one of everything, so drawing it into a small event spends the whole budget on
+                    // a squad you cannot then put anything alongside.
+                    MinEventCost = 120f,
+                    Weight = 2f
                 },
 
                 // A rifle section: four of the same class, so nothing in the fight is coming from a
@@ -125,6 +155,10 @@ namespace BanditPlugin
                 {
                     Name = "rifle",
                     Members = new List<string> { "rifleman", "rifleman", "rifleman", "rifleman" },
+                    // 40 points of nothing special, available at any size and drawn the most often.
+                    // This is the backbone of every event: whatever else the draw turns up, most of
+                    // what walks at you should be ordinary men with rifles.
+                    Weight = 3f,
                     Spacing = 4f,
                     SpawnDistance = 130f,
                     RepositionAfterNoShotSeconds = 3.5f
@@ -140,6 +174,11 @@ namespace BanditPlugin
                 {
                     Name = "sniper",
                     Members = new List<string> { "marksman", "marksman", "rifleman" },
+                    // 62 points, but locked to events of 200 or more - the clearest case for the
+                    // floor being a separate number from the price. A pair of marksmen is affordable
+                    // in a 70-point event and would make it unapproachable; in a 200-point one they
+                    // are the part that makes you move carefully rather than the whole fight.
+                    MinEventCost = 200f,
                     Spacing = 12f,
                     SpawnDistance = 260f,
                     ContactMemorySeconds = 25f,

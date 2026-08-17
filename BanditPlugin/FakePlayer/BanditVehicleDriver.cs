@@ -256,7 +256,32 @@ namespace BanditPlugin.FakePlayer
             return true;
         }
 
-        private bool TryEnter(byte seatIndex, out string reason)
+        /// <summary>
+        /// Seats the bandit in a named seat of a *named* vehicle, rather than of whichever one
+        /// happens to be nearest.
+        ///
+        /// Needed the moment anything spawns a vehicle and wants that vehicle crewed: an event that
+        /// puts down two trucks thirty metres apart and then fills them by proximity will happily
+        /// put both drivers in the same one. The nearest-vehicle search is a convenience for a
+        /// person typing a command; code that already knows which vehicle it means should say so.
+        /// </summary>
+        public bool TryEnter(InteractableVehicle vehicle, byte seatIndex, out string reason)
+        {
+            if (vehicle == null)
+            {
+                reason = "the vehicle is gone";
+                return false;
+            }
+
+            return TryEnter(seatIndex, vehicle, out reason);
+        }
+
+        private bool TryEnter(byte seatIndex, out string reason) => TryEnter(seatIndex, null, out reason);
+
+        /// <param name="target">
+        /// The vehicle to get into, or null to take the nearest one with that seat free.
+        /// </param>
+        private bool TryEnter(byte seatIndex, InteractableVehicle target, out string reason)
         {
             if (_self == null || _self.life == null || _self.life.isDead)
             {
@@ -270,10 +295,26 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            InteractableVehicle vehicle = FindNearestWithFreeSeat(seatIndex, out reason);
+            InteractableVehicle vehicle = target;
             if (vehicle == null)
             {
-                return false;
+                vehicle = FindNearestWithFreeSeat(seatIndex, out reason);
+                if (vehicle == null)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                // A named vehicle goes through the same preconditions the search applies to every
+                // candidate, or the caller learns its truck was wrecked by getting a bare failure
+                // out of the seat RPC instead of a sentence saying so.
+                string why = WhySeatUnavailable(vehicle, seatIndex);
+                if (why != null)
+                {
+                    reason = $"{DescribeVehicle(vehicle)} {why}";
+                    return false;
+                }
             }
 
             // Before seating, not after: vanilla decides whether the engine turns on at the moment a
