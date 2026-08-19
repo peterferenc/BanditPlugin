@@ -251,8 +251,9 @@ namespace BanditPlugin.FakePlayer
             foreach (Vector3 waypoint in waypoints)
             {
                 bool routed = false;
+                string reason = null;
 
-                if (useRoads && BanditRoadGraph.TryRoute(cursor, waypoint, RoadSnapDistanceMetres, nodes, out string reason))
+                if (useRoads && BanditRoadGraph.TryRoute(cursor, waypoint, RoadSnapDistanceMetres, nodes, out reason))
                 {
                     foreach (int node in nodes)
                     {
