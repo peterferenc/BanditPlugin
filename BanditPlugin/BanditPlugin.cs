@@ -9,10 +9,19 @@ namespace BanditPlugin
     {
         public static BanditPlugin Instance { get; private set; }
 
+        /// <summary>
+        /// Server frame timing, read by /banditperf. Runs from load rather than being switched on,
+        /// because it costs one float a frame and because the measurement that matters is a
+        /// before-and-after - which needs the "before" to have been recorded already.
+        /// </summary>
+        public BanditPerfMonitor Perf { get; private set; }
+
         protected override void Load()
         {
             Instance = this;
             BackfillEmptyCollections();
+
+            Perf = gameObject.AddComponent<BanditPerfMonitor>();
 
             // Create the group behind every team up front, so "/banditteam join red" works before
             // any bandit has been spawned onto red. Lookups create one on demand as well - this is
@@ -35,7 +44,8 @@ namespace BanditPlugin
                 + "/bandit shoot|cover|peek start|stop are the standing orders; /banditgoto sends one somewhere, "
                 + "/banditpatrol sets it walking a route, /banditprone lies one down, "
                 + "/banditv drive|gunner|exit puts one in the nearest vehicle and /banditvgoto drives it, "
-                + "/banditstatus reports what each is doing.");
+                + "/banditstatus reports what each is doing, "
+                + "/banditperf reports what the server frames are costing.");
         }
 
         /// <summary>
@@ -96,6 +106,15 @@ namespace BanditPlugin
             // drew them. Clearing here means /rocket reload doesn't strand a field of paint on
             // everyone - and it has to happen before Instance goes null, since Clear() uses it.
             Navigation.BanditCoverDebug.Clear();
+
+            // AddComponent'd onto a GameObject that outlives the plugin, so a reload would otherwise
+            // leave the old monitor ticking beside the new one - two components recording the same
+            // frames, and the /banditperf that finds one of them reporting half the story.
+            if (Perf != null)
+            {
+                Destroy(Perf);
+                Perf = null;
+            }
 
             Instance = null;
         }
