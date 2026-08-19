@@ -4,6 +4,7 @@ using Rocket.API;
 using Rocket.Unturned.Chat;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -36,13 +37,13 @@ namespace BanditPlugin.Commands
             BanditBotController bandit = FakePlayerSpawner.LastSpawnedController;
             if (bandit?.Brain == null)
             {
-                Reply(caller, "No bandit to command - spawn one with /bandit first.", Color.red);
+                Reply(caller, NoBandit, Color.red);
                 return;
             }
 
-            if (bandit.Self.life != null && bandit.Self.life.isDead)
+            if (IsDead(bandit))
             {
-                Reply(caller, "That bandit is dead.", Color.red);
+                Reply(caller, BanditIsDead, Color.red);
                 return;
             }
 
@@ -68,34 +69,6 @@ namespace BanditPlugin.Commands
                 : string.Empty;
 
             Reply(caller, (prone ? "Bandit going prone." : "Bandit standing up.") + note, Color.green);
-        }
-
-        private static bool TryParseStartStop(string argument, out bool start)
-        {
-            switch (argument.ToLowerInvariant())
-            {
-                case "start":
-                    start = true;
-                    return true;
-                case "stop":
-                    start = false;
-                    return true;
-                default:
-                    start = false;
-                    return false;
-            }
-        }
-
-        private static void Reply(IRocketPlayer caller, string message, Color color)
-        {
-            if (caller is Rocket.Unturned.Player.UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, message, color);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {message}");
-            }
         }
     }
 }

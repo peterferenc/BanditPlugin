@@ -4,6 +4,7 @@ using BanditPlugin.Navigation;
 using Rocket.API;
 using Rocket.Unturned.Chat;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -71,18 +72,6 @@ namespace BanditPlugin.Commands
             Reply(caller, enable
                 ? $"{affected} bandit(s) patrolling {waypointCount} waypoint(s)."
                 : $"{affected} bandit(s) holding position.", Color.green);
-        }
-
-        private static void Reply(IRocketPlayer caller, string message, Color color)
-        {
-            if (caller is Rocket.Unturned.Player.UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, message, color);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {message}");
-            }
         }
     }
 }

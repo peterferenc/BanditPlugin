@@ -3,6 +3,7 @@ using BanditPlugin.FakePlayer;
 using Rocket.API;
 using Rocket.Unturned.Chat;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -91,18 +92,6 @@ namespace BanditPlugin.Commands
                     $"{(brain.PatrolEnabled ? ", patrolling" : string.Empty)}" +
                     $", fire: {bandit.DescribeFireBlock()}",
                     Color.white);
-            }
-        }
-
-        private static void Reply(IRocketPlayer caller, string message, Color color)
-        {
-            if (caller is Rocket.Unturned.Player.UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, message, color);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {message}");
             }
         }
     }

@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using Rocket.API;
 using Rocket.Unturned.Chat;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -38,14 +39,7 @@ namespace BanditPlugin.Commands
                 ? $"Removed {removed} bandit(s) and {vehicles} spawned vehicle(s)."
                 : "No bandits or spawned vehicles to remove.";
 
-            if (caller is Rocket.Unturned.Player.UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, report, Color.green);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {report}");
-            }
+            Reply(caller, report, Color.green);
         }
     }
 }

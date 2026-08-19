@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using BanditPlugin.Navigation;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 
 namespace BanditPlugin.FakePlayer
 {
@@ -609,13 +610,13 @@ namespace BanditPlugin.FakePlayer
 
             if (Time.time - _lastSawTargetTime < TargetMemorySeconds)
             {
-                threatEye = _lastKnownTargetPosition + Vector3.up * 1.65f;
+                threatEye = _lastKnownTargetPosition + Vector3.up * VisibilityEyeHeight;
                 return true;
             }
 
             if (_lastThreatPoint.HasValue && Time.time - _lastDamagedTime < DamageMemorySeconds)
             {
-                threatEye = _lastThreatPoint.Value + Vector3.up * 1.65f;
+                threatEye = _lastThreatPoint.Value + Vector3.up * VisibilityEyeHeight;
                 return true;
             }
 
@@ -663,12 +664,12 @@ namespace BanditPlugin.FakePlayer
             switch (_profile.ContactStance)
             {
                 case BanditStance.Prone:
-                    return CanFireFromStance(BanditBotController.ProneEyeHeight, threatEye)
+                    return CanFireFromStance(ProneEyeHeight, threatEye)
                         ? BanditStance.Prone
                         : BanditStance.Free;
 
                 case BanditStance.Crouch:
-                    return CanFireFromStance(BanditBotController.CrouchEyeHeight, threatEye)
+                    return CanFireFromStance(CrouchEyeHeight, threatEye)
                         ? BanditStance.Crouch
                         : BanditStance.Free;
 
@@ -1223,7 +1224,7 @@ namespace BanditPlugin.FakePlayer
         {
             return TryResolveThreatEye(_controller.CurrentTarget, out Vector3 threatEye)
                 ? threatEye
-                : _lastKnownTargetPosition + Vector3.up * 1.65f;
+                : _lastKnownTargetPosition + Vector3.up * VisibilityEyeHeight;
         }
 
         /// <summary>
@@ -1436,19 +1437,5 @@ namespace BanditPlugin.FakePlayer
             _self.life != null
             && _self.life.health < HurtHealthThreshold
             && Time.time - _lastDamagedTime < 3f;
-
-        private static Vector3 EyeOf(Player player)
-        {
-            return player.look != null && player.look.aim != null
-                ? player.look.aim.position
-                : player.transform.position + Vector3.up * 1.5f;
-        }
-
-        private static float FlatDistance(Vector3 a, Vector3 b)
-        {
-            a.y = 0f;
-            b.y = 0f;
-            return (a - b).magnitude;
-        }
     }
 }

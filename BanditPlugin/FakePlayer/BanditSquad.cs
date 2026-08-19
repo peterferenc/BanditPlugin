@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 
 namespace BanditPlugin.FakePlayer
 {
@@ -70,9 +71,6 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public Vector3 ContactAimPoint =>
             Vector3.Lerp(ContactPosition, ContactEye, ChestHeightFraction);
-
-        /// <summary>Matches BanditBotController.ChestHeightFraction; see <see cref="ContactAimPoint"/>.</summary>
-        private const float ChestHeightFraction = 0.7f;
 
         public float LastContactTime { get; private set; } = float.MinValue;
 

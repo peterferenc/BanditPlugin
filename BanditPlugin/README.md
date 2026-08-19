@@ -60,6 +60,10 @@ and, for movement:
   opt-in config, off by default, because each one makes the bot abandon what it was told to do.
 - **`BanditNavigator`** - turns "go here" into a direction, via A* where there is a navmesh and
   whisker steering where there isn't.
+- **`BanditPathFollower`** - one A* route, from asking for it to walking off the end of it. Shared
+  by the on-foot navigator and the vehicle one, which need the same asynchronous request, the same
+  guard against a stale path landing after the destination changed, and the same corner-following -
+  and differ only in how far off the navmesh they will snap.
 - **`BanditCoverFinder`** - generates and scores positions that break line of sight from a threat.
 - **`BanditWaypointStore`** - per-map patrol routes in `Waypoints/<map>.txt`.
 

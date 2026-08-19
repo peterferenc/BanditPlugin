@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 
 namespace BanditPlugin.Navigation
 {
@@ -99,15 +100,16 @@ namespace BanditPlugin.Navigation
     /// </summary>
     public static class BanditCoverFinder
     {
-        /// <summary>Eye height used for the standing visibility test. Roughly PlayerLook.aim.</summary>
-        private const float StandingEyeHeight = 1.65f;
-
         /// <summary>
         /// Eye height used for the peek test. Unlike the body samples this really is one point:
         /// peeking is about whether the bot's *aim origin* can see the target, and that is a
         /// single place - the same one its bullets leave from.
+        ///
+        /// BanditGeometry.VisibilityEyeHeight rather than StandingEyeHeight, because this is a
+        /// height assumed over a ground sample rather than one read off a real player - and the
+        /// brain resolves its threat eye the same way, so the two agree.
         /// </summary>
-        private const float PeekEyeHeight = StandingEyeHeight;
+        private const float PeekEyeHeight = VisibilityEyeHeight;
 
         /// <summary>
         /// Half the shoulder width. The body samples are spread this far either side of centre,
@@ -823,19 +825,6 @@ namespace BanditPlugin.Navigation
 
             float t = Mathf.Clamp01(Vector3.Dot(p - a, ab) / lengthSq);
             return (p - (a + ab * t)).magnitude;
-        }
-
-        private static Vector3 Flatten(Vector3 v)
-        {
-            v.y = 0f;
-            return v;
-        }
-
-        private static float FlatDistance(Vector3 a, Vector3 b)
-        {
-            a.y = 0f;
-            b.y = 0f;
-            return (a - b).magnitude;
         }
     }
 }

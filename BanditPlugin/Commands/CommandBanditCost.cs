@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Rocket.API;
 using Rocket.Unturned.Chat;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -186,18 +187,6 @@ namespace BanditPlugin.Commands
         private static float Round(float value)
         {
             return value >= 10f ? Mathf.Round(value) : Mathf.Round(value * 10f) / 10f;
-        }
-
-        private static void Reply(IRocketPlayer caller, string message, Color color)
-        {
-            if (caller is Rocket.Unturned.Player.UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, message, color);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {message}");
-            }
         }
     }
 }

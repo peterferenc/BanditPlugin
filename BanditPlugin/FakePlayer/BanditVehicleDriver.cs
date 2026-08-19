@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using BanditPlugin.Navigation;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 
 namespace BanditPlugin.FakePlayer
 {
@@ -979,9 +980,7 @@ namespace BanditPlugin.FakePlayer
             Passenger seat = _self.movement.getVehicleSeat();
             Quaternion frame = ResolveAimFrame(vehicle, seat);
 
-            Vector3 origin = _self.look != null && _self.look.aim != null
-                ? _self.look.aim.position
-                : _self.transform.position + Vector3.up * 1.5f;
+            Vector3 origin = EyeOf(_self);
 
             Vector3 toTarget = AimPointOf(target) - origin;
             if (toTarget.sqrMagnitude < 0.0001f)
@@ -1187,9 +1186,7 @@ namespace BanditPlugin.FakePlayer
             // armour before it has gone anywhere.
             origin = seat.turretAim != null
                 ? seat.turretAim.position
-                : (_self.look != null && _self.look.aim != null
-                    ? _self.look.aim.position
-                    : _self.transform.position + Vector3.up * 1.5f);
+                : EyeOf(_self);
 
             // The same frame the angles were solved in, so the traced shot is the one the barrel is
             // actually pointing along. See ResolveAimFrame.
@@ -1595,17 +1592,6 @@ namespace BanditPlugin.FakePlayer
             }
 
             return nearest;
-        }
-
-        /// <summary>The chest, taken as a fraction of the way from a player's feet to their eyes, so
-        /// it follows their stance the same way the on-foot aim point does.</summary>
-        private static Vector3 AimPointOf(Player player)
-        {
-            Vector3 eye = player.look != null && player.look.aim != null
-                ? player.look.aim.position
-                : player.transform.position + Vector3.up * 1.75f;
-
-            return Vector3.Lerp(player.transform.position, eye, 0.7f);
         }
 
         private static string DescribeVehicle(InteractableVehicle vehicle)

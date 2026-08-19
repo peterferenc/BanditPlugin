@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 using Logger = Rocket.Core.Logging.Logger;
 
 namespace BanditPlugin.FakePlayer
@@ -242,10 +243,6 @@ namespace BanditPlugin.FakePlayer
         // further out, so a target loitering on the boundary doesn't make it swap every time it
         // takes a step. Any hysteresis band wider than a stride does the job; four metres is one.
         private const float WeaponSwitchHysteresisMetres = 4f;
-
-        // How far from the feet toward the eyes a player's chest sits. Applied to that player's own
-        // aim height, so it tracks their stance rather than assuming they are standing.
-        private const float ChestHeightFraction = 0.7f;
 
         // ServerEquip is a request, not a command - it no-ops while the player is busy, dead or
         // mid-equip-animation - so equipping is retried on this interval rather than assumed.
@@ -1719,44 +1716,15 @@ namespace BanditPlugin.FakePlayer
         {
             get
             {
-                return Self != null && Self.look != null && Self.look.aim != null
-                    ? Self.look.aim.position
-                    : transform.position + Vector3.up * 1.5f;
+                return Self != null
+                    ? EyeOf(Self)
+                    : transform.position + Vector3.up * StandingEyeHeight;
             }
         }
 
         private Vector3 TargetAimPoint
         {
             get { return _target == null ? EyePosition : AimPointOf(_target); }
-        }
-
-        /// <summary>
-        /// Where on a player the bot points: the chest, wherever that has ended up.
-        ///
-        /// Taken as a fraction of the way from the feet to that player's own aim transform, so it
-        /// follows their stance for free - roughly 1.2m on someone standing, 0.85m crouched, 0.25m
-        /// prone. A fixed offset off the ground cannot do that, and the one this replaced (a flat
-        /// 1.5m) sailed a clear metre over anyone lying down.
-        ///
-        /// The chest rather than the eye because the aim error model in SampleAimError() draws a
-        /// miss around this point with a half-height of AimTargetHalfHeight; centred on the eyes,
-        /// half of that ellipse is over open air above the head and the measured hit rate comes out
-        /// under the configured one.
-        /// </summary>
-        private static Vector3 AimPointOf(Player player)
-        {
-            return Vector3.Lerp(player.transform.position, EyeOf(player), ChestHeightFraction);
-        }
-
-        /// <summary>
-        /// A player's own aim transform - their eye, and where their shots come from. Follows their
-        /// stance, so this is 1.75m standing and 0.35m prone.
-        /// </summary>
-        private static Vector3 EyeOf(Player player)
-        {
-            return player.look != null && player.look.aim != null
-                ? player.look.aim.position
-                : player.transform.position + Vector3.up * 1.75f;
         }
 
         /// <summary>
@@ -1786,19 +1754,8 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            return HasLineOfSightToPoint(candidate.look != null && candidate.look.aim != null
-                ? candidate.look.aim.position
-                : candidate.transform.position + Vector3.up * 1.5f);
+            return HasLineOfSightToPoint(EyeOf(candidate));
         }
-
-        /// <summary>
-        /// Height PlayerLook puts the aim transform at when prone (HEIGHT_LOOK_PRONE), which is
-        /// where a prone bandit's eyes and its bullets both are.
-        /// </summary>
-        public const float ProneEyeHeight = 0.35f;
-
-        /// <summary>The same, crouched (HEIGHT_LOOK_CROUCH).</summary>
-        public const float CrouchEyeHeight = 1.2f;
 
         /// <summary>
         /// Whether this bandit would still be able to see a point from a given eye height, i.e.

@@ -6,6 +6,7 @@ using Rocket.Unturned.Chat;
 using Rocket.Unturned.Player;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -161,22 +162,6 @@ namespace BanditPlugin.Commands
             }
         }
 
-        private static bool TryParseStartStop(string argument, out bool start)
-        {
-            switch (argument.ToLowerInvariant())
-            {
-                case "start":
-                    start = true;
-                    return true;
-                case "stop":
-                    start = false;
-                    return true;
-                default:
-                    start = false;
-                    return false;
-            }
-        }
-
         /// <summary>
         /// Runs an order against every live bandit. Skips any whose brain never initialised rather
         /// than throwing halfway through the list and leaving the rest on the old order.
@@ -319,18 +304,6 @@ namespace BanditPlugin.Commands
             Reply(caller, "Usage: /bandit  |  /bandit <kit>  |  /bandit <kit> team:<team>  |  "
                 + "/bandit kits  |  /bandit stance stand|crouch|prone|free  |  /bandit cover start|stop  "
                 + "|  /bandit peek start|stop  |  /bandit shoot start|stop", Color.yellow);
-        }
-
-        private static void Reply(IRocketPlayer caller, string message, Color color)
-        {
-            if (caller is UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, message, color);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {message}");
-            }
         }
     }
 }
