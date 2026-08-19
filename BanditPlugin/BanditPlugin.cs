@@ -28,6 +28,8 @@ namespace BanditPlugin
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
             Logger.Log("[Bandit] Loaded. /banditevent <cost> buys a whole fight - squads and crewed "
                 + "vehicles drawn against a points budget, /banditevent check prices everything; "
+                + "/banditevent wp records a convoy route and /banditevent convoy <cost> sends a "
+                + "column of vehicles along it, /banditroads reports the road graph it drives on; "
                 + "/squadspawn <type> puts a whole squad down fighting - "
                 + "/squadspawn squads lists the types, and team:<team> puts one on a side; "
                 + "/banditteam join <team> puts you on one, and bandits on it stop shooting at you; "
@@ -91,6 +93,10 @@ namespace BanditPlugin
             // Squads are held in a static list, which a Rocket reload does not clear on its own -
             // without this the next load starts with squads full of players from the last one.
             BanditSquad.ClearAll();
+
+            // Same reason, and with a director object of its own ticking them: a convoy left in the
+            // static list would be driven by a component that outlives the assembly it came from.
+            BanditConvoy.ClearAll();
 
             // Cover markers are paintball decals with no lifetime, so they outlive the plugin that
             // drew them. Clearing here means /rocket reload doesn't strand a field of paint on

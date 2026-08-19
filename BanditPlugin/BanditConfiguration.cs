@@ -498,6 +498,27 @@ namespace BanditPlugin
         public int EventVehicleCap = 2;
 
         /// <summary>
+        /// Most vehicles one convoy may draw.
+        ///
+        /// Separate from <see cref="EventVehicleCap"/> because the two caps exist for opposite
+        /// reasons. That one keeps an event's budget going mostly into men; a convoy is nothing but
+        /// vehicles, so capping it at two would make every convoy the same size whatever was typed.
+        /// This is a length limit instead - past about half a dozen, the tail of the column is still
+        /// at the last waypoint when the head reaches the next one.
+        /// </summary>
+        public int ConvoyVehicleCap = 6;
+
+        /// <summary>
+        /// Metres between vehicles when a convoy is spawned, and the interval they try to hold on
+        /// the move.
+        ///
+        /// Long enough that one vehicle stopping does not shunt the one behind it, short enough
+        /// that the column reads as a column rather than as several vehicles that happen to share a
+        /// road.
+        /// </summary>
+        public float ConvoySpacing = 20f;
+
+        /// <summary>
         /// Metres between the things an event puts down - one squad and the next, or a squad and a
         /// vehicle.
         ///
@@ -850,6 +871,8 @@ namespace BanditPlugin
 
             Vehicles = BanditVehicleType.BuildDefaults();
             EventVehicleCap = 2;
+            ConvoyVehicleCap = 6;
+            ConvoySpacing = 20f;
             EventSpread = 35f;
             EventMaxBandits = 24;
             VehicleSpawnDistance = 6f;

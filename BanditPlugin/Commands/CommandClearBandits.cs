@@ -27,6 +27,7 @@ namespace BanditPlugin.Commands
             // holding references to players that no longer exist.
             FakePlayer.BanditSquad.ClearAll();
             FakePlayer.BanditEvent.ClearAll();
+            FakePlayer.BanditConvoy.ClearAll();
 
             // Vehicles outlive their crews completely, so kicking the bots is not enough: without
             // this, an afternoon of /banditevent leaves the map covered in abandoned trucks. Only

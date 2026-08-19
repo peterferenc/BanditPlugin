@@ -62,6 +62,22 @@ namespace BanditPlugin.Commands
                 return;
             }
 
+            // The two sub-commands. Both are "/banditevent" rather than commands of their own
+            // because a convoy is an event - it is drawn against the same budget, out of the same
+            // kits, squads and vehicles - and its route is the one thing that has to be set up
+            // before one can be run.
+            if (command.Length > 0 && IsWaypointRequest(command[0]))
+            {
+                BanditConvoyCommands.Waypoints(caller, Rest(command));
+                return;
+            }
+
+            if (command.Length > 0 && command[0].Equals("convoy", StringComparison.OrdinalIgnoreCase))
+            {
+                BanditConvoyCommands.Convoy(caller, Rest(command), requestedTeam, requestedSeed);
+                return;
+            }
+
             if (command.Length == 0 || !float.TryParse(command[0], out float budget) || budget <= 0f)
             {
                 ReplyUsage(caller, config);
@@ -204,7 +220,7 @@ namespace BanditPlugin.Commands
         /// standing beside the vehicle, armed and in the squad, which is a perfectly serviceable
         /// outcome.
         /// </summary>
-        private static void SpawnRide(BanditConfiguration config, BanditEvent banditEvent, BanditTeam team,
+        internal static void SpawnRide(BanditConfiguration config, BanditEvent banditEvent, BanditTeam team,
             BanditPlacement.Result placed, BanditVehicleType type, Vector3 spot)
         {
             InteractableVehicle vehicle = BanditVehicleSpawner.Spawn(type.Vehicle, spot, placed.Facing,
@@ -448,6 +464,26 @@ namespace BanditPlugin.Commands
             return remaining.ToArray();
         }
 
+        private static bool IsWaypointRequest(string argument)
+        {
+            return argument.Equals("wp", StringComparison.OrdinalIgnoreCase)
+                || argument.Equals("waypoint", StringComparison.OrdinalIgnoreCase)
+                || argument.Equals("waypoints", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Everything after the sub-command word.</summary>
+        private static string[] Rest(string[] command)
+        {
+            if (command.Length < 2)
+            {
+                return new string[0];
+            }
+
+            string[] rest = new string[command.Length - 1];
+            Array.Copy(command, 1, rest, 0, rest.Length);
+            return rest;
+        }
+
         private static bool IsCheckRequest(string argument)
         {
             return argument.Equals("check", StringComparison.OrdinalIgnoreCase)
@@ -459,7 +495,7 @@ namespace BanditPlugin.Commands
         {
             UnturnedChat.Say(caller, "Usage: /banditevent <cost>  |  /banditevent <cost> <metres>  |  "
                 + "/banditevent <cost> marker  |  /banditevent <cost> team:<team> seed:<n>  |  "
-                + "/banditevent check.", Color.yellow);
+                + "/banditevent check  |  /banditevent wp  |  /banditevent convoy <cost>.", Color.yellow);
             UnturnedChat.Say(caller, "The number is a points budget, not a difficulty. "
                 + $"A '{config.DefaultKit}' costs {BanditConfiguration.CostOf(config.FindKit(config.DefaultKit)):0}; "
                 + "/banditevent check prices everything.", Color.grey);

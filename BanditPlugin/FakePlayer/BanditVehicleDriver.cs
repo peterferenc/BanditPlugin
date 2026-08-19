@@ -211,6 +211,22 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public bool TrackNearestPlayer { get; set; }
 
+        /// <summary>
+        /// Scales the speed this vehicle drives at, between crawling and its usual cruise. One is
+        /// normal and is what everything that does not set it gets.
+        ///
+        /// It exists for the two things a convoy has to do that a single vehicle never did: hold
+        /// its interval behind the vehicle in front, and keep rolling while it fights instead of
+        /// either stopping dead or driving off and leaving its infantry behind. Scaling the speed
+        /// is the whole of it - the heading, the clearance sweep and the validation clamps are
+        /// unchanged, so a slowed vehicle drives exactly as it otherwise would, just slower.
+        ///
+        /// Zero is a legitimate value and means "stay put with the engine running", which is not
+        /// the same as <see cref="StopDriving"/>: the destination survives, so it moves off again
+        /// the moment the scale comes back up.
+        /// </summary>
+        public float SpeedScale { get; set; } = 1f;
+
         /// <summary>Where the bandit is driving to, if anywhere.</summary>
         public bool HasDestination => _navigator.HasDestination;
 
@@ -641,7 +657,7 @@ namespace BanditPlugin.FakePlayer
                 // Slow into the turn and stop altogether once the heading is behind it, so the
                 // vehicle comes round onto it before committing rather than driving a long arc
                 // through whatever the sweep was avoiding.
-                float cruise = reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle);
+                float cruise = (reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle)) * Mathf.Clamp01(SpeedScale);
                 targetSpeed = cruise * Mathf.Clamp01(1f - headingError / StopAndTurnDegrees);
             }
 

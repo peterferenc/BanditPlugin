@@ -340,7 +340,7 @@ namespace BanditPlugin.FakePlayer
         /// this is deliberately "somebody has come close enough to notice", not "somebody is visible",
         /// since the whole reason it exists is that the crew cannot see out.
         /// </summary>
-        private static Player NearestEnemyTo(Player self, Vector3 position, float radius)
+        internal static Player NearestEnemyTo(Player self, Vector3 position, float radius)
         {
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
@@ -406,7 +406,7 @@ namespace BanditPlugin.FakePlayer
             }
         }
 
-        private static void Disembark(BanditBotController crewman)
+        internal static void Disembark(BanditBotController crewman)
         {
             if (crewman == null || crewman.Self == null)
             {

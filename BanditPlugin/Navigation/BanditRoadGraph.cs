@@ -1,0 +1,838 @@
+using System.Collections.Generic;
+using SDG.Unturned;
+using UnityEngine;
+using Logger = Rocket.Core.Logging.Logger;
+
+namespace BanditPlugin.Navigation
+{
+    /// <summary>
+    /// The map's roads, turned into something a vehicle can be routed along.
+    ///
+    /// This exists because the two pathfinders the plugin already has are both the wrong tool for
+    /// driving any distance. The server's A* only covers the Nav volumes - the towns where zombies
+    /// spawn - so a vehicle crossing the map between them is off-mesh for most of the trip and
+    /// falls back to whisker steering, which is fine for the last hundred metres and useless for
+    /// the first three kilometres. Steering straight at a destination, meanwhile, drives through
+    /// forests and up hillsides because the shortest line between two towns is never the road.
+    ///
+    /// Roads are real level data and the server loads all of it. <see cref="LevelRoads.load"/> is
+    /// called unconditionally from Level.init and reads Environment/Paths.dat into a list of
+    /// <see cref="Road"/>, each one a cubic Bezier spline over its joints. None of the evaluation
+    /// needs a mesh or a renderer, so it all works headless:
+    ///
+    ///     road.getPosition(index, t)   a point on the spline
+    ///     road.getVelocity(index, t)   the tangent there, i.e. which way the road runs
+    ///     road.getLengthEstimate(i)    how long that segment is
+    ///
+    /// What the game does *not* provide is any notion of a road network. Roads are independent
+    /// splines with no connectivity, no junctions and no lane data - where two of them cross is
+    /// implicit geometry and nothing more. So junctions are recovered here, by linking samples from
+    /// different roads that are close enough to be the same piece of tarmac.
+    ///
+    /// Nothing in here steers. It answers "which way round the road network" and hands back a list
+    /// of points; <see cref="BanditVehicleNavigator"/> still does the driving, including every
+    /// clearance sweep, because a road being on the map says nothing about the tree that fell
+    /// across it.
+    /// </summary>
+    public static class BanditRoadGraph
+    {
+        /// <summary>
+        /// Distance between samples along a road, in metres.
+        ///
+        /// This is the resolution of every corner the convoy will drive, so it is a compromise
+        /// between a route that cuts bends and a graph with tens of thousands of nodes in it.
+        /// Vanilla samples its own road meshes every 5m (Road.updateSamples); 8m is coarser than
+        /// the mesh needs to look right and fine enough that a vehicle aimed at the next node is
+        /// never aimed off the road.
+        /// </summary>
+        private const float SampleSpacingMetres = 8f;
+
+        /// <summary>
+        /// How near two samples on *different* roads have to be to count as the same junction.
+        ///
+        /// Derived per pair from the two roads' half-widths, since a motorway junction is
+        /// physically wider than a dirt track crossing, and clamped so that neither a very narrow
+        /// path nor an unusually wide modded road produces a nonsense figure.
+        /// </summary>
+        private const float MinJunctionRadiusMetres = 3f;
+        private const float MaxJunctionRadiusMetres = 14f;
+
+        /// <summary>
+        /// Cell size of the spatial hash used for nearest-node queries and junction detection.
+        /// Comfortably larger than <see cref="MaxJunctionRadiusMetres"/> so a junction search only
+        /// ever has to look at the nine cells around a node.
+        /// </summary>
+        private const float GridCellMetres = 16f;
+
+        /// <summary>
+        /// What a metre of each kind of road costs to drive, relative to a metre of motorway.
+        ///
+        /// This is what makes a convoy prefer the highway over the farm track running parallel to
+        /// it, without any hand-tagging: <see cref="Road.GetChartMode"/> already classifies every
+        /// road by width and surface for the map chart, and that classification is exactly the
+        /// distinction wanted here. The penalties are deliberately mild - a dirt road that saves a
+        /// kilometre is still the right answer.
+        /// </summary>
+        private static float ChartCostMultiplier(EObjectChart chart)
+        {
+            switch (chart)
+            {
+                case EObjectChart.HIGHWAY: return 1f;
+                case EObjectChart.ROAD: return 1.1f;
+                case EObjectChart.STREET: return 1.25f;
+                case EObjectChart.PATH: return 1.6f;
+                default: return 1.3f;
+            }
+        }
+
+        /// <summary>One sample along one road, and everything the router needs about it.</summary>
+        public sealed class RoadNode
+        {
+            /// <summary>Where it is. Terrain height, or the spline's own height on a bridge.</summary>
+            public Vector3 Position;
+
+            /// <summary>
+            /// Which way the road runs here, pointing along increasing t. Roads have no direction
+            /// of travel - this is the axis of the road, and the convoy uses whichever sign it is
+            /// travelling in.
+            /// </summary>
+            public Vector3 Direction;
+
+            /// <summary>Half the flat drivable width. See <see cref="MeasureHalfWidth"/>.</summary>
+            public float HalfWidth;
+
+            /// <summary>The road this came from, and how it is classified on the chart.</summary>
+            public int RoadIndex;
+            public EObjectChart Chart;
+
+            /// <summary>
+            /// Neighbours, by node index. Undirected: consecutive samples along a road, plus every
+            /// junction link. Small enough (2 on open road, 3-6 at a junction) that a list beats
+            /// anything cleverer.
+            /// </summary>
+            public readonly List<int> Links = new List<int>();
+        }
+
+        private static readonly List<RoadNode> Nodes = new List<RoadNode>();
+        private static readonly Dictionary<long, List<int>> Grid = new Dictionary<long, List<int>>();
+
+        /// <summary>The map the graph was built for, so it rebuilds itself when the level changes.</summary>
+        private static string _builtMap;
+
+        /// <summary>
+        /// When an empty result may be tried again. A command can ask for the graph before
+        /// LevelRoads.load has run, and caching "this map has no roads" from that moment would be
+        /// permanent - but a map that genuinely has none must not rebuild on every query either.
+        /// </summary>
+        private static float _retryAfter;
+        private const float EmptyGraphRetrySeconds = 30f;
+
+        /// <summary>Scratch for A*, sized to the node count and reused between queries.</summary>
+        private static float[] _gScore;
+        private static int[] _cameFrom;
+        private static int[] _stamp;
+        private static int _queryStamp;
+
+        public static bool IsAvailable
+        {
+            get
+            {
+                EnsureBuilt();
+                return Nodes.Count > 1;
+            }
+        }
+
+        public static int NodeCount
+        {
+            get
+            {
+                EnsureBuilt();
+                return Nodes.Count;
+            }
+        }
+
+        public static RoadNode Get(int nodeIndex)
+        {
+            return nodeIndex >= 0 && nodeIndex < Nodes.Count ? Nodes[nodeIndex] : null;
+        }
+
+        /// <summary>
+        /// Builds the graph if it has not been built for this map yet. Cheap to call every tick -
+        /// it is a string comparison once the graph is up.
+        /// </summary>
+        public static void EnsureBuilt()
+        {
+            string map = Level.info != null ? Level.info.name : null;
+            if (map == null)
+            {
+                return;
+            }
+
+            if (_builtMap == map && (Nodes.Count > 1 || Time.realtimeSinceStartup < _retryAfter))
+            {
+                return;
+            }
+
+            _builtMap = map;
+            _retryAfter = Time.realtimeSinceStartup + EmptyGraphRetrySeconds;
+            Build();
+        }
+
+        /// <summary>Throws the graph away, so the next query rebuilds it. For a road editor or a test.</summary>
+        public static void Invalidate()
+        {
+            _builtMap = null;
+            _retryAfter = 0f;
+        }
+
+        private static void Build()
+        {
+            Nodes.Clear();
+            Grid.Clear();
+
+            float startedAt = Time.realtimeSinceStartup;
+            int roadCount = 0;
+
+            // LevelRoads keeps its list private and offers no count, but getRoad() returns null
+            // past the end, which is the enumeration vanilla's own callers use.
+            for (int roadIndex = 0; ; roadIndex++)
+            {
+                Road road = LevelRoads.getRoad(roadIndex);
+                if (road == null)
+                {
+                    break;
+                }
+
+                if (road.joints == null || road.joints.Count < 2)
+                {
+                    continue;
+                }
+
+                if (IsTrainTrack(roadIndex))
+                {
+                    // Trains run on roads in this engine - the track is a Road with an entry in the
+                    // level's Trains config, and its samples are the same shape as a highway's.
+                    // Routing a lorry down a railway would look exactly as wrong as it sounds.
+                    continue;
+                }
+
+                AppendRoad(road, roadIndex);
+                roadCount++;
+            }
+
+            BuildGrid();
+            LinkJunctions();
+
+            _gScore = new float[Nodes.Count];
+            _cameFrom = new int[Nodes.Count];
+            _stamp = new int[Nodes.Count];
+            _queryStamp = 0;
+
+            if (Nodes.Count < 2)
+            {
+                Logger.Log($"[Bandit] No usable roads on {_builtMap} - convoys will drive straight lines.");
+                return;
+            }
+
+            float elapsedMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
+            Logger.Log($"[Bandit] Road graph for {_builtMap}: {Nodes.Count} node(s) across "
+                + $"{roadCount} road(s) in {elapsedMs:0}ms.");
+        }
+
+        /// <summary>
+        /// Whether this road is one of the level's train tracks. The association lives in the
+        /// level's own config rather than on the road, which is also how Road.buildMesh decides
+        /// whether to bother sampling track positions for it.
+        /// </summary>
+        private static bool IsTrainTrack(int roadIndex)
+        {
+            if (Level.info == null || Level.info.configData == null || Level.info.configData.Trains == null)
+            {
+                return false;
+            }
+
+            foreach (LevelTrainAssociation train in Level.info.configData.Trains)
+            {
+                if (train != null && train.RoadIndex == roadIndex)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Samples one road at a fixed spacing and chains the samples together.
+        ///
+        /// Sampling is per segment rather than over the whole spline, because the road's t is not
+        /// arc length: getPosition(t) divides t evenly between joints, so a long straight and a
+        /// tight bend get the same share of it. Walking segment by segment with each one's own
+        /// length estimate is what keeps the spacing even, and is what vanilla does in
+        /// Road.updateSamples.
+        /// </summary>
+        private static void AppendRoad(Road road, int roadIndex)
+        {
+            Classify(road, out float halfWidth, out EObjectChart chart);
+
+            int segments = road.joints.Count - 1 + (road.isLoop ? 1 : 0);
+            int firstNodeOfRoad = Nodes.Count;
+            int previous = -1;
+
+            for (int segment = 0; segment < segments; segment++)
+            {
+                float length = road.getLengthEstimate(segment);
+                int steps = Mathf.Max(1, Mathf.CeilToInt(length / SampleSpacingMetres));
+
+                // The last step of a segment is the first of the next one, so it is left to that
+                // segment - except on the final segment of a road that does not loop, where the
+                // end point is added below.
+                for (int step = 0; step < steps; step++)
+                {
+                    float t = (float)step / steps;
+                    previous = AppendSample(road, roadIndex, segment, t, halfWidth, chart, previous);
+                }
+            }
+
+            if (road.isLoop)
+            {
+                // Close the ring back onto the first sample rather than adding a duplicate on top
+                // of it.
+                if (previous >= 0 && previous != firstNodeOfRoad)
+                {
+                    Link(previous, firstNodeOfRoad);
+                }
+            }
+            else
+            {
+                AppendSample(road, roadIndex, segments - 1, 1f, halfWidth, chart, previous);
+            }
+        }
+
+        private static int AppendSample(Road road, int roadIndex, int segment, float t,
+            float halfWidth, EObjectChart chart, int previous)
+        {
+            Vector3 position = road.getPosition(segment, t);
+            Vector3 direction = road.getVelocity(segment, t);
+
+            // Mirrors Road.buildMesh: a joint flagged ignoreTerrain is a bridge or an overpass and
+            // keeps the spline's own height; everything else is laid onto the terrain. The joint
+            // offset is a hand-tuned lift the map maker applied, and is part of where the surface
+            // actually is. Exact height matters less here than it looks - the driver re-samples the
+            // surface under the vehicle every step, and its ground mask includes ENVIRONMENT, which
+            // is the layer road meshes are on - but a node buried in a hillside under a bridge
+            // would be picked as "nearest" from the wrong deck.
+            RoadJoint joint = road.joints[Mathf.Clamp(segment, 0, road.joints.Count - 1)];
+            if (!joint.ignoreTerrain)
+            {
+                position.y = LevelGround.getHeight(position);
+            }
+
+            RoadJoint next = segment < road.joints.Count - 1
+                ? road.joints[segment + 1]
+                : (road.isLoop ? road.joints[0] : joint);
+            position.y += Mathf.Lerp(joint.offset, next.offset, t);
+
+            RoadNode node = new RoadNode
+            {
+                Position = position,
+                Direction = direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector3.forward,
+                HalfWidth = halfWidth,
+                RoadIndex = roadIndex,
+                Chart = chart
+            };
+
+            int index = Nodes.Count;
+            Nodes.Add(node);
+
+            if (previous >= 0)
+            {
+                Link(previous, index);
+            }
+
+            return index;
+        }
+
+        /// <summary>
+        /// How wide a road is, and what kind of road it is. Both answers come from the same place,
+        /// so they are worked out together.
+        ///
+        /// The width is the trap. A road carries one of two configurations depending on the map's
+        /// age, and they disagree about what "width" means: a modern RoadAsset's Width is the
+        /// *full* flat width - Road.buildMesh lays its vertices at `Width * 0.5f` either side of
+        /// the spline - while the legacy RoadMaterial.width is already a half-width, which is why
+        /// the game added a HalfWidth property to say so. Reading the legacy figure as a full width
+        /// would put a convoy's right-hand lane in the ditch.
+        ///
+        /// Outside that flat top the mesh tapers into the terrain over a further `Depth` metres.
+        /// That skirt is shoulder rather than road and is deliberately not counted.
+        ///
+        /// The classification mirrors Road.GetChartMode - the same thresholds the game itself uses
+        /// to decide what to draw on the map chart - rather than calling it, so this reads the
+        /// underlying fields directly and keeps working on a server whose Road class predates that
+        /// method. Both thresholds are the same road: 16m of flat width is a highway.
+        /// </summary>
+        private static void Classify(Road road, out float halfWidth, out EObjectChart chart)
+        {
+            RoadAsset asset = road.GetRoadAsset();
+            if (asset != null && asset.Width > 0f)
+            {
+                halfWidth = asset.Width * 0.5f;
+                chart = asset.ChartOverride != EObjectChart.NONE
+                    ? asset.ChartOverride
+                    : (asset.Width > 16f ? EObjectChart.HIGHWAY : EObjectChart.ROAD);
+                return;
+            }
+
+            RoadMaterial legacy = LevelRoads.materials != null && road.material < LevelRoads.materials.Length
+                ? LevelRoads.materials[road.material]
+                : null;
+
+            if (legacy == null || legacy.width <= 0f)
+            {
+                halfWidth = 4f; // the legacy default, and a sane road either way
+                chart = EObjectChart.ROAD;
+                return;
+            }
+
+            halfWidth = legacy.width;
+            chart = !legacy.isConcrete
+                ? EObjectChart.PATH
+                : (legacy.width > 8f ? EObjectChart.HIGHWAY : EObjectChart.ROAD);
+        }
+
+        private static void Link(int a, int b)
+        {
+            if (a == b || a < 0 || b < 0)
+            {
+                return;
+            }
+
+            if (!Nodes[a].Links.Contains(b))
+            {
+                Nodes[a].Links.Add(b);
+            }
+
+            if (!Nodes[b].Links.Contains(a))
+            {
+                Nodes[b].Links.Add(a);
+            }
+        }
+
+        private static long CellKey(Vector3 position)
+        {
+            int x = Mathf.FloorToInt(position.x / GridCellMetres);
+            int z = Mathf.FloorToInt(position.z / GridCellMetres);
+            return ((long)x << 32) ^ (uint)z;
+        }
+
+        private static void BuildGrid()
+        {
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                long key = CellKey(Nodes[i].Position);
+                if (!Grid.TryGetValue(key, out List<int> cell))
+                {
+                    cell = new List<int>();
+                    Grid[key] = cell;
+                }
+
+                cell.Add(i);
+            }
+        }
+
+        /// <summary>
+        /// Recovers the junctions. Two samples belonging to different roads that are within a
+        /// road's width of each other are the same piece of ground as far as a vehicle is
+        /// concerned, so they get linked and the router can turn off one road onto the other.
+        ///
+        /// Height is checked as well as plan distance, and that check is the whole reason this is
+        /// not a flat 2D proximity test: a bridge crosses directly over the road beneath it, and
+        /// linking those two would let a convoy route itself off the top of an overpass.
+        /// </summary>
+        private static void LinkJunctions()
+        {
+            List<int> nearby = new List<int>();
+            int links = 0;
+
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                RoadNode node = Nodes[i];
+                nearby.Clear();
+                GatherCells(node.Position, nearby);
+
+                foreach (int other in nearby)
+                {
+                    if (other <= i)
+                    {
+                        continue; // each pair once
+                    }
+
+                    RoadNode candidate = Nodes[other];
+                    if (candidate.RoadIndex == node.RoadIndex)
+                    {
+                        continue; // consecutive samples are already linked, and a road does not
+                                  // junction with itself in any way worth driving
+                    }
+
+                    float radius = Mathf.Clamp(node.HalfWidth + candidate.HalfWidth,
+                        MinJunctionRadiusMetres, MaxJunctionRadiusMetres);
+
+                    Vector3 delta = candidate.Position - node.Position;
+                    if (Mathf.Abs(delta.y) > 4f)
+                    {
+                        continue; // an overpass, not a junction
+                    }
+
+                    delta.y = 0f;
+                    if (delta.sqrMagnitude > radius * radius)
+                    {
+                        continue;
+                    }
+
+                    Link(i, other);
+                    links++;
+                }
+            }
+
+            Logger.Log($"[Bandit] Road graph junctions: {links} link(s) between roads.");
+        }
+
+        private static void GatherCells(Vector3 position, List<int> into)
+        {
+            int cx = Mathf.FloorToInt(position.x / GridCellMetres);
+            int cz = Mathf.FloorToInt(position.z / GridCellMetres);
+
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    long key = ((long)(cx + dx) << 32) ^ (uint)(cz + dz);
+                    if (Grid.TryGetValue(key, out List<int> cell))
+                    {
+                        into.AddRange(cell);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// The road node nearest a point, within a radius. This is how a convoy gets on and off the
+        /// network: the spawn point and each waypoint are snapped to the nearest road, and whatever
+        /// is left over at either end is driven directly.
+        /// </summary>
+        public static bool TryGetNearest(Vector3 position, float maxDistance, out int nodeIndex, out float distance)
+        {
+            EnsureBuilt();
+
+            nodeIndex = -1;
+            distance = float.MaxValue;
+
+            if (Nodes.Count == 0)
+            {
+                return false;
+            }
+
+            // Widen the search a ring at a time rather than scanning every node: a map's road
+            // network is tens of thousands of samples and this runs per leg, per convoy.
+            int rings = Mathf.Max(1, Mathf.CeilToInt(maxDistance / GridCellMetres));
+            int cx = Mathf.FloorToInt(position.x / GridCellMetres);
+            int cz = Mathf.FloorToInt(position.z / GridCellMetres);
+            float bestSquared = maxDistance * maxDistance;
+
+            for (int ring = 0; ring <= rings; ring++)
+            {
+                for (int dx = -ring; dx <= ring; dx++)
+                {
+                    for (int dz = -ring; dz <= ring; dz++)
+                    {
+                        // Only the perimeter of each ring is new.
+                        if (ring > 0 && Mathf.Abs(dx) != ring && Mathf.Abs(dz) != ring)
+                        {
+                            continue;
+                        }
+
+                        long key = ((long)(cx + dx) << 32) ^ (uint)(cz + dz);
+                        if (!Grid.TryGetValue(key, out List<int> cell))
+                        {
+                            continue;
+                        }
+
+                        foreach (int candidate in cell)
+                        {
+                            float candidateSquared = (Nodes[candidate].Position - position).sqrMagnitude;
+                            if (candidateSquared < bestSquared)
+                            {
+                                bestSquared = candidateSquared;
+                                nodeIndex = candidate;
+                            }
+                        }
+                    }
+                }
+
+                // Stopping at the first ring with a hit in it would be wrong: the query point sits
+                // somewhere inside its own cell, so a node one ring further out can still be nearer
+                // than one found here. Everything in ring r+1 is at least r cells away, which is
+                // the bar the best hit so far has to beat.
+                if (nodeIndex >= 0 && Mathf.Sqrt(bestSquared) <= ring * GridCellMetres)
+                {
+                    break;
+                }
+            }
+
+            if (nodeIndex < 0)
+            {
+                return false;
+            }
+
+            distance = Mathf.Sqrt(bestSquared);
+            return true;
+        }
+
+        /// <summary>
+        /// Routes between two points over the road network, appending the road nodes to
+        /// <paramref name="into"/>. The caller's own start and end points are not included - a
+        /// convoy drives to the first node with the navigator it already has, and off the last one
+        /// the same way.
+        ///
+        /// Returns false when either end is further than <paramref name="snapDistance"/> from any
+        /// road, or when no route exists between them - two towns on separate islands, most often.
+        /// Both are ordinary answers rather than failures, and the caller drives direct instead.
+        /// </summary>
+        public static bool TryRoute(Vector3 from, Vector3 to, float snapDistance, List<int> into, out string reason)
+        {
+            EnsureBuilt();
+            into.Clear();
+
+            if (Nodes.Count < 2)
+            {
+                reason = "this map has no roads";
+                return false;
+            }
+
+            if (!TryGetNearest(from, snapDistance, out int start, out float startDistance))
+            {
+                reason = $"no road within {snapDistance:0}m of the start";
+                return false;
+            }
+
+            if (!TryGetNearest(to, snapDistance, out int goal, out float goalDistance))
+            {
+                reason = $"no road within {snapDistance:0}m of the destination";
+                return false;
+            }
+
+            if (start == goal)
+            {
+                into.Add(start);
+                reason = null;
+                return true;
+            }
+
+            if (!Search(start, goal, into))
+            {
+                reason = "no road route between those points";
+                return false;
+            }
+
+            reason = null;
+            return true;
+        }
+
+        /// <summary>
+        /// Plain A* over the node graph, with distance for the heuristic and distance times the
+        /// road's chart penalty for the cost, so a route prefers a highway to a track of the same
+        /// length without ever refusing the track.
+        /// </summary>
+        private static bool Search(int start, int goal, List<int> into)
+        {
+            _queryStamp++;
+
+            MinHeap open = new MinHeap(Mathf.Min(Nodes.Count, 1024));
+            _gScore[start] = 0f;
+            _cameFrom[start] = -1;
+            _stamp[start] = _queryStamp;
+            open.Push(start, Heuristic(start, goal));
+
+            Vector3 goalPosition = Nodes[goal].Position;
+
+            while (open.Count > 0)
+            {
+                int current = open.Pop();
+                if (current == goal)
+                {
+                    Reconstruct(goal, into);
+                    return true;
+                }
+
+                RoadNode node = Nodes[current];
+                float currentScore = _gScore[current];
+
+                foreach (int neighbour in node.Links)
+                {
+                    RoadNode other = Nodes[neighbour];
+                    float step = Vector3.Distance(node.Position, other.Position)
+                        * ChartCostMultiplier(other.Chart);
+                    float tentative = currentScore + step;
+
+                    if (_stamp[neighbour] == _queryStamp && tentative >= _gScore[neighbour])
+                    {
+                        continue;
+                    }
+
+                    _stamp[neighbour] = _queryStamp;
+                    _gScore[neighbour] = tentative;
+                    _cameFrom[neighbour] = current;
+                    open.Push(neighbour, tentative + Vector3.Distance(other.Position, goalPosition));
+                }
+            }
+
+            return false;
+        }
+
+        private static float Heuristic(int node, int goal)
+        {
+            return Vector3.Distance(Nodes[node].Position, Nodes[goal].Position);
+        }
+
+        private static void Reconstruct(int goal, List<int> into)
+        {
+            int cursor = goal;
+            while (cursor >= 0)
+            {
+                into.Add(cursor);
+                cursor = _cameFrom[cursor];
+            }
+
+            into.Reverse();
+        }
+
+        /// <summary>
+        /// Where on the road a vehicle of this width should actually drive, given which way it is
+        /// going: over to the right if it fits in half the road, down the middle if it does not.
+        ///
+        /// The margin is the gap left between the vehicle's flank and the edge of the flat surface.
+        /// Below that the lane is not worth having - a truck riding the shoulder of a narrow road
+        /// is worse than one straddling the crown of it.
+        /// </summary>
+        public static Vector3 GetLanePosition(int nodeIndex, Vector3 travelDirection, float vehicleHalfWidth)
+        {
+            RoadNode node = Get(nodeIndex);
+            if (node == null)
+            {
+                return Vector3.zero;
+            }
+
+            const float LaneMarginMetres = 0.5f;
+
+            // Half a carriageway has to hold the vehicle plus a margin on each side of it.
+            float laneHalfWidth = node.HalfWidth * 0.5f;
+            if (vehicleHalfWidth + LaneMarginMetres > laneHalfWidth)
+            {
+                return node.Position;
+            }
+
+            travelDirection.y = 0f;
+            if (travelDirection.sqrMagnitude < 0.0001f)
+            {
+                return node.Position;
+            }
+
+            // Cross(up, forward) is the right-hand side; Cross(forward, up) - which is the order
+            // vanilla's own mesh builder uses - points left, and would put the convoy into
+            // oncoming traffic.
+            Vector3 right = Vector3.Cross(Vector3.up, travelDirection.normalized);
+            return node.Position + right * laneHalfWidth;
+        }
+
+        /// <summary>
+        /// A binary heap keyed on f-score. The alternative - scanning the open list for the best
+        /// node - is O(n) per pop, which on a graph this size turns a route into a visible hitch.
+        /// </summary>
+        private sealed class MinHeap
+        {
+            private int[] _items;
+            private float[] _priorities;
+
+            public int Count { get; private set; }
+
+            public MinHeap(int capacity)
+            {
+                _items = new int[Mathf.Max(4, capacity)];
+                _priorities = new float[_items.Length];
+            }
+
+            public void Push(int item, float priority)
+            {
+                if (Count == _items.Length)
+                {
+                    System.Array.Resize(ref _items, Count * 2);
+                    System.Array.Resize(ref _priorities, Count * 2);
+                }
+
+                int child = Count++;
+                _items[child] = item;
+                _priorities[child] = priority;
+
+                while (child > 0)
+                {
+                    int parent = (child - 1) / 2;
+                    if (_priorities[parent] <= _priorities[child])
+                    {
+                        break;
+                    }
+
+                    Swap(parent, child);
+                    child = parent;
+                }
+            }
+
+            public int Pop()
+            {
+                int result = _items[0];
+                Count--;
+                _items[0] = _items[Count];
+                _priorities[0] = _priorities[Count];
+
+                int parent = 0;
+                while (true)
+                {
+                    int left = parent * 2 + 1;
+                    int right = left + 1;
+                    int smallest = parent;
+
+                    if (left < Count && _priorities[left] < _priorities[smallest])
+                    {
+                        smallest = left;
+                    }
+
+                    if (right < Count && _priorities[right] < _priorities[smallest])
+                    {
+                        smallest = right;
+                    }
+
+                    if (smallest == parent)
+                    {
+                        break;
+                    }
+
+                    Swap(smallest, parent);
+                    parent = smallest;
+                }
+
+                return result;
+            }
+
+            private void Swap(int a, int b)
+            {
+                int item = _items[a];
+                _items[a] = _items[b];
+                _items[b] = item;
+
+                float priority = _priorities[a];
+                _priorities[a] = _priorities[b];
+                _priorities[b] = priority;
+            }
+        }
+    }
+}

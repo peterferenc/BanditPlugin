@@ -25,6 +25,14 @@ namespace BanditPlugin.Commands
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            // Convoys first: a column reports as one thing doing one thing, and reading it off
+            // twenty individual bandits is not possible - none of them knows the state the convoy
+            // is in.
+            foreach (BanditConvoy convoy in BanditConvoy.All)
+            {
+                Reply(caller, convoy.Describe(), Color.cyan);
+            }
+
             List<BanditBotController> bandits = FakePlayerSpawner.GetActiveControllers();
             if (bandits.Count == 0)
             {
