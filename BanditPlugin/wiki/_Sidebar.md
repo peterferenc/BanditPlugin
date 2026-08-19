@@ -6,6 +6,7 @@
 
 - [Commands](Commands)
 - [Configuration](Configuration)
+- [Points & cost](Points-and-Cost)
 - [Build & install](Build-and-Install)
 
 **How it works**

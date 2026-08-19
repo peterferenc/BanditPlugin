@@ -31,7 +31,8 @@ Built as a RocketMod plugin, developed against Unturned 3.26.3.8 with RocketModF
   spacing, spawn distance and group behaviour.
 - Automatic cost calculation: every kit and vehicle is priced relative to a rifleman, so
   `/banditevent <points>` buys a whole fight - squads and crewed vehicles - against a budget.
-  `/banditcost` and `/banditevent check` show the prices.
+  `/banditcost` prices everything from the game's own asset data. See
+  [Points and cost](https://github.com/peterferenc/BanditPlugin/wiki/Points-and-Cost).
 
 **Teams**
 
@@ -76,12 +77,17 @@ Start the server once to generate `BanditPlugin.configuration.xml`, then grant `
 Then, in game:
 
 ```
-/bandit                  spawn one where you are looking
-/squadspawn rifle        put a squad down, fighting
-/banditevent 200         buy a whole fight for 200 points
-/banditstatus            what every bandit is currently doing
-/banditclear             remove them all
+/bandit                  spawns one where you are looking - it holds fire until told
+/bandit shoot start      weapons free, for every bandit on the map
+/bandit cover start      and they start using cover
+/squadspawn rifle        spawns a squad, already fighting
+/banditevent 200         spawns a whole fight bought for 200 points
+/banditstatus            reports what every bandit is currently doing
+/banditclear             removes them all
 ```
+
+A bandit from `/bandit` does nothing until ordered, so you can switch on one behaviour at a time
+and watch it. A squad, an event or a convoy comes out fighting.
 
 Use `/banditclear` before disconnecting - bots occupy player slots, and their presence affects
 the client-side exit timer.
@@ -93,6 +99,7 @@ every command, every configuration key, and how each subsystem actually works:
 
 - [Commands](https://github.com/peterferenc/BanditPlugin/wiki/Commands)
 - [Configuration](https://github.com/peterferenc/BanditPlugin/wiki/Configuration)
+- [Points & cost](https://github.com/peterferenc/BanditPlugin/wiki/Points-and-Cost)
 - [Build & install](https://github.com/peterferenc/BanditPlugin/wiki/Build-and-Install)
 - [Architecture](https://github.com/peterferenc/BanditPlugin/wiki/Architecture)
 - [Movement, cover & patrol](https://github.com/peterferenc/BanditPlugin/wiki/Movement-Cover-and-Patrol)
@@ -125,6 +132,13 @@ eye-to-eye, and movement is quantised to 8 directions because that is all the in
 carries. Bots consume player slots and show up in the player list. The full list, with the
 reasons, is on the
 [Known limitations](https://github.com/peterferenc/BanditPlugin/wiki/Known-Limitations) page.
+
+## AI disclosure
+
+This plugin was written with the help of AI coding assistants. The design decisions, the testing
+against a live server and the final say on what went in are mine, but a good deal of the code and
+of this documentation was AI-generated. Read it with that in mind, and please report anything
+that looks wrong.
 
 ## Credits
 

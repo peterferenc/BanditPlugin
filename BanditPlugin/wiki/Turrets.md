@@ -39,7 +39,7 @@ frame is what the round will actually follow and is what gets aimed.
   bandit's head *inside* its own armour. The muzzle now comes from the seat's turret aim transform
   rather than that head.
 
-Firing respects the same `/banditstop` / `/banditshoot` standing order as on foot - so with
+Firing respects the same `/bandit shoot start|stop` standing order as on foot - so with
 `HoldFireByDefault` on, a fresh gunner tracks but holds its fire until told otherwise - and it will
 not shoot with one of its own within 1.5m of the firing line.
 
