@@ -92,11 +92,37 @@ namespace BanditPlugin
         /// </param>
         public static BanditEventPlan Draw(BanditConfiguration config, float budget, int seed, int banditCap)
         {
+            return Draw(config, budget, seed, banditCap, includeSquads: true, includeLoose: true,
+                vehicleCap: Math.Max(0, config.EventVehicleCap));
+        }
+
+        /// <summary>
+        /// The same draw, spent entirely on crewed vehicles.
+        ///
+        /// A convoy is a column of vehicles and the men riding in them, so foot squads are not
+        /// drawn at all - a squad spawned beside the road would be left behind by the first leg -
+        /// and neither is the remainder, since a loose rifleman has nothing to ride in. The vehicle
+        /// cap is the caller's rather than the configuration's for the same reason: EventVehicleCap
+        /// exists to stop an ordinary event putting its whole budget into armour, which is exactly
+        /// what a convoy is meant to do.
+        ///
+        /// An empty plan is a real answer here and is reported as one. Unlike an event, a convoy
+        /// with nothing in it cannot be rescued by spawning a single man.
+        /// </summary>
+        public static BanditEventPlan DrawConvoy(BanditConfiguration config, float budget, int seed,
+            int banditCap, int vehicleCap)
+        {
+            return Draw(config, budget, seed, banditCap, includeSquads: false, includeLoose: false,
+                vehicleCap: Math.Max(0, vehicleCap));
+        }
+
+        private static BanditEventPlan Draw(BanditConfiguration config, float budget, int seed, int banditCap,
+            bool includeSquads, bool includeLoose, int vehicleCap)
+        {
             BanditEventPlan plan = new BanditEventPlan { Budget = budget, Seed = seed };
             Random random = new Random(seed);
 
             float remaining = budget;
-            int vehicleCap = Math.Max(0, config.EventVehicleCap);
 
             // Squads and vehicles first, drawn against each other out of one pool so a big budget
             // can put its money into either. The cap on vehicles is what stops it putting all of it
@@ -105,14 +131,17 @@ namespace BanditPlugin
             {
                 List<Candidate> candidates = new List<Candidate>();
 
-                foreach (BanditSquadType squad in Enumerate(config.Squads))
+                if (includeSquads)
                 {
-                    float cost = config.SquadCost(squad);
-                    int size = CountMembers(config, squad);
-                    if (IsEligible(squad.Weight, cost, squad.MinEventCost, budget, remaining)
-                        && size > 0 && plan.BanditCount + size <= banditCap)
+                    foreach (BanditSquadType squad in Enumerate(config.Squads))
                     {
-                        candidates.Add(new Candidate { Squad = squad, Cost = cost, Size = size, Weight = squad.Weight });
+                        float cost = config.SquadCost(squad);
+                        int size = CountMembers(config, squad);
+                        if (IsEligible(squad.Weight, cost, squad.MinEventCost, budget, remaining)
+                            && size > 0 && plan.BanditCount + size <= banditCap)
+                        {
+                            candidates.Add(new Candidate { Squad = squad, Cost = cost, Size = size, Weight = squad.Weight });
+                        }
                     }
                 }
 
@@ -154,7 +183,7 @@ namespace BanditPlugin
             }
 
             // Then the remainder, one man at a time, which is what gives squads their odd sizes.
-            for (int draw = 0; draw < MaxDraws; draw++)
+            for (int draw = 0; includeLoose && draw < MaxDraws; draw++)
             {
                 List<Candidate> candidates = new List<Candidate>();
 
@@ -181,7 +210,11 @@ namespace BanditPlugin
                 plan.Loose.Add(picked.Kit);
             }
 
-            EnsureNotEmpty(config, plan, banditCap);
+            if (includeLoose)
+            {
+                EnsureNotEmpty(config, plan, banditCap);
+            }
+
             return plan;
         }
 

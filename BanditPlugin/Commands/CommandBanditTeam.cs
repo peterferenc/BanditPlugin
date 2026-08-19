@@ -4,6 +4,7 @@ using Rocket.Unturned.Chat;
 using Rocket.Unturned.Player;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -205,18 +206,6 @@ namespace BanditPlugin.Commands
             Reply(caller, "Usage: /banditteam  |  /banditteam list  |  /banditteam join <team>  |  "
                 + "/banditteam leave  |  /banditteam <player> <team>. "
                 + $"Teams: {string.Join(", ", BanditTeams.Names(config).ToArray())}.", Color.yellow);
-        }
-
-        private static void Reply(IRocketPlayer caller, string message, Color color)
-        {
-            if (caller is UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, message, color);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {message}");
-            }
         }
     }
 }

@@ -5,6 +5,7 @@ using Rocket.Unturned.Chat;
 using Rocket.Unturned.Player;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -31,13 +32,13 @@ namespace BanditPlugin.Commands
             BanditBotController bandit = FakePlayerSpawner.LastSpawnedController;
             if (bandit == null)
             {
-                UnturnedChat.Say(caller, "No bandit to command - spawn one with /bandit first.", Color.red);
+                UnturnedChat.Say(caller, NoBandit, Color.red);
                 return;
             }
 
-            if (bandit.Self.life != null && bandit.Self.life.isDead)
+            if (IsDead(bandit))
             {
-                UnturnedChat.Say(caller, "That bandit is dead.", Color.red);
+                UnturnedChat.Say(caller, BanditIsDead, Color.red);
                 return;
             }
 

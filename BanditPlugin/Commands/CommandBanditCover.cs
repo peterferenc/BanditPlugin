@@ -6,6 +6,7 @@ using Rocket.Unturned.Chat;
 using Rocket.Unturned.Player;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -41,14 +42,12 @@ namespace BanditPlugin.Commands
             BanditBotController bandit = FakePlayerSpawner.LastSpawnedController;
             if (bandit?.Brain == null)
             {
-                UnturnedChat.Say(caller, "No bandit to command - spawn one with /bandit first.", Color.red);
+                UnturnedChat.Say(caller, NoBandit, Color.red);
                 return;
             }
 
             Player callerPlayer = ((UnturnedPlayer)caller).Player;
-            Vector3 threatEye = callerPlayer.look != null && callerPlayer.look.aim != null
-                ? callerPlayer.look.aim.position
-                : callerPlayer.transform.position + Vector3.up * 1.5f;
+            Vector3 threatEye = BanditGeometry.EyeOf(callerPlayer);
 
             List<BanditCoverCandidateReport> reports = new List<BanditCoverCandidateReport>();
             bool found = bandit.Brain.TryTakeCoverFrom(threatEye, out BanditCoverSearchStats stats, reports);

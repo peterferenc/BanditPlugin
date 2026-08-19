@@ -3,6 +3,7 @@ using BanditPlugin.FakePlayer;
 using Rocket.API;
 using Rocket.Unturned.Chat;
 using UnityEngine;
+using static BanditPlugin.Commands.BanditCommand;
 
 namespace BanditPlugin.Commands
 {
@@ -25,6 +26,14 @@ namespace BanditPlugin.Commands
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            // Convoys first: a column reports as one thing doing one thing, and reading it off
+            // twenty individual bandits is not possible - none of them knows the state the convoy
+            // is in.
+            foreach (BanditConvoy convoy in BanditConvoy.All)
+            {
+                Reply(caller, convoy.Describe(), Color.cyan);
+            }
+
             List<BanditBotController> bandits = FakePlayerSpawner.GetActiveControllers();
             if (bandits.Count == 0)
             {
@@ -83,18 +92,6 @@ namespace BanditPlugin.Commands
                     $"{(brain.PatrolEnabled ? ", patrolling" : string.Empty)}" +
                     $", fire: {bandit.DescribeFireBlock()}",
                     Color.white);
-            }
-        }
-
-        private static void Reply(IRocketPlayer caller, string message, Color color)
-        {
-            if (caller is Rocket.Unturned.Player.UnturnedPlayer)
-            {
-                UnturnedChat.Say(caller, message, color);
-            }
-            else
-            {
-                Rocket.Core.Logging.Logger.Log($"[Bandit] {message}");
             }
         }
     }

@@ -1,7 +1,6 @@
-using System.Collections.Generic;
-using Pathfinding;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 
 namespace BanditPlugin.Navigation
 {
@@ -28,14 +27,22 @@ namespace BanditPlugin.Navigation
         /// <summary>How close (horizontally) counts as having reached the destination.</summary>
         public float ArriveRadius = 2f;
 
-        public float RepathIntervalSeconds = 2.5f;
+        public float RepathIntervalSeconds
+        {
+            get { return _path.RepathIntervalSeconds; }
+            set { _path.RepathIntervalSeconds = value; }
+        }
 
         /// <summary>
         /// How far a point may be from the navmesh and still be considered "on" it. AstarPath's
         /// own maxNearestNodeDistance is 100m, which would happily snap a bandit standing in a
         /// field onto a graph in the next town, so we apply our own much tighter limit.
         /// </summary>
-        public float NavmeshSnapDistance = 3f;
+        public float NavmeshSnapDistance
+        {
+            get { return _path.NavmeshSnapDistance; }
+            set { _path.NavmeshSnapDistance = value; }
+        }
 
         public bool AllowJumping = true;
 
@@ -59,7 +66,7 @@ namespace BanditPlugin.Navigation
         /// one end of the trip is off the navmesh. Reported by /banditstatus - which of the two is
         /// running explains most odd movement.
         /// </summary>
-        public bool IsFollowingPath => _hasPath;
+        public bool IsFollowingPath => _path.HasPath;
 
         /// <summary>
         /// How far the bot still has to walk: the remaining A* corners summed end to end, or the
@@ -79,25 +86,13 @@ namespace BanditPlugin.Navigation
                     return 0f;
                 }
 
-                Vector3 position = _transform.position;
-                if (!_hasPath || _corners.Count == 0 || _cornerIndex >= _corners.Count)
-                {
-                    return FlatDistance(position, Destination);
-                }
-
-                float total = FlatDistance(position, _corners[_cornerIndex]);
-                for (int i = _cornerIndex; i < _corners.Count - 1; i++)
-                {
-                    total += FlatDistance(_corners[i], _corners[i + 1]);
-                }
-                return total;
+                return _path.RemainingDistance(_transform.position, Destination);
             }
         }
 
         private const float StepHeight = 0.5f;
         private const float JumpableObstacleHeight = 1f;
         private const float ObstacleProbeDistance = 1.6f;
-        private const float CornerArriveRadius = 1.5f;
 
         // Vertical slack when deciding "am I there yet". Generous, because a navmesh corner or a
         // commanded destination can easily sit a floor above or below the point we can stand on.
@@ -107,23 +102,9 @@ namespace BanditPlugin.Navigation
 
         private readonly Player _self;
         private readonly Transform _transform;
-        private readonly OnPathDelegate _onPathComplete;
-        private readonly List<Vector3> _corners = new List<Vector3>();
+        private readonly BanditPathFollower _path;
 
         private float _activeArriveRadius;
-        private Seeker _seeker;
-        private bool _seekerUnavailable;
-        private bool _hasPath;
-        private int _cornerIndex;
-        private bool _pathPending;
-        private float _pathRequestedTime;
-        private float _nextRepathTime;
-
-        // Bumped whenever the destination changes. A path request in flight when that happens
-        // still calls back, and without this its corners - computed for the old destination -
-        // would be installed as the current route.
-        private int _pathGeneration;
-        private int _pendingPathGeneration = -1;
 
         private int _avoidSign;
         private float _avoidSignExpiry;
@@ -138,7 +119,7 @@ namespace BanditPlugin.Navigation
         {
             _self = self;
             _transform = self.transform;
-            _onPathComplete = OnPathComplete;
+            _path = new BanditPathFollower(self) { CornerArriveRadius = 1.5f };
             _lastStuckSamplePosition = _transform.position;
         }
 
@@ -154,11 +135,7 @@ namespace BanditPlugin.Navigation
             HasDestination = true;
             HasArrived = false;
             HasGivenUp = false;
-            _pathGeneration++;
-            _hasPath = false;
-            _corners.Clear();
-            _cornerIndex = 0;
-            _nextRepathTime = 0f;
+            _path.Restart();
             _stuckSamples = 0;
             _sidestepUntil = 0f;
             _lastStuckSamplePosition = _transform.position;
@@ -168,17 +145,9 @@ namespace BanditPlugin.Navigation
         public void Stop()
         {
             HasDestination = false;
-            _pathGeneration++;
-            _hasPath = false;
-            _corners.Clear();
+            _path.Abandon();
             DesiredDirection = Vector3.zero;
             WantsJump = false;
-
-            if (_seeker != null && _pathPending)
-            {
-                _seeker.CancelCurrentPathRequest();
-                _pathPending = false;
-            }
         }
 
         public bool ConsumeArrived()
@@ -215,18 +184,9 @@ namespace BanditPlugin.Navigation
                 return;
             }
 
-            RefreshPath(position);
+            _path.Refresh(position, Destination);
 
-            Vector3 steerTarget = Destination;
-            if (_hasPath && _corners.Count > 0)
-            {
-                while (_cornerIndex < _corners.Count - 1
-                    && FlatDistance(position, _corners[_cornerIndex]) < CornerArriveRadius)
-                {
-                    _cornerIndex++;
-                }
-                steerTarget = _corners[_cornerIndex];
-            }
+            Vector3 steerTarget = _path.SteerTarget(position, Destination);
 
             Vector3 desired = Flatten(steerTarget - position);
             if (desired.sqrMagnitude < 0.0001f)
@@ -250,125 +210,6 @@ namespace BanditPlugin.Navigation
             }
 
             DesiredDirection = AvoidObstacles(position, desired);
-        }
-
-        /// <summary>
-        /// Requests a fresh A* path if one is due and both ends are actually on a navmesh.
-        /// When they are not - the common case out in the countryside - _hasPath stays false and
-        /// Tick steers straight at the destination instead.
-        /// </summary>
-        private void RefreshPath(Vector3 position)
-        {
-            if (_pathPending)
-            {
-                // A callback that never arrives would wedge pathing forever; the Seeker always
-                // calls back, but a cancelled/pooled path during a level change might not.
-                if (Time.time - _pathRequestedTime > 5f)
-                {
-                    _pathPending = false;
-                }
-                return;
-            }
-
-            if (Time.time < _nextRepathTime)
-            {
-                return;
-            }
-            _nextRepathTime = Time.time + RepathIntervalSeconds;
-
-            if (AstarPath.active == null || AstarPath.active.isScanning)
-            {
-                _hasPath = false;
-                return;
-            }
-
-            if (!TrySnapToNavmesh(position, out Vector3 start) || !TrySnapToNavmesh(Destination, out Vector3 end))
-            {
-                _hasPath = false;
-                _corners.Clear();
-                return;
-            }
-
-            if (!EnsureSeeker())
-            {
-                _hasPath = false;
-                return;
-            }
-
-            _pathPending = true;
-            _pathRequestedTime = Time.time;
-            _pendingPathGeneration = _pathGeneration;
-            _seeker.StartPath(ABPath.Construct(start, end), _onPathComplete);
-        }
-
-        private void OnPathComplete(Path path)
-        {
-            _pathPending = false;
-
-            if (_pendingPathGeneration != _pathGeneration)
-            {
-                return; // computed for a destination we have since abandoned
-            }
-
-            _corners.Clear();
-            _cornerIndex = 0;
-
-            // The path is pooled and recycled after this callback returns, so the corners have to
-            // be copied out rather than referenced.
-            if (path == null || path.error || path.vectorPath == null || path.vectorPath.Count == 0)
-            {
-                _hasPath = false;
-                return;
-            }
-
-            for (int i = 0; i < path.vectorPath.Count; i++)
-            {
-                _corners.Add(path.vectorPath[i]);
-            }
-            _hasPath = true;
-        }
-
-        private bool EnsureSeeker()
-        {
-            if (_seeker != null)
-            {
-                return true;
-            }
-            if (_seekerUnavailable)
-            {
-                return false;
-            }
-
-            GameObject gameObject = _self.gameObject;
-            _seeker = gameObject.GetComponent<Seeker>();
-            if (_seeker == null)
-            {
-                _seeker = gameObject.AddComponent<Seeker>();
-                _seeker.drawGizmos = false;
-
-                // Raw A* corners run node centre to node centre, which on a recast graph zig-zags
-                // badly. The funnel modifier string-pulls them into the straight line a player
-                // would actually walk - the same modifier vanilla puts on zombies.
-                gameObject.AddComponent<FunnelModifier>();
-            }
-
-            _seekerUnavailable = _seeker == null;
-            return _seeker != null;
-        }
-
-        private bool TrySnapToNavmesh(Vector3 point, out Vector3 snapped)
-        {
-            snapped = point;
-
-            NNInfo info = AstarPath.active.GetNearest(point, NNConstraint.Walkable);
-            if (info.node == null)
-            {
-                return false;
-            }
-
-            snapped = info.position;
-            return FlatDistance(snapped, point) <= NavmeshSnapDistance
-                && Mathf.Abs(snapped.y - point.y) <= NavmeshSnapDistance + 2f;
         }
 
         /// <summary>
@@ -470,19 +311,6 @@ namespace BanditPlugin.Navigation
                 HasGivenUp = true;
                 Stop();
             }
-        }
-
-        private static Vector3 Flatten(Vector3 v)
-        {
-            v.y = 0f;
-            return v;
-        }
-
-        private static float FlatDistance(Vector3 a, Vector3 b)
-        {
-            a.y = 0f;
-            b.y = 0f;
-            return (a - b).magnitude;
         }
     }
 }

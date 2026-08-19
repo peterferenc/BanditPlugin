@@ -1,7 +1,6 @@
-using System.Collections.Generic;
-using Pathfinding;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 
 namespace BanditPlugin.Navigation
 {
@@ -242,7 +241,11 @@ namespace BanditPlugin.Navigation
     /// </summary>
     public sealed class BanditVehicleNavigator
     {
-        public float RepathIntervalSeconds = 2.5f;
+        public float RepathIntervalSeconds
+        {
+            get { return _path.RepathIntervalSeconds; }
+            set { _path.RepathIntervalSeconds = value; }
+        }
 
         /// <summary>
         /// How far a point may be from the navmesh and still snap onto it. Looser than the on-foot
@@ -250,7 +253,11 @@ namespace BanditPlugin.Navigation
         /// vehicle that refuses to path because its start point is 4m off the mesh would steer
         /// blind through the one place pathing is most useful.
         /// </summary>
-        public float NavmeshSnapDistance = 8f;
+        public float NavmeshSnapDistance
+        {
+            get { return _path.NavmeshSnapDistance; }
+            set { _path.NavmeshSnapDistance = value; }
+        }
 
         /// <summary>World-space unit vector on the XZ plane, or zero when there is nowhere safe to go.</summary>
         public Vector3 DesiredDirection { get; private set; }
@@ -267,7 +274,7 @@ namespace BanditPlugin.Navigation
         /// <summary>True while every heading in the fan is blocked - i.e. it does not fit.</summary>
         public bool IsBlocked { get; private set; }
 
-        public bool IsFollowingPath => _hasPath;
+        public bool IsFollowingPath => _path.HasPath;
 
         /// <summary>How close counts as arrived. Scaled to the vehicle, because a bandit can walk
         /// onto a point and a lorry can only get its nose near it.</summary>
@@ -282,18 +289,7 @@ namespace BanditPlugin.Navigation
                     return 0f;
                 }
 
-                Vector3 position = _lastPosition;
-                if (!_hasPath || _corners.Count == 0 || _cornerIndex >= _corners.Count)
-                {
-                    return FlatDistance(position, Destination);
-                }
-
-                float total = FlatDistance(position, _corners[_cornerIndex]);
-                for (int i = _cornerIndex; i < _corners.Count - 1; i++)
-                {
-                    total += FlatDistance(_corners[i], _corners[i + 1]);
-                }
-                return total;
+                return _path.RemainingDistance(_lastPosition, Destination);
             }
         }
 
@@ -344,23 +340,10 @@ namespace BanditPlugin.Navigation
         /// means a genuinely different way, narrow enough to leave the fan somewhere to go.</summary>
         private const float BannedArcDegrees = 50f;
 
-        private const float CornerArriveRadius = 4f;
-
         private static readonly RaycastHit[] Hits = new RaycastHit[16];
 
         private readonly Player _self;
-        private readonly OnPathDelegate _onPathComplete;
-        private readonly List<Vector3> _corners = new List<Vector3>();
-
-        private Seeker _seeker;
-        private bool _seekerUnavailable;
-        private bool _hasPath;
-        private int _cornerIndex;
-        private bool _pathPending;
-        private float _pathRequestedTime;
-        private float _nextRepathTime;
-        private int _pathGeneration;
-        private int _pendingPathGeneration = -1;
+        private readonly BanditPathFollower _path;
 
         private Vector3 _lastPosition;
 
@@ -373,7 +356,10 @@ namespace BanditPlugin.Navigation
         public BanditVehicleNavigator(Player self)
         {
             _self = self;
-            _onPathComplete = OnPathComplete;
+
+            // Four metres rather than the on-foot 1.5: a lorry that has to touch each corner
+            // weaves along a route a bandit walks straight down.
+            _path = new BanditPathFollower(self) { NavmeshSnapDistance = 8f, CornerArriveRadius = 4f };
             _lastPosition = self != null ? self.transform.position : Vector3.zero;
         }
 
@@ -385,11 +371,7 @@ namespace BanditPlugin.Navigation
             HasArrived = false;
             HasGivenUp = false;
             IsBlocked = false;
-            _pathGeneration++;
-            _hasPath = false;
-            _corners.Clear();
-            _cornerIndex = 0;
-            _nextRepathTime = 0f;
+            _path.Restart();
             _bannedUntil = 0f;
         }
 
@@ -432,10 +414,7 @@ namespace BanditPlugin.Navigation
         /// <summary>Drops the current route and asks for a fresh one on the next tick.</summary>
         public void ForceRepath()
         {
-            _hasPath = false;
-            _corners.Clear();
-            _cornerIndex = 0;
-            _nextRepathTime = 0f;
+            _path.DropRoute();
         }
 
         private bool IsBanned(Vector3 heading)
@@ -448,16 +427,8 @@ namespace BanditPlugin.Navigation
         {
             HasDestination = false;
             IsBlocked = false;
-            _pathGeneration++;
-            _hasPath = false;
-            _corners.Clear();
+            _path.Abandon();
             DesiredDirection = Vector3.zero;
-
-            if (_seeker != null && _pathPending)
-            {
-                _seeker.CancelCurrentPathRequest();
-                _pathPending = false;
-            }
         }
 
         public bool ConsumeArrived()
@@ -493,18 +464,9 @@ namespace BanditPlugin.Navigation
                 return;
             }
 
-            RefreshPath(position);
+            _path.Refresh(position, Destination);
 
-            Vector3 steerTarget = Destination;
-            if (_hasPath && _corners.Count > 0)
-            {
-                while (_cornerIndex < _corners.Count - 1
-                    && FlatDistance(position, _corners[_cornerIndex]) < CornerArriveRadius)
-                {
-                    _cornerIndex++;
-                }
-                steerTarget = _corners[_cornerIndex];
-            }
+            Vector3 steerTarget = _path.SteerTarget(position, Destination);
 
             Vector3 desired = Flatten(steerTarget - position);
             if (desired.sqrMagnitude < 0.0001f)
@@ -652,129 +614,6 @@ namespace BanditPlugin.Navigation
 
             float climb = groundAhead.y - groundHere.y;
             return Mathf.Atan2(climb, run) * Mathf.Rad2Deg <= MaxClimbDegrees;
-        }
-
-        private void RefreshPath(Vector3 position)
-        {
-            if (_pathPending)
-            {
-                if (Time.time - _pathRequestedTime > 5f)
-                {
-                    _pathPending = false;
-                }
-                return;
-            }
-
-            if (Time.time < _nextRepathTime)
-            {
-                return;
-            }
-            _nextRepathTime = Time.time + RepathIntervalSeconds;
-
-            if (AstarPath.active == null || AstarPath.active.isScanning)
-            {
-                _hasPath = false;
-                return;
-            }
-
-            if (!TrySnapToNavmesh(position, out Vector3 start) || !TrySnapToNavmesh(Destination, out Vector3 end))
-            {
-                _hasPath = false;
-                _corners.Clear();
-                return;
-            }
-
-            if (!EnsureSeeker())
-            {
-                _hasPath = false;
-                return;
-            }
-
-            _pathPending = true;
-            _pathRequestedTime = Time.time;
-            _pendingPathGeneration = _pathGeneration;
-            _seeker.StartPath(ABPath.Construct(start, end), _onPathComplete);
-        }
-
-        private void OnPathComplete(Path path)
-        {
-            _pathPending = false;
-
-            if (_pendingPathGeneration != _pathGeneration)
-            {
-                return;
-            }
-
-            _corners.Clear();
-            _cornerIndex = 0;
-
-            if (path == null || path.error || path.vectorPath == null || path.vectorPath.Count == 0)
-            {
-                _hasPath = false;
-                return;
-            }
-
-            for (int i = 0; i < path.vectorPath.Count; i++)
-            {
-                _corners.Add(path.vectorPath[i]);
-            }
-            _hasPath = true;
-        }
-
-        /// <summary>
-        /// Borrows the Seeker the on-foot navigator puts on the bandit. They never run at once - a
-        /// seated bandit's brain is not ticked - so one path request is in flight at a time.
-        /// </summary>
-        private bool EnsureSeeker()
-        {
-            if (_seeker != null)
-            {
-                return true;
-            }
-            if (_seekerUnavailable || _self == null)
-            {
-                return false;
-            }
-
-            GameObject gameObject = _self.gameObject;
-            _seeker = gameObject.GetComponent<Seeker>();
-            if (_seeker == null)
-            {
-                _seeker = gameObject.AddComponent<Seeker>();
-                _seeker.drawGizmos = false;
-                gameObject.AddComponent<FunnelModifier>();
-            }
-
-            _seekerUnavailable = _seeker == null;
-            return _seeker != null;
-        }
-
-        private bool TrySnapToNavmesh(Vector3 point, out Vector3 snapped)
-        {
-            snapped = point;
-
-            NNInfo info = AstarPath.active.GetNearest(point, NNConstraint.Walkable);
-            if (info.node == null)
-            {
-                return false;
-            }
-
-            snapped = info.position;
-            return FlatDistance(snapped, point) <= NavmeshSnapDistance
-                && Mathf.Abs(snapped.y - point.y) <= NavmeshSnapDistance + 2f;
-        }
-
-        private static Vector3 Flatten(Vector3 v)
-        {
-            v.y = 0f;
-            return v;
-        }
-
-        private static float FlatDistance(Vector3 a, Vector3 b)
-        {
-            a.y = 0f;
-            b.y = 0f;
-            return (a - b).magnitude;
         }
     }
 }

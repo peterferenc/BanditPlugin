@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using BanditPlugin.Navigation;
 using SDG.Unturned;
 using UnityEngine;
+using static BanditPlugin.BanditGeometry;
 
 namespace BanditPlugin.FakePlayer
 {
@@ -210,6 +211,22 @@ namespace BanditPlugin.FakePlayer
         /// bandit gets out. Harmless in a seat with no turret - the bandit just turns its head.
         /// </summary>
         public bool TrackNearestPlayer { get; set; }
+
+        /// <summary>
+        /// Scales the speed this vehicle drives at, between crawling and its usual cruise. One is
+        /// normal and is what everything that does not set it gets.
+        ///
+        /// It exists for the two things a convoy has to do that a single vehicle never did: hold
+        /// its interval behind the vehicle in front, and keep rolling while it fights instead of
+        /// either stopping dead or driving off and leaving its infantry behind. Scaling the speed
+        /// is the whole of it - the heading, the clearance sweep and the validation clamps are
+        /// unchanged, so a slowed vehicle drives exactly as it otherwise would, just slower.
+        ///
+        /// Zero is a legitimate value and means "stay put with the engine running", which is not
+        /// the same as <see cref="StopDriving"/>: the destination survives, so it moves off again
+        /// the moment the scale comes back up.
+        /// </summary>
+        public float SpeedScale { get; set; } = 1f;
 
         /// <summary>Where the bandit is driving to, if anywhere.</summary>
         public bool HasDestination => _navigator.HasDestination;
@@ -641,7 +658,7 @@ namespace BanditPlugin.FakePlayer
                 // Slow into the turn and stop altogether once the heading is behind it, so the
                 // vehicle comes round onto it before committing rather than driving a long arc
                 // through whatever the sweep was avoiding.
-                float cruise = reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle);
+                float cruise = (reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle)) * Mathf.Clamp01(SpeedScale);
                 targetSpeed = cruise * Mathf.Clamp01(1f - headingError / StopAndTurnDegrees);
             }
 
@@ -963,9 +980,7 @@ namespace BanditPlugin.FakePlayer
             Passenger seat = _self.movement.getVehicleSeat();
             Quaternion frame = ResolveAimFrame(vehicle, seat);
 
-            Vector3 origin = _self.look != null && _self.look.aim != null
-                ? _self.look.aim.position
-                : _self.transform.position + Vector3.up * 1.5f;
+            Vector3 origin = EyeOf(_self);
 
             Vector3 toTarget = AimPointOf(target) - origin;
             if (toTarget.sqrMagnitude < 0.0001f)
@@ -1171,9 +1186,7 @@ namespace BanditPlugin.FakePlayer
             // armour before it has gone anywhere.
             origin = seat.turretAim != null
                 ? seat.turretAim.position
-                : (_self.look != null && _self.look.aim != null
-                    ? _self.look.aim.position
-                    : _self.transform.position + Vector3.up * 1.5f);
+                : EyeOf(_self);
 
             // The same frame the angles were solved in, so the traced shot is the one the barrel is
             // actually pointing along. See ResolveAimFrame.
@@ -1579,17 +1592,6 @@ namespace BanditPlugin.FakePlayer
             }
 
             return nearest;
-        }
-
-        /// <summary>The chest, taken as a fraction of the way from a player's feet to their eyes, so
-        /// it follows their stance the same way the on-foot aim point does.</summary>
-        private static Vector3 AimPointOf(Player player)
-        {
-            Vector3 eye = player.look != null && player.look.aim != null
-                ? player.look.aim.position
-                : player.transform.position + Vector3.up * 1.75f;
-
-            return Vector3.Lerp(player.transform.position, eye, 0.7f);
         }
 
         private static string DescribeVehicle(InteractableVehicle vehicle)
