@@ -144,11 +144,15 @@ namespace BanditPlugin.Commands
             Player player = ((UnturnedPlayer)caller).Player;
 
             args = ExtractUseRoads(args, out bool useRoads);
+            args = ExtractCount(args, "vehicles", out int? vehicleLimit);
+            args = ExtractCount(args, "crew", out int? crewLimit);
 
             if (args.Length == 0 || !float.TryParse(args[0], out float budget) || budget <= 0f)
             {
-                UnturnedChat.Say(caller, "Usage: /banditevent convoy <cost> [useRoads:false] "
-                    + "[team:<team>] [seed:<n>].", Color.yellow);
+                UnturnedChat.Say(caller, "Usage: /banditevent convoy <cost> [vehicles:<n>] [crew:<n>] "
+                    + "[useRoads:false] [team:<team>] [seed:<n>].", Color.yellow);
+                UnturnedChat.Say(caller, "vehicles:1 crew:1 is the one-vehicle, one-bandit convoy - "
+                    + "the shape to test a route with, since nothing is following anything.", Color.grey);
                 UnturnedChat.Say(caller, "The route comes from /banditevent wp - the column spawns at "
                     + "the first waypoint and drives through the rest.", Color.grey);
                 return;
@@ -181,8 +185,11 @@ namespace BanditPlugin.Commands
             }
 
             int seed = requestedSeed ?? Environment.TickCount;
-            BanditEventPlan plan = BanditEventDraw.DrawConvoy(config, budget, seed, banditCap,
-                config.ConvoyVehicleCap);
+            int vehicleCap = vehicleLimit.HasValue
+                ? Mathf.Clamp(vehicleLimit.Value, 1, config.ConvoyVehicleCap)
+                : config.ConvoyVehicleCap;
+
+            BanditEventPlan plan = BanditEventDraw.DrawConvoy(config, budget, seed, banditCap, vehicleCap);
 
             if (plan.Vehicles.Count == 0)
             {
@@ -194,7 +201,7 @@ namespace BanditPlugin.Commands
                 return;
             }
 
-            Spawn(caller, config, player, plan, team, route, useRoads, seed);
+            Spawn(caller, config, player, plan, team, route, useRoads, seed, crewLimit ?? int.MaxValue);
         }
 
         /// <summary>
@@ -207,7 +214,8 @@ namespace BanditPlugin.Commands
         /// driving through each other while they do.
         /// </summary>
         private static void Spawn(IRocketPlayer caller, BanditConfiguration config, Player player,
-            BanditEventPlan plan, BanditTeam team, IReadOnlyList<Vector3> route, bool useRoads, int seed)
+            BanditEventPlan plan, BanditTeam team, IReadOnlyList<Vector3> route, bool useRoads, int seed,
+            int crewLimit)
         {
             Vector3 start = route[0];
 
@@ -251,7 +259,8 @@ namespace BanditPlugin.Commands
                 };
 
                 int before = banditEvent.Rides.Count;
-                CommandBanditEvent.SpawnRide(config, banditEvent, team, placed, plan.Vehicles[i], slot);
+                CommandBanditEvent.SpawnRide(config, banditEvent, team, placed, plan.Vehicles[i], slot,
+                    crewLimit);
 
                 for (int added = before; added < banditEvent.Rides.Count; added++)
                 {
@@ -302,6 +311,43 @@ namespace BanditPlugin.Commands
         /// Off is worth having: it is how you find out whether a convoy that took a strange line was
         /// routed badly or driven badly.
         /// </summary>
+        /// <summary>
+        /// Pulls "&lt;name&gt;:&lt;number&gt;" out of the words, wherever it sits.
+        ///
+        /// Both of the two that use it exist for testing rather than for play. A convoy is a column,
+        /// and a column is several things happening at once - routing, interval keeping, contact,
+        /// remounting - so when one of them is wrong the first useful question is which. "vehicles:1
+        /// crew:1" answers it by taking the other three away: one vehicle with nobody in it but the
+        /// driver is a route being driven and nothing else.
+        /// </summary>
+        private static string[] ExtractCount(string[] args, string name, out int? count)
+        {
+            count = null;
+
+            if (args == null || args.Length == 0)
+            {
+                return args ?? new string[0];
+            }
+
+            List<string> remaining = new List<string>(args.Length);
+
+            foreach (string word in args)
+            {
+                if (word != null && word.Length > name.Length + 1
+                    && word.StartsWith(name, StringComparison.OrdinalIgnoreCase)
+                    && (word[name.Length] == ':' || word[name.Length] == '=')
+                    && int.TryParse(word.Substring(name.Length + 1), out int value))
+                {
+                    count = Mathf.Max(1, value);
+                    continue;
+                }
+
+                remaining.Add(word);
+            }
+
+            return remaining.ToArray();
+        }
+
         private static string[] ExtractUseRoads(string[] args, out bool useRoads)
         {
             useRoads = true;

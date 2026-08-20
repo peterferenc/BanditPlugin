@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using SDG.Framework.Water;
 using SDG.Unturned;
 using UnityEngine;
 using Logger = Rocket.Core.Logging.Logger;
@@ -27,7 +28,9 @@ namespace BanditPlugin.Navigation
     /// What the game does *not* provide is any notion of a road network. Roads are independent
     /// splines with no connectivity, no junctions and no lane data - where two of them cross is
     /// implicit geometry and nothing more. So junctions are recovered here, by linking samples from
-    /// different roads that are close enough to be the same piece of tarmac.
+    /// different roads that are close enough to be the same piece of tarmac - and then the gaps
+    /// between what that leaves are bridged, because on a real map it leaves a dozen disconnected
+    /// islands of road and A* between two of them simply fails. See <see cref="BridgeGaps"/>.
     ///
     /// Nothing in here steers. It answers "which way round the road network" and hands back a list
     /// of points; <see cref="BanditVehicleNavigator"/> still does the driving, including every
@@ -56,6 +59,27 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private const float MinJunctionRadiusMetres = 3f;
         private const float MaxJunctionRadiusMetres = 14f;
+
+        /// <summary>
+        /// How long a stretch of missing road may be before it is treated as two separate networks
+        /// rather than one with a hole in it. See <see cref="BridgeGaps"/>.
+        ///
+        /// Two hundred and fifty metres sounds enormous for a "gap" and is not: PEI's two halves are
+        /// one hundred and sixty-seven metres apart at the closest point their splines come to each
+        /// other, and every convoy crossing the island depends on that crossing. The figure that
+        /// keeps this honest is not the distance, it is the ground test each crossing has to pass.
+        /// </summary>
+        private const float MaxGapMetres = 250f;
+
+        /// <summary>How often the ground under a candidate gap is checked, and what counts as
+        /// crossable ground when it is.</summary>
+        private const float GapSampleSpacingMetres = 8f;
+        private const float MaxFordDepthMetres = 1f;
+        private const float MaxGapClimbDegrees = 30f;
+
+        /// <summary>How far above the terrain to look for road decking when testing a gap. Tall
+        /// enough to find a bridge over a cutting, short enough not to find the next hill.</summary>
+        private const float BridgeProbeHeightMetres = 30f;
 
         /// <summary>
         /// Cell size of the spatial hash used for nearest-node queries and junction detection.
@@ -113,8 +137,43 @@ namespace BanditPlugin.Navigation
             public readonly List<int> Links = new List<int>();
         }
 
+        /// <summary>One crossing of a gap in the road network, kept so /banditroads can report what
+        /// the router had to invent to make the map connected.</summary>
+        public struct GapCandidate
+        {
+            public int From;
+            public int To;
+            public float Distance;
+        }
+
         private static readonly List<RoadNode> Nodes = new List<RoadNode>();
         private static readonly Dictionary<long, List<int>> Grid = new Dictionary<long, List<int>>();
+        private static readonly List<GapCandidate> Gaps = new List<GapCandidate>();
+
+        /// <summary>The gaps between roads this graph had to bridge to be routable.</summary>
+        public static IReadOnlyList<GapCandidate> BridgedGaps
+        {
+            get
+            {
+                EnsureBuilt();
+                return Gaps;
+            }
+        }
+
+        /// <summary>Whether these two nodes are joined by a bridged gap rather than by road. What
+        /// /banditroads uses to say how much of a route is not actually on tarmac.</summary>
+        public static bool IsBridgedGap(int a, int b)
+        {
+            foreach (GapCandidate gap in Gaps)
+            {
+                if ((gap.From == a && gap.To == b) || (gap.From == b && gap.To == a))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
 
         /// <summary>The map the graph was built for, so it rebuilds itself when the level changes.</summary>
         private static string _builtMap;
@@ -222,6 +281,7 @@ namespace BanditPlugin.Navigation
 
             BuildGrid();
             LinkJunctions();
+            BridgeGaps();
 
             _gScore = new float[Nodes.Count];
             _cameFrom = new int[Nodes.Count];
@@ -498,14 +558,275 @@ namespace BanditPlugin.Navigation
             Logger.Log($"[Bandit] Road graph junctions: {links} link(s) between roads.");
         }
 
+        /// <summary>
+        /// Joins the road network back together across the gaps the map maker left in it.
+        ///
+        /// This is not a refinement, it is the difference between routing and not routing. A map's
+        /// roads are drawn as separate splines and there is nothing in the editor that makes one
+        /// end *at* another: PEI's twenty-three roads touch closely enough to be linked as junctions
+        /// in only twenty places, which leaves fourteen disconnected islands of road. A* between two
+        /// of them cannot fail gracefully - there is no route - so every convoy whose two ends
+        /// happened to sit on different islands fell back to driving the straight line, which is
+        /// exactly the symptom this was reported as.
+        ///
+        /// The gaps are real ground, not missing data: the tarmac genuinely stops and the next
+        /// stretch starts a hundred metres later, with drivable land in between. So they are linked
+        /// - but only after the ground between them has been checked, because the other thing on the
+        /// far side of a gap in a coastal map's road network is a bay, and a convoy cheerfully
+        /// routed across one would drive into the sea.
+        ///
+        /// Kruskal rather than "link everything close enough": one crossing per pair of islands is
+        /// what a missing stretch of road is, and the shortest is the right one. Anything more just
+        /// puts the router's own shortcuts into a network that is supposed to describe roads.
+        /// </summary>
+        private static void BridgeGaps()
+        {
+            Gaps.Clear();
+
+            if (Nodes.Count < 2)
+            {
+                return;
+            }
+
+            int[] parent = new int[Nodes.Count];
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                parent[i] = i;
+            }
+
+            // Seed the components from the links already made - along each road, and at every
+            // junction found above.
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                foreach (int link in Nodes[i].Links)
+                {
+                    Union(parent, i, link);
+                }
+            }
+
+            List<GapCandidate> candidates = new List<GapCandidate>();
+            List<int> nearby = new List<int>();
+
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                // Loose ends only. A gap in the network is where a spline stops, and starting from
+                // every node instead would offer the router a shortcut off the side of every road
+                // it passes - which is not a road, and not what this is for.
+                if (Nodes[i].Links.Count > 1)
+                {
+                    continue;
+                }
+
+                GatherCandidates(i, parent, nearby, candidates);
+            }
+
+            candidates.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+
+            int bridged = 0;
+
+            // Both ends of a gap are loose ends, so each one is usually proposed twice - once from
+            // either side. Remembering the refusals keeps the ground test, which raycasts, from
+            // being run twice on the same stretch and reported twice in the log.
+            HashSet<long> refused = new HashSet<long>();
+
+            foreach (GapCandidate candidate in candidates)
+            {
+                if (Find(parent, candidate.From) == Find(parent, candidate.To))
+                {
+                    continue; // these two are already joined, by road or by a shorter gap
+                }
+
+                long pair = candidate.From < candidate.To
+                    ? ((long)candidate.From << 32) | (uint)candidate.To
+                    : ((long)candidate.To << 32) | (uint)candidate.From;
+
+                if (refused.Contains(pair))
+                {
+                    continue;
+                }
+
+                if (!IsGapDrivable(Nodes[candidate.From].Position, Nodes[candidate.To].Position, out string reason))
+                {
+                    refused.Add(pair);
+                    Logger.Log($"[Bandit] Road gap of {candidate.Distance:0}m at "
+                        + $"({Nodes[candidate.From].Position.x:0}, {Nodes[candidate.From].Position.z:0}) "
+                        + $"left open: {reason}.");
+                    continue;
+                }
+
+                Link(candidate.From, candidate.To);
+                Union(parent, candidate.From, candidate.To);
+                Gaps.Add(candidate);
+                bridged++;
+            }
+
+            int components = 0;
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                if (Find(parent, i) == i)
+                {
+                    components++;
+                }
+            }
+
+            Logger.Log($"[Bandit] Road graph gaps: {bridged} bridged, {refused.Count} left open, "
+                + $"{components} unconnected piece(s) of network remaining.");
+        }
+
+        /// <summary>
+        /// Every node worth considering as the far side of a gap from this loose end: the nearest
+        /// node of each other road within reach that is not already connected to it.
+        ///
+        /// One per road rather than one overall, because the nearest road is not always the one
+        /// that reconnects the network - a lay-by three metres away is closer than the highway the
+        /// route actually needs, and Kruskal can only choose between candidates it was given.
+        /// </summary>
+        private static void GatherCandidates(int from, int[] parent, List<int> nearby, List<GapCandidate> into)
+        {
+            nearby.Clear();
+            GatherCells(Nodes[from].Position, nearby, MaxGapMetres);
+
+            RoadNode node = Nodes[from];
+            int component = Find(parent, from);
+            Dictionary<int, GapCandidate> bestPerRoad = new Dictionary<int, GapCandidate>();
+
+            foreach (int other in nearby)
+            {
+                if (other == from || Nodes[other].RoadIndex == node.RoadIndex)
+                {
+                    continue;
+                }
+
+                if (Find(parent, other) == component)
+                {
+                    continue; // already reachable, so this would be a shortcut and not a repair
+                }
+
+                float distance = Vector3.Distance(node.Position, Nodes[other].Position);
+                if (distance > MaxGapMetres)
+                {
+                    continue;
+                }
+
+                if (!bestPerRoad.TryGetValue(Nodes[other].RoadIndex, out GapCandidate best)
+                    || distance < best.Distance)
+                {
+                    bestPerRoad[Nodes[other].RoadIndex] = new GapCandidate
+                    {
+                        From = from,
+                        To = other,
+                        Distance = distance
+                    };
+                }
+            }
+
+            foreach (KeyValuePair<int, GapCandidate> entry in bestPerRoad)
+            {
+                into.Add(entry.Value);
+            }
+        }
+
+        /// <summary>
+        /// Whether a vehicle could actually cross the ground between two road ends.
+        ///
+        /// Two things disqualify it, and the first is the one that matters: water. A gap in a
+        /// coastal map's road network is as likely to be a bay as a missing stretch of tarmac, and
+        /// there is no way to tell them apart from the spline data alone - both are simply two road
+        /// ends with nothing between them. A shallow ford is allowed, because a stream crossing is
+        /// a place vehicles do drive.
+        ///
+        /// The surface is the terrain, or road decking above it where there is any: a bridge in this
+        /// engine is a road whose joints are flagged ignoreTerrain, so its deck is a road mesh on
+        /// the ENVIRONMENT layer. Objects are deliberately not probed - a gap that happens to pass
+        /// over a warehouse roof is not a road.
+        /// </summary>
+        private static bool IsGapDrivable(Vector3 from, Vector3 to, out string reason)
+        {
+            float distance = Vector3.Distance(from, to);
+            int steps = Mathf.Max(1, Mathf.CeilToInt(distance / GapSampleSpacingMetres));
+            float run = distance / steps;
+
+            float previous = GapSurfaceHeight(from);
+
+            for (int step = 1; step <= steps; step++)
+            {
+                Vector3 point = Vector3.Lerp(from, to, (float)step / steps);
+                float height = GapSurfaceHeight(point);
+
+                // A metre of water is a ford; more than that is somewhere a wheeled vehicle sinks.
+                if (WaterUtility.isPointUnderwater(new Vector3(point.x, height + MaxFordDepthMetres, point.z)))
+                {
+                    reason = $"{MaxFordDepthMetres:0.0}m of water {step * run:0}m along it";
+                    return false;
+                }
+
+                if (run > 0.01f && Mathf.Abs(Mathf.Atan2(height - previous, run) * Mathf.Rad2Deg) > MaxGapClimbDegrees)
+                {
+                    reason = $"ground steeper than {MaxGapClimbDegrees:0} degrees {step * run:0}m along it";
+                    return false;
+                }
+
+                previous = height;
+            }
+
+            reason = null;
+            return true;
+        }
+
+        /// <summary>The drivable surface at a point: the terrain, or the road deck over it.</summary>
+        private static float GapSurfaceHeight(Vector3 point)
+        {
+            float terrain = LevelGround.getHeight(point);
+
+            // Road meshes are the only thing in the whole of Assembly-CSharp on the ENVIRONMENT
+            // layer, so this ray answers "is there a bridge here?" and nothing else.
+            Ray ray = new Ray(new Vector3(point.x, terrain + BridgeProbeHeightMetres, point.z), Vector3.down);
+            if (Physics.Raycast(ray, out RaycastHit hit, BridgeProbeHeightMetres * 2f,
+                    RayMasks.ENVIRONMENT, QueryTriggerInteraction.Ignore)
+                && hit.point.y > terrain)
+            {
+                return hit.point.y;
+            }
+
+            return terrain;
+        }
+
+        private static int Find(int[] parent, int node)
+        {
+            while (parent[node] != node)
+            {
+                parent[node] = parent[parent[node]]; // halve the path on the way up
+                node = parent[node];
+            }
+
+            return node;
+        }
+
+        private static void Union(int[] parent, int a, int b)
+        {
+            int rootA = Find(parent, a);
+            int rootB = Find(parent, b);
+
+            if (rootA != rootB)
+            {
+                parent[rootB] = rootA;
+            }
+        }
+
         private static void GatherCells(Vector3 position, List<int> into)
+        {
+            GatherCells(position, into, GridCellMetres);
+        }
+
+        private static void GatherCells(Vector3 position, List<int> into, float radius)
         {
             int cx = Mathf.FloorToInt(position.x / GridCellMetres);
             int cz = Mathf.FloorToInt(position.z / GridCellMetres);
+            int rings = Mathf.Max(1, Mathf.CeilToInt(radius / GridCellMetres));
 
-            for (int dx = -1; dx <= 1; dx++)
+            for (int dx = -rings; dx <= rings; dx++)
             {
-                for (int dz = -1; dz <= 1; dz++)
+                for (int dz = -rings; dz <= rings; dz++)
                 {
                     long key = ((long)(cx + dx) << 32) ^ (uint)(cz + dz);
                     if (Grid.TryGetValue(key, out List<int> cell))

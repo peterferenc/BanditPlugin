@@ -510,6 +510,12 @@ namespace BanditPlugin.FakePlayer
 
             UpdateSuppression();
 
+            // The pose in a driving packet that has not been read yet is kept current every frame
+            // rather than left at whatever it was when the packet was built. See
+            // BanditVehicleDriver.RefreshPendingPose - under physics driving the vehicle keeps
+            // moving between packets, and a pose eighty milliseconds old is a metre behind it.
+            Driver?.RefreshPendingPose();
+
             // Feed packets at the same rate a real client sends them. PlayerInput self-regulates if
             // we run slightly fast, but there's no reason to let the queue grow.
             _packetAccumulator += Time.deltaTime;

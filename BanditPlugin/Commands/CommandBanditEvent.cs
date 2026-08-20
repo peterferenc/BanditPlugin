@@ -221,7 +221,7 @@ namespace BanditPlugin.Commands
         /// outcome.
         /// </summary>
         internal static void SpawnRide(BanditConfiguration config, BanditEvent banditEvent, BanditTeam team,
-            BanditPlacement.Result placed, BanditVehicleType type, Vector3 spot)
+            BanditPlacement.Result placed, BanditVehicleType type, Vector3 spot, int crewLimit = int.MaxValue)
         {
             InteractableVehicle vehicle = BanditVehicleSpawner.Spawn(type.Vehicle, spot, placed.Facing,
                 out string vehicleError);
@@ -257,7 +257,9 @@ namespace BanditPlugin.Commands
             List<BanditVehicleSeat> crew = type.Crew ?? new List<BanditVehicleSeat>();
             string turretSeats = BanditVehicleSpawner.DescribeTurretSeats(vehicle.asset);
 
-            for (int i = 0; i < crew.Count; i++)
+            // Seats are filled in the order they are configured, and seat 0 - the driver - is
+            // first, so a limit of one is a vehicle with nobody in it but the man driving it.
+            for (int i = 0; i < crew.Count && i < crewLimit; i++)
             {
                 BanditVehicleSeat seat = crew[i];
                 BanditKit kit = seat != null ? config.FindKit(seat.Kit) : null;

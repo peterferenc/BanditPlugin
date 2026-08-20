@@ -70,6 +70,36 @@ namespace BanditPlugin.FakePlayer
         /// push a step over the line and start a recovery.</summary>
         private const float ValidationSafetyFactor = 0.85f;
 
+        /// <summary>
+        /// How much higher than the ground it is on a vehicle may find itself standing after one
+        /// step: whatever a 35 degree climb gives over the distance travelled, plus a kerb.
+        /// See <see cref="IsSurfaceReachable"/>. The tangent matches the navigator's own
+        /// MaxClimbDegrees, so the drive step and the test that approved it agree about what a hill
+        /// is.
+        /// </summary>
+        private const float MaxClimbTangent = 0.7f;
+        private const float MaxStepUpMetres = 1f;
+
+        /// <summary>
+        /// Heading error at which the steering is on full lock, under physics driving.
+        ///
+        /// Deliberately small. A real driver corrects hard and early; easing the wheel in proportion
+        /// to a wide error makes a vehicle drift wide of every corner and saw at the wheel down the
+        /// straights. The wheel code applies its own turn rate on top of this, so nothing here can
+        /// snap the steering round faster than the vehicle's SteeringAngleTurnSpeed allows.
+        /// </summary>
+        private const float FullSteeringLockDegrees = 25f;
+
+        /// <summary>How far over its speed limit a vehicle gets before it brakes rather than simply
+        /// lifting off. Coasting down covers the ordinary case; this is for arriving at the top of a
+        /// hill with gravity helping.</summary>
+        private const float OverspeedBrakeMetresPerSecond = 2f;
+
+        /// <summary>How far a measured ride height may differ from the one the body's colliders
+        /// imply before it is treated as a vehicle that is not resting on anything. Roughly the
+        /// suspension travel, which is the whole of the honest difference between the two.</summary>
+        private const float RideHeightToleranceMetres = 0.35f;
+
         /// <summary>Heading error at which the vehicle stops moving and only turns.</summary>
         private const float StopAndTurnDegrees = 120f;
 
@@ -137,6 +167,19 @@ namespace BanditPlugin.FakePlayer
         private readonly BanditBotController _controller;
         private readonly Player _self;
         private readonly BanditVehicleNavigator _navigator;
+
+        /// <summary>The vehicle's own rigidbody, under physics driving. Cached per vehicle for the
+        /// same reason the footprint is - it does not change while the bandit is sitting in it.</summary>
+        private Rigidbody _body;
+        private InteractableVehicle _bodyMeasuredFor;
+
+        /// <summary>Said once per bandit rather than once per packet.</summary>
+        private bool _warnedAboutGears;
+
+        /// <summary>The driving packet last handed to PlayerInput, kept so its pose can be held
+        /// current until the server reads it. See <see cref="RefreshPendingPose"/>.</summary>
+        private DrivingPlayerInputPacket _pendingPose;
+        private InteractableVehicle _pendingPoseVehicle;
 
         private BanditVehicleFootprint _footprint = BanditVehicleFootprint.Default;
         private InteractableVehicle _footprintMeasuredFor;
@@ -236,6 +279,23 @@ namespace BanditPlugin.FakePlayer
         /// <summary>True while the vehicle is too wide for every way round the obstacle in front of
         /// it - the "it doesn't fit" case, as opposed to being merely slow.</summary>
         public bool IsBlocked => _navigator.IsBlocked;
+
+        /// <summary>
+        /// Whether the vehicle is in the water far enough that vanilla has drowned it.
+        ///
+        /// The same test vanilla uses for its own engine cut-out, rather than a depth of our own:
+        /// whatever the map says is water and wherever the vehicle keeps its waterline, this agrees
+        /// with the game about it. A drowned vehicle is finished as a vehicle - the engine will not
+        /// restart while it is in there - so whoever is driving it should stop asking.
+        /// </summary>
+        public bool IsSubmerged
+        {
+            get
+            {
+                InteractableVehicle vehicle = Vehicle;
+                return vehicle != null && vehicle.isUnderwater;
+            }
+        }
 
         /// <summary>Latched when the drive was abandoned because the vehicle wedged. Read and
         /// cleared by whoever reports it.</summary>
@@ -370,6 +430,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             string was = IsSeated ? DescribeVehicle(Vehicle) : "a vehicle";
+            InteractableVehicle vehicleLeft = Vehicle;
 
             if (!_self.movement.forceRemoveFromVehicle())
             {
@@ -380,6 +441,13 @@ namespace BanditPlugin.FakePlayer
             TrackNearestPlayer = false;
             _navigator.Stop();
             _speed = 0f;
+
+            // Getting out is a seat change, so vanilla will call updatePhysics itself - but it does
+            // that before this returns, and the bandit is no longer here to re-assert anything.
+            // Asking again costs nothing and means the vehicle is never left in our state.
+            RestoreVanillaPhysics(vehicleLeft);
+            _bodyMeasuredFor = null;
+            _body = null;
 
             reason = was;
             return true;
@@ -421,6 +489,10 @@ namespace BanditPlugin.FakePlayer
         public void StopDriving()
         {
             _navigator.Stop();
+
+            // Under physics driving the body was deliberately left loose, so handing it back is part
+            // of stopping - otherwise a vehicle told to stop on a slope simply rolls away.
+            RestoreVanillaPhysics(Vehicle);
         }
 
         /// <summary>
@@ -498,6 +570,34 @@ namespace BanditPlugin.FakePlayer
             Quaternion rotation = vehicleTransform.rotation;
             float forwardVelocity = 0f;
 
+            // The backstop to the navigator refusing to drive into water. Nothing about the drive
+            // step notices water on its own - it snaps the vehicle onto whatever is beneath it,
+            // which under water is the seabed - so a vehicle that got in anyway, by being pushed,
+            // by spawning there, or by driving in before the refusal existed, would motor along the
+            // bottom indefinitely. Vanilla has already killed the engine by this point; this stops
+            // the bandit pretending otherwise.
+            if (IsSubmerged && _navigator.HasDestination)
+            {
+                Rocket.Core.Logging.Logger.Log($"[Bandit] {DescribeVehicle(vehicle)} is underwater - "
+                    + "stopping rather than driving along the bottom.");
+                _navigator.Stop();
+            }
+
+            if (UsePhysicsDriving(vehicle))
+            {
+                // The vehicle drives itself. All this does is work the controls and then report
+                // where the physics put it - see StepPhysically.
+                StepPhysically(vehicle, deltaTime, out forwardVelocity, out float steeringInput);
+
+                position = vehicleTransform.position;
+                rotation = vehicleTransform.rotation;
+
+                _pendingPose = BuildDrivingPacket(vehicle, frameNumber, position, rotation,
+                    forwardVelocity, steeringInput);
+                _pendingPoseVehicle = vehicle;
+                return _pendingPose;
+            }
+
             if (_navigator.HasDestination)
             {
                 SyncCommandedPose(vehicle, position, rotation);
@@ -519,6 +619,18 @@ namespace BanditPlugin.FakePlayer
                 _reversing = false;
             }
 
+            _pendingPose = null;
+            _pendingPoseVehicle = null;
+            return BuildDrivingPacket(vehicle, frameNumber, position, rotation, forwardVelocity, 0f);
+        }
+
+        /// <summary>
+        /// The packet itself, once somebody has decided what pose to report. Shared by both drive
+        /// paths, because what goes in it does not depend on which of them produced the numbers.
+        /// </summary>
+        private DrivingPlayerInputPacket BuildDrivingPacket(InteractableVehicle vehicle, uint frameNumber,
+            Vector3 position, Quaternion rotation, float forwardVelocity, float steeringInput)
+        {
             return new DrivingPlayerInputPacket(vehicle)
             {
                 position = position,
@@ -530,9 +642,13 @@ namespace BanditPlugin.FakePlayer
                 // speed is written as an *unsigned* clamped float by the packet's own serialiser, so
                 // it carries the magnitude and forwardVelocity carries the sign. Reversing therefore
                 // shows up as negative forward velocity, exactly as it does from a real client.
+                //
+                // ReplicatedForwardVelocity on the server is set from this, and the wheel code reads
+                // it back to scale steering angle and motor torque - so under physics driving these
+                // are not cosmetic any more, they are part of the loop.
                 speed = Mathf.Abs(forwardVelocity),
                 forwardVelocity = forwardVelocity,
-                steeringInput = 0f,
+                steeringInput = steeringInput,
                 velocityInput = forwardVelocity,
 
                 // A driver's look is seat-local and clamped to +/-160 degrees; zero and level is the
@@ -692,7 +808,8 @@ namespace BanditPlugin.FakePlayer
             next = new Vector3(position.x + step.x, position.y, position.z + step.z);
 
             // Sit on whatever is under the new position, within the vertical speed the server allows.
-            if (VehicleTerrain.TrySample(next, vehicleTransform, out Vector3 ground, out Vector3 groundNormal))
+            if (VehicleTerrain.TrySample(next, vehicleTransform, out Vector3 ground, out Vector3 groundNormal)
+                && IsSurfaceReachable(ground, position, step.magnitude))
             {
                 float maxRise = vehicle.asset.validSpeedUp * deltaTime * ValidationSafetyFactor;
                 float maxFall = vehicle.asset.validSpeedDown * deltaTime * ValidationSafetyFactor;
@@ -732,6 +849,381 @@ namespace BanditPlugin.FakePlayer
         /// approved is as safe to reverse along as to drive along. Only the wedged case picks its
         /// own direction, and that one is swept here.
         /// </summary>
+        /// <summary>
+        /// Whether this vehicle is driven by the engine's own physics rather than by a pose this
+        /// class works out for itself.
+        ///
+        /// Unturned gives a vehicle exactly two modes, and <see cref="InteractableVehicle.updatePhysics"/>
+        /// picks between them. With somebody in seat 0 the server makes the body kinematic and takes
+        /// the pose from the driver's packets; with the seat empty the server simulates it properly.
+        /// A real player is the first case: their client runs the wheel physics locally and reports
+        /// the result, and the server only checks the result is not absurd. Nothing about that is
+        /// the server's own work, which is why a bandit had to invent a pose - and inventing one is
+        /// what produced every complaint about how these things move. A hand-rolled kinematic step
+        /// has no rigidbody, so it floats or sinks depending on a guessed ride height, it has no
+        /// collision response, so a T-72 that clips a fire hydrant tips to whatever angle a single
+        /// ground-normal ray reports and then buries its nose in the road, and it has no engine, so
+        /// its speed is a constant somebody chose.
+        ///
+        /// So do what the real client does instead: hold the body physical even though it is
+        /// driven, work the wheels through vanilla's own wheel code, and report the pose that comes
+        /// out. Same packets, same validation, same physics - the difference is only which machine
+        /// is running it.
+        /// </summary>
+        private bool UsePhysicsDriving(InteractableVehicle vehicle)
+        {
+            if (vehicle == null || vehicle.asset == null || !PhysicsDrivingEnabled)
+            {
+                return false;
+            }
+
+            if (vehicle.asset.engine != EEngine.CAR)
+            {
+                return false;
+            }
+
+            // Torque for a geared vehicle is metered out by the gearbox, and the gearbox lives in a
+            // private method vanilla only runs for the client that is driving. Handing the wheels
+            // zero torque would leave it sitting there revving, so those keep the old path until
+            // there is somewhere to get the figure from.
+            if (UsesGears(vehicle.asset))
+            {
+                if (!_warnedAboutGears)
+                {
+                    _warnedAboutGears = true;
+                    Rocket.Core.Logging.Logger.Log($"[Bandit] {DescribeVehicle(vehicle)} uses engine RPM "
+                        + "and gears, so it is driven by the older kinematic step.");
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Keeps the pose in a packet that has not been read yet up to date with where the vehicle
+        /// actually is.
+        ///
+        /// This matters only under physics driving, and it matters a lot. Packets go into
+        /// PlayerInput's own queue and are read out on the server's schedule, up to a packet
+        /// interval later - and the server applies the pose it finds with Rigidbody.MovePosition.
+        /// Against a kinematic body, which is what a real player's vehicle is on the server, a
+        /// slightly stale pose is harmless. Against a live one it is a correction backwards to
+        /// where the vehicle was eighty milliseconds ago, which at speed is the better part of a
+        /// metre, applied several times a second, fighting the physics that moved it.
+        ///
+        /// The packet is a reference we still hold, the queue has not touched it, and Unity is
+        /// single threaded - so the fix is simply to keep writing the current pose into it until it
+        /// is gone. Refreshing one the server has already read is harmless: nothing else refers to
+        /// it. The result is that the pose the server applies is the pose the vehicle is in, and
+        /// MovePosition becomes the no-op it should be.
+        /// </summary>
+        public void RefreshPendingPose()
+        {
+            if (_pendingPose == null)
+            {
+                return;
+            }
+
+            // Tracked alongside rather than read back off the packet, whose own vehicle field is
+            // internal to the game assembly.
+            InteractableVehicle vehicle = Vehicle;
+            if (vehicle == null || _pendingPoseVehicle != vehicle)
+            {
+                _pendingPose = null;
+                _pendingPoseVehicle = null;
+                return;
+            }
+
+            Transform vehicleTransform = vehicle.transform;
+            _pendingPose.position = vehicleTransform.position;
+            _pendingPose.rotation = vehicleTransform.rotation;
+
+            Rigidbody body = EnsureBody(vehicle);
+            if (body != null)
+            {
+                float forward = Vector3.Dot(body.velocity, vehicleTransform.forward);
+                _pendingPose.speed = Mathf.Abs(forward);
+                _pendingPose.forwardVelocity = forward;
+                _pendingPose.velocityInput = forward;
+            }
+        }
+
+        /// <summary>Whether physics driving is switched on for this server.</summary>
+        private static bool PhysicsDrivingEnabled
+        {
+            get
+            {
+                BanditPlugin plugin = BanditPlugin.Instance;
+                return plugin?.Configuration?.Instance == null
+                    || plugin.Configuration.Instance.VehiclePhysicsDriving;
+            }
+        }
+
+        /// <summary>
+        /// Whether the asset drives through a gearbox, which decides whether its wheels can be given
+        /// torque from out here.
+        ///
+        /// Read by reflection because vanilla marks the property internal and offers no public
+        /// equivalent - every public RPM field has a default and so says nothing about whether the
+        /// asset actually declared any gear ratios. Cached per asset, since it is a fact about the
+        /// asset and not about the vehicle. If the lookup ever stops working, the answer defaults to
+        /// "geared", which is the conservative direction: that vehicle keeps the older step rather
+        /// than being handed no torque and sitting there.
+        /// </summary>
+        private static bool UsesGears(VehicleAsset asset)
+        {
+            if (GearedAssets.TryGetValue(asset, out bool geared))
+            {
+                return geared;
+            }
+
+            System.Reflection.PropertyInfo property = typeof(VehicleAsset).GetProperty(
+                "UsesEngineRpmAndGears",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public
+                    | System.Reflection.BindingFlags.NonPublic);
+
+            try
+            {
+                geared = property == null || (bool)property.GetValue(asset);
+            }
+            catch (System.Exception)
+            {
+                geared = true;
+            }
+
+            GearedAssets[asset] = geared;
+            return geared;
+        }
+
+        private static readonly System.Collections.Generic.Dictionary<VehicleAsset, bool> GearedAssets =
+            new System.Collections.Generic.Dictionary<VehicleAsset, bool>();
+
+        /// <summary>
+        /// One packet's worth of driving the vehicle with its own physics: work out where the
+        /// navigator wants to go, hold the controls that way, and let Unity move it.
+        ///
+        /// Nothing here sets a position. The wheels are handed a steering and an acceleration input
+        /// exactly as a driving client hands them one, vanilla's wheel code turns those into steer
+        /// angle, motor torque and brake torque, and the physics step does the rest - suspension,
+        /// traction, the kerb it just hit, all of it. Whatever comes out is what gets reported.
+        /// </summary>
+        private void StepPhysically(InteractableVehicle vehicle, float deltaTime, out float forwardVelocity,
+            out float steeringInput)
+        {
+            EnsureFootprint(vehicle);
+            EnsurePhysical(vehicle);
+
+            Transform vehicleTransform = vehicle.transform;
+            Rigidbody body = EnsureBody(vehicle);
+
+            Vector3 velocity = body != null ? body.velocity : Vector3.zero;
+            forwardVelocity = Vector3.Dot(velocity, vehicleTransform.forward);
+
+            if (!_navigator.HasDestination)
+            {
+                // Parked. Still worked every packet, because a physical vehicle left alone on a hill
+                // rolls down it - the handbrake is the thing standing in for the kinematic freeze
+                // the engine would otherwise have applied.
+                ApplyWheelInputs(vehicle, deltaTime, 0f, 0f, brake: true);
+                steeringInput = 0f;
+                _reversing = false;
+                return;
+            }
+
+            _navigator.Tick(vehicle, _footprint, deltaTime);
+            UpdateProgress();
+
+            float yaw = vehicleTransform.eulerAngles.y;
+            Vector3 travel = ResolveTravelDirection(vehicle, yaw, out bool reverse);
+
+            if (travel.sqrMagnitude < 0.0001f)
+            {
+                ApplyWheelInputs(vehicle, deltaTime, 0f, 0f, brake: true);
+                steeringInput = 0f;
+                return;
+            }
+
+            float travelYaw = Mathf.Atan2(travel.x, travel.z) * Mathf.Rad2Deg;
+            float noseYaw = reverse ? travelYaw + 180f : travelYaw;
+            float headingError = Mathf.DeltaAngle(yaw, noseYaw);
+
+            // Full lock well before the error is large, so the vehicle actually commits to a corner
+            // rather than easing into it and running wide. Backing up steers the other way, because
+            // the wheels that turn are still at the front while the vehicle travels tail first.
+            steeringInput = Mathf.Clamp(headingError / FullSteeringLockDegrees, -1f, 1f);
+            if (reverse)
+            {
+                steeringInput = -steeringInput;
+            }
+
+            // Speed is held by lifting off rather than by writing a number, which is what makes the
+            // acceleration curve the vehicle's own. SpeedScale is the convoy's interval keeping and
+            // its crawl under contact, and it works here unchanged.
+            float limit = (reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle)) * Mathf.Clamp01(SpeedScale);
+            float along = reverse ? -forwardVelocity : forwardVelocity;
+
+            float throttle;
+            bool brake = false;
+
+            if (limit <= 0.01f)
+            {
+                // "Stay put with the engine running" - the convoy's rallying state, and a follower
+                // that has closed right up on the vehicle in front. Coasting is not staying put on
+                // a hill, so this is the brake rather than simply no throttle.
+                throttle = 0f;
+                brake = true;
+            }
+            else if (Mathf.Abs(headingError) > StopAndTurnDegrees)
+            {
+                // Pointing the wrong way entirely. Stop, and let the steering bring the nose round
+                // before any power goes down.
+                throttle = 0f;
+                brake = true;
+            }
+            else if (along > limit)
+            {
+                throttle = 0f;
+                brake = along > limit + OverspeedBrakeMetresPerSecond;
+            }
+            else
+            {
+                throttle = reverse ? -1f : 1f;
+            }
+
+            ClearSquadmatesFromPath(vehicle, vehicleTransform.position,
+                reverse ? -vehicleTransform.forward : vehicleTransform.forward, Mathf.Abs(forwardVelocity));
+
+            ApplyWheelInputs(vehicle, deltaTime, steeringInput, throttle, brake);
+
+            // Only so /banditv status reports the speed it is really doing rather than nothing.
+            _speed = Mathf.Abs(forwardVelocity);
+            _reversing = reverse;
+        }
+
+        /// <summary>
+        /// Hands the wheels their controls, through vanilla's own two-step: the first call records
+        /// the inputs the way a driving client's does, the second turns them into steer angle, motor
+        /// torque and brake torque. Both are marked obsolete only because they were never meant to
+        /// be reachable from outside the assembly; they are the live code path a real client uses
+        /// every frame.
+        /// </summary>
+        private void ApplyWheelInputs(InteractableVehicle vehicle, float deltaTime, float steering,
+            float acceleration, bool brake)
+        {
+            Wheel[] tires = vehicle.tires;
+            if (tires == null)
+            {
+                return;
+            }
+
+            foreach (Wheel tire in tires)
+            {
+                if (tire == null || tire.wheel == null || tire.IsDead)
+                {
+                    continue;
+                }
+
+#pragma warning disable 618
+                tire.simulate(steering, acceleration, brake, deltaTime);
+                tire.update(deltaTime);
+#pragma warning restore 618
+            }
+        }
+
+        /// <summary>
+        /// Keeps the body physical while a bandit is driving it.
+        ///
+        /// Vanilla froze it when the bandit sat down - that is what it does to every driven vehicle,
+        /// because normally the driver's own machine is the one simulating. Re-asserted every packet
+        /// rather than once, since <see cref="InteractableVehicle.updatePhysics"/> runs again on any
+        /// seat change and would put it back. Each assignment is guarded, so the steady state is a
+        /// handful of comparisons.
+        /// </summary>
+        private void EnsurePhysical(InteractableVehicle vehicle)
+        {
+            Rigidbody body = EnsureBody(vehicle);
+            if (body != null && body.isKinematic)
+            {
+                body.isKinematic = false;
+                body.useGravity = true;
+            }
+
+            Wheel[] tires = vehicle.tires;
+            if (tires == null)
+            {
+                return;
+            }
+
+            foreach (Wheel tire in tires)
+            {
+                if (tire != null && !tire.isPhysical && !tire.IsDead)
+                {
+                    tire.isPhysical = true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Hands the vehicle back to the engine's own idea of what its physics should be. Called
+        /// when the bandit stops driving or gets out, so a parked vehicle is frozen exactly as
+        /// vanilla would have frozen it rather than left loose on a hillside.
+        /// </summary>
+        private void RestoreVanillaPhysics(InteractableVehicle vehicle)
+        {
+            if (vehicle != null)
+            {
+                vehicle.updatePhysics();
+            }
+        }
+
+        private Rigidbody EnsureBody(InteractableVehicle vehicle)
+        {
+            if (vehicle == null)
+            {
+                return null;
+            }
+
+            if (_bodyMeasuredFor != vehicle)
+            {
+                _body = vehicle.GetComponent<Rigidbody>();
+                _bodyMeasuredFor = vehicle;
+            }
+
+            return _body;
+        }
+
+        /// <summary>
+        /// Whether the surface the ground probe found is one the wheels could actually have got up
+        /// onto over this step, as opposed to one somewhere above them.
+        ///
+        /// The probe answers "what is the first solid thing below this point", starting well above
+        /// the vehicle so that a rise it is driving into is found rather than missed. The cost of
+        /// that generosity is that the roof of a house the vehicle is passing is also "below" a
+        /// point above the house, so a vehicle clipping the footprint of a building had its own
+        /// ground snap carry it up onto the roof, a bit at a time, within the server's vertical
+        /// speed clamp the whole way. The clamp bounds the rate and never the total, which is why
+        /// it did not stop it.
+        ///
+        /// So a rise is accepted only as far as the ground could plausibly have climbed over the
+        /// distance actually travelled, plus a kerb. A roof edge is metres up in one step and fails;
+        /// a hill, a ramp and a bridge approach are all continuous with what the vehicle is already
+        /// standing on and pass. Falls are not limited here - that is gravity, and the server's own
+        /// clamp already governs how fast it may happen.
+        /// </summary>
+        private bool IsSurfaceReachable(Vector3 ground, Vector3 position, float travelled)
+        {
+            float currentSurface = position.y - _rideHeight;
+            if (ground.y <= currentSurface)
+            {
+                return true;
+            }
+
+            float allowedRise = travelled * MaxClimbTangent + MaxStepUpMetres;
+            return ground.y - currentSurface <= allowedRise;
+        }
+
         private Vector3 ResolveTravelDirection(InteractableVehicle vehicle, float yaw, out bool reverse)
         {
             reverse = false;
@@ -938,8 +1430,16 @@ namespace BanditPlugin.FakePlayer
             // TargetForwardVelocity is the same number the sqrDelta gate is derived from
             // (sqrDelta == (TargetForwardVelocity * 0.1)^2 for a car), which is what ties the cruise
             // speed below to the limit above rather than to a guess.
+            //
+            // The multiplier is the asset's own Speed_Max, because TargetForwardVelocity is that
+            // times 1.25 - so a bandit now drives an Offroader at the 12.5 m/s the Offroader is
+            // meant to do, rather than the 7.8 it was doing at half. Half was left over from not
+            // having worked the validation ceiling out: sqrt(sqrDelta) is a *per-packet* distance,
+            // so the speed the server will accept is sqrt(sqrDelta) / PlayerInput.RATE, which is
+            // TargetForwardVelocity * 1.25. Speed_Max is under two thirds of that, and the
+            // per-packet clamp in MaxHorizontalStep still has the last word either way.
             float assetSpeed = vehicle.asset != null ? vehicle.asset.TargetForwardVelocity : 0f;
-            return Mathf.Clamp(assetSpeed * 0.5f, MinCruiseMetresPerSecond, MaxCruiseMetresPerSecond);
+            return Mathf.Clamp(assetSpeed * 0.8f, MinCruiseMetresPerSecond, MaxCruiseMetresPerSecond);
         }
 
         /// <summary>
@@ -1384,8 +1884,22 @@ namespace BanditPlugin.FakePlayer
 
             if (VehicleTerrain.TrySample(vehicleTransform.position, vehicleTransform, out Vector3 ground, out Vector3 _))
             {
-                _rideHeight = Mathf.Clamp(vehicleTransform.position.y - ground.y, 0f, fromFootprint + 0.5f);
-                return;
+                float measured = vehicleTransform.position.y - ground.y;
+
+                // Believed only when it agrees with the body's own geometry, which is the fix for
+                // the floating. A vehicle is calibrated the moment it is given a destination, and
+                // for a convoy that is the tick after it spawned - and it spawns a metre and a half
+                // up so that it settles onto the ground rather than being launched out of ground it
+                // was overlapping. Measured in mid-drop, "how far above the ground am I" is the
+                // drop and not the ride height, and clamping that into range quietly handed back
+                // the top of the range every time. So the column drove the whole route half a metre
+                // in the air. Out of range now means the vehicle is not resting on anything, and
+                // the measurement is discarded in favour of the geometry.
+                if (Mathf.Abs(measured - fromFootprint) <= RideHeightToleranceMetres)
+                {
+                    _rideHeight = Mathf.Max(0f, measured);
+                    return;
+                }
             }
 
             _rideHeight = fromFootprint;

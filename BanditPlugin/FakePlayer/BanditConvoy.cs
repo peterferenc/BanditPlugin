@@ -583,6 +583,18 @@ namespace BanditPlugin.FakePlayer
                 return; // still getting aboard
             }
 
+            if (vehicleDriver.IsSubmerged)
+            {
+                // Vanilla has drowned it and the engine will not restart in there, so it is out of
+                // the column - and the column has to be told, or it waits for a vehicle that is
+                // never going to arrive. Nobody is put out: a rider ordered into deep water drowns
+                // as surely as the vehicle did.
+                Logger.Log($"[Bandit] Convoy {Id}: {ride.TypeName} is underwater - leaving it behind.");
+                vehicleDriver.StopDriving();
+                element.Finished = true;
+                return;
+            }
+
             Vector3 vehiclePosition = ride.Vehicle.transform.position;
 
             // How far along the route it is. More than one point can fall inside the advance radius

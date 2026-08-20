@@ -509,6 +509,20 @@ namespace BanditPlugin
         public int ConvoyVehicleCap = 6;
 
         /// <summary>
+        /// Whether a bandit drives with the vehicle's own physics rather than with a pose the plugin
+        /// works out for itself.
+        ///
+        /// On is what a real player does: the wheels are given steering and throttle, Unity's
+        /// physics moves the vehicle, and the bandit reports the result - so suspension, traction,
+        /// collisions and the vehicle's real acceleration all come for free, and the vehicle cannot
+        /// float, sink, or climb a wall it could not climb. Off restores the older kinematic step,
+        /// which invents the pose instead; it is kept because it is the fallback for anything the
+        /// physics path refuses, and because being able to switch is how you tell which of the two
+        /// a strange bit of driving came from.
+        /// </summary>
+        public bool VehiclePhysicsDriving = true;
+
+        /// <summary>
         /// Metres between vehicles when a convoy is spawned, and the interval they try to hold on
         /// the move.
         ///
@@ -872,6 +886,7 @@ namespace BanditPlugin
             Vehicles = BanditVehicleType.BuildDefaults();
             EventVehicleCap = 2;
             ConvoyVehicleCap = 6;
+            VehiclePhysicsDriving = true;
             ConvoySpacing = 20f;
             EventSpread = 35f;
             EventMaxBandits = 24;

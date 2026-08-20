@@ -51,6 +51,23 @@ namespace BanditPlugin.Commands
             UnturnedChat.Say(caller, $"Road graph: {BanditRoadGraph.NodeCount} node(s) on "
                 + $"{(Level.info != null ? Level.info.name : "?")}.", Color.green);
 
+            // A map's roads are separate splines that stop short of each other, so the graph has to
+            // join them up to be routable at all. Worth reporting: a route that crosses a lot of
+            // them is a route over a network the map maker never quite finished, and the long ones
+            // are the first thing to look at when a convoy takes a line across a field.
+            IReadOnlyList<BanditRoadGraph.GapCandidate> gaps = BanditRoadGraph.BridgedGaps;
+            if (gaps.Count > 0)
+            {
+                float longest = 0f;
+                foreach (BanditRoadGraph.GapCandidate gap in gaps)
+                {
+                    longest = Mathf.Max(longest, gap.Distance);
+                }
+
+                UnturnedChat.Say(caller, $"  {gaps.Count} gap(s) between roads bridged to connect it, "
+                    + $"longest {longest:0}m.", Color.white);
+            }
+
             if (!BanditRoadGraph.TryGetNearest(position, SnapDistanceMetres, out int nearest, out float distance))
             {
                 UnturnedChat.Say(caller, $"No road within {SnapDistanceMetres:0}m of you.", Color.yellow);
@@ -99,6 +116,8 @@ namespace BanditPlugin.Commands
         private static void Describe(IRocketPlayer caller, List<int> route, Vector3 from, Vector3 to)
         {
             float roadLength = 0f;
+            float gapLength = 0f;
+            int gapCount = 0;
             Dictionary<EObjectChart, float> byChart = new Dictionary<EObjectChart, float>();
 
             for (int i = 1; i < route.Count; i++)
@@ -106,6 +125,15 @@ namespace BanditPlugin.Commands
                 BanditRoadGraph.RoadNode previous = BanditRoadGraph.Get(route[i - 1]);
                 BanditRoadGraph.RoadNode node = BanditRoadGraph.Get(route[i]);
                 float step = Vector3.Distance(previous.Position, node.Position);
+
+                if (BanditRoadGraph.IsBridgedGap(route[i - 1], route[i]))
+                {
+                    // Counted apart from the road mileage: this stretch is open ground the router
+                    // believes is drivable, not a road anybody drew.
+                    gapLength += step;
+                    gapCount++;
+                    continue;
+                }
 
                 roadLength += step;
                 byChart.TryGetValue(node.Chart, out float existing);
@@ -120,6 +148,12 @@ namespace BanditPlugin.Commands
 
             UnturnedChat.Say(caller, $"Route: {route.Count} node(s), {roadLength:0}m on road "
                 + $"+ {offRoad:0}m off it, against {direct:0}m direct.", Color.green);
+
+            if (gapCount > 0)
+            {
+                UnturnedChat.Say(caller, $"  Crosses {gapCount} gap(s) between roads, {gapLength:0}m "
+                    + "of open ground in total.", Color.white);
+            }
 
             foreach (KeyValuePair<EObjectChart, float> entry in byChart)
             {

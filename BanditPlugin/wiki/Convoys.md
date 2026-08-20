@@ -24,8 +24,9 @@ road.getLengthEstimate(i)     // how long that segment is
 What the game has no notion of is a road *network*. Roads are independent splines with no
 connectivity, no junctions and no lane data - where two cross is implicit geometry and nothing more.
 `BanditRoadGraph` recovers the rest: every road sampled every 8m into linked nodes, then samples
-from *different* roads within the sum of their half-widths linked into junctions, then A* over the
-result. Sampling walks segment by segment rather than over the whole spline, because `t` is not arc
+from *different* roads within the sum of their half-widths linked into junctions, then the gaps
+between what that leaves bridged, then A* over the result. Sampling walks segment by segment rather
+than over the whole spline, because `t` is not arc
 length - `getPosition(t)` divides it evenly between joints, so a long straight and a tight bend get
 the same share of it, which is also why vanilla's own `updateSamples` walks segments.
 
@@ -42,6 +43,40 @@ Three things that are easy to get wrong here, and all of them silent:
 - **Train tracks are roads too.** They are ordinary `Road`s with an entry in the level's
   `configData.Trains`, and their samples look exactly like a highway's. They are excluded, because
   routing a lorry down a railway looks precisely as wrong as it sounds.
+
+### The gaps are the whole game
+
+Junction detection alone does not produce a connected map, and the shortfall is not marginal. PEI's
+twenty-three roads come to 780 nodes and exactly **twenty** junction links, which leaves **fourteen
+disconnected islands of road**. A\* between two of them cannot degrade gracefully - there is no
+route - so `TryRoute` failed and the leg was driven as a straight line. That is the whole of the
+"convoy ignores the roads" bug: the routing never ran.
+
+The gaps are real ground rather than missing data. A map maker draws each road as its own spline and
+nothing in the editor makes one end *at* another, so the tarmac genuinely stops and the next stretch
+starts a hundred metres later with drivable land in between. PEI's two halves are 167m apart at the
+closest point their splines approach each other, and every convoy crossing the island needs that
+crossing.
+
+So `BridgeGaps` links them, Kruskal over the loose ends - a node with one neighbour is where a
+spline stops - shortest crossing first, one per pair of islands. One crossing, because a missing
+stretch of road is one road; anything more just adds the router's own shortcuts to a network that is
+supposed to describe roads.
+
+What keeps that honest is not the distance limit, it is the ground test every crossing has to pass.
+The other thing on the far side of a gap in a coastal map's road network is **a bay**, and the
+spline data cannot tell the two apart - both are two road ends with nothing between them. So the
+line is sampled every 8m and rejected if it crosses more than a metre of water (a ford is somewhere
+vehicles do drive) or ground steeper than 30 degrees. The surface it tests is the terrain, or road
+decking above it: a bridge here is a road whose joints are flagged `ignoreTerrain`, so its deck is a
+road mesh on the ENVIRONMENT layer. Objects are deliberately not probed - a gap that happens to pass
+over a warehouse roof is not a road.
+
+On PEI that bridges eleven gaps and refuses five, four of them across water and one up a cliff, and
+takes the network from fourteen pieces to three. The route the convoy could not plan at all comes
+out as 1501m along the network - of which 170m is open ground - against the 846m straight line it
+used to drive instead. `/banditroads` reports both halves: how many gaps the map needed to be
+routable, and how much of a given route crosses them.
 
 Road classification comes free: the same width-and-surface test the game uses to draw the map chart
 sorts roads into highway, road, street and path, and each costs a little more per metre than the
@@ -72,6 +107,24 @@ Two things sit on top of that:
   and resets the stall tracking, so re-issuing every tick would mean the navigator could never
   detect being stuck. Since the target only advances when the vehicle has got closer, a genuinely
   stuck vehicle stops advancing and its stall detection fires normally.
+
+### Water is not ground
+
+Nothing in the drive step notices water. It snaps the vehicle onto whatever is beneath it, and
+beneath water that is the seabed - so a convoy that reached the coast drove into the sea and kept
+going along the bottom of it. The ground sample is not wrong, it is answering a different question.
+
+So the climb test answers this one too: the surface a step ahead is refused if it is under more than
+a metre of water, using the map's own water volumes rather than a sea level of ours, which is what
+makes a lake above sea level work as well as the sea does. A bridge deck is above the water and on
+the ground mask, so crossing one is unaffected.
+
+Behind that sits a backstop, because a vehicle can be in the water without having driven there -
+pushed, spawned badly, or already in it when the refusal came along. `IsSubmerged` is vanilla's own
+`isUnderwater`, the same test it uses to cut the engine, and a driver that finds itself submerged
+stops rather than motoring along the bottom. The convoy drops that vehicle from the column: nobody
+is put out of it, since a rider ordered into deep water drowns as surely as the vehicle did, and a
+column that waits for it never moves again.
 
 Each vehicle picks its own lane through a road point: over to the right if half the carriageway can
 hold its width plus a margin, down the middle if it cannot. That is measured against the footprint

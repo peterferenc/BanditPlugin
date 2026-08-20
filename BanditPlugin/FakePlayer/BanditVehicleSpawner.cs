@@ -67,7 +67,13 @@ namespace BanditPlugin.FakePlayer
                 VehicleAsset byId = Assets.find(EAssetType.VEHICLE, legacyId) as VehicleAsset;
                 if (byId == null)
                 {
-                    error = $"no vehicle with legacy ID {legacyId} is loaded on this map";
+                    // Worth being specific, because the usual cause is not a typo. Vanilla has been
+                    // moving its own content off legacy IDs, and the ones it has moved have no ID
+                    // line in the .dat at all - the Ural, the Offroader and the Tank among them - so
+                    // a number that was correct for years now finds nothing. Workshop content, which
+                    // still numbers itself, keeps working, which is what makes it look selective.
+                    error = $"no vehicle with legacy ID {legacyId} is loaded on this map "
+                        + "(current vanilla content is addressed by GUID or name, not by number)";
                     return null;
                 }
 
@@ -78,7 +84,16 @@ namespace BanditPlugin.FakePlayer
             string cleaned = trimmed.Replace("-", string.Empty).Replace("{", string.Empty).Replace("}", string.Empty);
             if (!Guid.TryParse(cleaned, out Guid guid))
             {
-                error = $"'{vehicle}' is neither a legacy vehicle ID nor a GUID";
+                // Not a number and not a GUID, so try it as an asset name - the same fallback the
+                // game's own /v takes, and the only form of the three that a person can read.
+                VehicleAsset byName = FindByName(trimmed);
+                if (byName != null)
+                {
+                    error = null;
+                    return byName;
+                }
+
+                error = $"'{vehicle}' is not a legacy vehicle ID, a GUID, or the name of a loaded vehicle";
                 return null;
             }
 
@@ -91,6 +106,28 @@ namespace BanditPlugin.FakePlayer
 
             error = null;
             return byGuid;
+        }
+
+        /// <summary>
+        /// A vehicle by its asset name - "Ural", "Off_Roader" - matched the way vanilla's own
+        /// vehicle command matches it, on the asset name rather than the localised friendly one, so
+        /// the same string works whatever language the server runs in.
+        /// </summary>
+        private static VehicleAsset FindByName(string name)
+        {
+            System.Collections.Generic.List<VehicleAsset> all =
+                new System.Collections.Generic.List<VehicleAsset>();
+            Assets.find(all);
+
+            foreach (VehicleAsset asset in all)
+            {
+                if (asset != null && string.Equals(name, asset.name, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    return asset;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>

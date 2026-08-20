@@ -1,3 +1,4 @@
+using SDG.Framework.Water;
 using SDG.Unturned;
 using UnityEngine;
 using static BanditPlugin.BanditGeometry;
@@ -315,6 +316,19 @@ namespace BanditPlugin.Navigation
         /// <summary>Steeper than this counts as a wall rather than a hill.</summary>
         private const float MaxClimbDegrees = 35f;
 
+        /// <summary>How much water a vehicle may drive through. Deeper than this is not ground,
+        /// whatever the ground sample under it says.</summary>
+        private const float MaxFordDepthMetres = 1f;
+
+        /// <summary>
+        /// How far apart the ground is sampled along a step being tested.
+        ///
+        /// This is what separates a hill from the side of a building, and the figure is chosen from
+        /// that: at two metres, anything rising more than about 1.4m in one sample is refused, which
+        /// is every wall and no kerb.
+        /// </summary>
+        private const float GroundSampleSpacingMetres = 2f;
+
         /// <summary>
         /// Trees, rocks, buildings, player builds and other vehicles. Not terrain: a rise in the
         /// ground is a climb test, not an obstacle, or every hill reads as a wall.
@@ -596,24 +610,55 @@ namespace BanditPlugin.Navigation
         {
             Transform root = vehicle.transform;
             Vector3 here = root.position;
-            Vector3 ahead = here + heading * Mathf.Min(lookahead, footprint.HalfLength + 4f);
+            float distance = Mathf.Min(lookahead, footprint.HalfLength + 4f);
 
-            if (!VehicleTerrain.TrySample(here, root, out Vector3 groundHere, out Vector3 _)
-                || !VehicleTerrain.TrySample(ahead, root, out Vector3 groundAhead, out Vector3 _))
+            if (!VehicleTerrain.TrySample(here, root, out Vector3 previous, out Vector3 _))
             {
-                // No ground under one end of the step: a bridge edge, a cliff lip, or deep water.
-                // Not somewhere to drive.
                 return false;
             }
 
-            float run = FlatDistance(groundHere, groundAhead);
-            if (run < 0.01f)
+            // Walked in short steps rather than measured end to end, and that is the whole of it.
+            // Comparing the ground here with the ground six metres ahead averages everything in
+            // between, so the wall of a house - four metres of vertical brick - came out as a
+            // thirty-four degree ramp and passed the climb test. Then the drive step's ground snap
+            // did exactly what it was told and put the vehicle on the roof, which is the "they drive
+            // up on houses" report. At two-metre steps the same wall is sixty-three degrees and
+            // there is nothing to average it away with, while a kerb or a verge still reads as the
+            // small step up it is.
+            int steps = Mathf.Max(1, Mathf.CeilToInt(distance / GroundSampleSpacingMetres));
+
+            for (int step = 1; step <= steps; step++)
             {
-                return true;
+                Vector3 point = here + heading * (distance * step / steps);
+
+                if (!VehicleTerrain.TrySample(point, root, out Vector3 ground, out Vector3 _))
+                {
+                    // No ground under this part of the step: a bridge edge, a cliff lip, or deep
+                    // water. Not somewhere to drive.
+                    return false;
+                }
+
+                // Water is a surface the ground sample says nothing about. Every step below snaps
+                // the vehicle onto whatever is underneath it, and under water that is the seabed -
+                // so without this test a column drives into the sea and keeps going along the
+                // bottom of it, which is what it did. A ford is allowed, because a stream crossing
+                // is somewhere vehicles do drive; anything deeper is not ground.
+                if (WaterUtility.isPointUnderwater(ground + Vector3.up * MaxFordDepthMetres))
+                {
+                    return false;
+                }
+
+                float run = FlatDistance(previous, ground);
+                if (run >= 0.01f
+                    && Mathf.Atan2(ground.y - previous.y, run) * Mathf.Rad2Deg > MaxClimbDegrees)
+                {
+                    return false;
+                }
+
+                previous = ground;
             }
 
-            float climb = groundAhead.y - groundHere.y;
-            return Mathf.Atan2(climb, run) * Mathf.Rad2Deg <= MaxClimbDegrees;
+            return true;
         }
     }
 }
