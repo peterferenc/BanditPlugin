@@ -57,10 +57,18 @@ namespace BanditPlugin.FakePlayer
         /// on the pixel.</summary>
         private const float ArriveRadiusMetres = 12f;
 
-        /// <summary>The interval a following vehicle tries to keep, and the distance at which it
-        /// stops rather than closes.</summary>
-        private const float DesiredGapMetres = 20f;
-        private const float MinimumGapMetres = 10f;
+        /// <summary>
+        /// The interval a following vehicle tries to keep, and the distance at which it stops rather
+        /// than closes. Measured bumper to bumper - see <see cref="ClosestGapAhead"/> - so these are
+        /// lengths of clear road, not distances between origins, and they mean the same thing for a
+        /// tank as for a hatchback.
+        /// </summary>
+        private const float DesiredGapMetres = 14f;
+        private const float MinimumGapMetres = 5f;
+
+        /// <summary>How far to either side still counts as being in front. Wide enough to cover a
+        /// vehicle in the same lane through a bend, narrow enough to ignore oncoming traffic.</summary>
+        private const float LaneHalfWidthMetres = 3.5f;
 
         /// <summary>How fast the column moves while it is fighting, as a fraction of its cruise.
         /// Slow enough to shoot from and to let the dismounted infantry keep up, not a halt - a
@@ -100,6 +108,10 @@ namespace BanditPlugin.FakePlayer
         private const int SkipPointsOnGiveUp = 5;
         private const int MaxGiveUps = 3;
 
+        /// <summary>How long the column waits at the start line for its crews to get aboard before
+        /// leaving without the stragglers. See <see cref="HasFormedUp"/>.</summary>
+        private const float FormUpTimeoutSeconds = 25f;
+
         /// <summary>How far from a road either end of a leg may be before it is driven direct.</summary>
         public const float RoadSnapDistanceMetres = 80f;
 
@@ -119,6 +131,19 @@ namespace BanditPlugin.FakePlayer
         private readonly List<Element> _elements = new List<Element>();
         private float _lastContactTime = float.MinValue;
         private float _rallyDeadline;
+
+        /// <summary>Whether the column has finished loading and may leave. See <see cref="HasFormedUp"/>.</summary>
+        private bool _hasFormedUp;
+        private readonly float _formUpDeadline;
+
+        /// <summary>
+        /// Men whose own vehicle is not going anywhere any more - it burned, or its driver was
+        /// killed - and who are now walking. They ride on in somebody else's spare seat. See
+        /// <see cref="TickOrphans"/>.
+        /// </summary>
+        private readonly List<BanditBotController> _orphans = new List<BanditBotController>();
+        private readonly Dictionary<BanditBotController, Vector3> _orphanOrders =
+            new Dictionary<BanditBotController, Vector3>();
 
         /// <summary>One point on the planned route. A road point knows which road node it came from,
         /// so each vehicle can pick its own lane through it; a waypoint the player recorded is
@@ -170,6 +195,7 @@ namespace BanditPlugin.FakePlayer
         {
             Id = _nextId++;
             Event = banditEvent;
+            _formUpDeadline = Time.time + FormUpTimeoutSeconds;
             _path = path;
             UsesRoads = usesRoads;
 
@@ -188,6 +214,85 @@ namespace BanditPlugin.FakePlayer
         public static void ClearAll()
         {
             All.Clear();
+        }
+
+        /// <summary>
+        /// Removes the most recently spawned convoy: its vehicles destroyed, its men despawned, and
+        /// the column itself taken off the director's list so nothing keeps steering it.
+        ///
+        /// The last one rather than all of them, because the reason to reach for this is that the
+        /// convoy you just spawned is doing something you did not want to watch any longer, and
+        /// there may well be another one running that you do. /banditclear is still the big hammer.
+        /// </summary>
+        public static bool ClearLast(out string summary)
+        {
+            if (All.Count == 0)
+            {
+                summary = "no convoy is running";
+                return false;
+            }
+
+            BanditConvoy convoy = All[All.Count - 1];
+            All.RemoveAt(All.Count - 1);
+
+            int vehicles = 0;
+            int men = 0;
+
+            foreach (Element element in convoy._elements)
+            {
+                // Everyone who belongs to this vehicle, wherever they currently are - in a seat, out
+                // fighting, or walking back to it.
+                foreach (BanditBotController rider in element.Ride.Riders)
+                {
+                    men += Remove(rider) ? 1 : 0;
+                }
+
+                foreach (BanditBotController gunner in element.Ride.Gunners)
+                {
+                    men += Remove(gunner) ? 1 : 0;
+                }
+
+                men += Remove(element.Ride.Driver) ? 1 : 0;
+
+                InteractableVehicle vehicle = element.Ride.Vehicle;
+                if (vehicle != null && !vehicle.isExploded)
+                {
+                    VehicleManager.askVehicleDestroy(vehicle);
+                    vehicles++;
+                }
+            }
+
+            // Men off a burnt-out vehicle are still this convoy's, even though their ride is gone.
+            foreach (BanditBotController orphan in convoy._orphans)
+            {
+                men += Remove(orphan) ? 1 : 0;
+            }
+
+            convoy._elements.Clear();
+            convoy._orphans.Clear();
+            convoy._orphanOrders.Clear();
+            convoy.State = ConvoyState.Arrived;
+
+            summary = $"convoy {convoy.Id}: {vehicles} vehicle(s) and {men} bandit(s) removed";
+            return true;
+        }
+
+        /// <summary>Despawns one bandit, if it is still there to despawn.</summary>
+        private static bool Remove(BanditBotController bandit)
+        {
+            if (bandit == null || bandit.Self == null)
+            {
+                return false;
+            }
+
+            SteamPlayer steamPlayer = bandit.SteamPlayerToKeepAlive;
+            if (steamPlayer == null)
+            {
+                return false;
+            }
+
+            FakePlayerSpawner.DespawnBot(steamPlayer);
+            return true;
         }
 
         /// <summary>
@@ -316,6 +421,17 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
+            // Before contact, deliberately. A column still loading is not in a fight it can do
+            // anything about: ordering the riders out at that moment takes them out of the seats
+            // they are in the middle of climbing into, which is both silly to watch and a deadlock -
+            // the column then waits for men to be aboard who it has just told to get out. Somebody
+            // shooting at a convoy on its start line still gets shot back at, by the gunners in the
+            // turrets and by every crew squad, which are weapons free from the moment they spawn.
+            if (!HasFormedUp())
+            {
+                return;
+            }
+
             UpdateContact();
 
             bool allFinished = true;
@@ -347,6 +463,75 @@ namespace BanditPlugin.FakePlayer
                 Logger.Log($"[Bandit] Convoy {Id} is done - {arrived} of {_elements.Count} vehicle(s) "
                     + "made it to the last waypoint.");
             }
+        }
+
+        /// <summary>
+        /// Whether the column is loaded and ready to leave.
+        ///
+        /// Crews are spawned on the ground beside their vehicle and have to walk round and climb in,
+        /// and vanilla refuses to seat anyone whose equip animation is still running - so for the
+        /// first second or two of a convoy's life some vehicles have a driver and some do not. Each
+        /// vehicle used to be told to drive the moment its own driver sat down, which is why the
+        /// head of the column left while the rest were still getting aboard.
+        ///
+        /// So nobody moves until everybody can. Bounded by a deadline, because a crewman who never
+        /// makes it into his seat must not strand the whole convoy at the start line - after that
+        /// the column leaves with whoever is aboard, which is the same bargain the rally has.
+        /// </summary>
+        private bool HasFormedUp()
+        {
+            if (_hasFormedUp)
+            {
+                return true;
+            }
+
+            if (Time.time >= _formUpDeadline)
+            {
+                _hasFormedUp = true;
+                Logger.Log($"[Bandit] Convoy {Id} moving off without the crew that did not get aboard.");
+                return true;
+            }
+
+            foreach (Element element in _elements)
+            {
+                if (element.Finished || element.Ride.Vehicle == null)
+                {
+                    continue;
+                }
+
+                BanditBotController driver = element.Ride.Driver;
+                if (driver == null || driver.Self == null || (driver.Self.life != null && driver.Self.life.isDead))
+                {
+                    continue; // never going to arrive; not something to wait for
+                }
+
+                if (driver.Driver == null || !driver.Driver.IsSeated || driver.HasPendingSeat)
+                {
+                    return false;
+                }
+
+                // The riders too, or the column pulls away from men still walking round to the door -
+                // but only the ones still trying. RequestSeat retries on its own, so a man who wants
+                // a seat has one pending; a man with neither a seat nor a pending request is not
+                // coming, and waiting the full deadline out for him holds up a column that is
+                // otherwise ready to go.
+                foreach (BanditBotController rider in element.Ride.Riders)
+                {
+                    if (rider == null || rider.Self == null
+                        || (rider.Self.life != null && rider.Self.life.isDead))
+                    {
+                        continue;
+                    }
+
+                    if (rider.HasPendingSeat)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            _hasFormedUp = true;
+            return true;
         }
 
         /// <summary>
@@ -529,6 +714,10 @@ namespace BanditPlugin.FakePlayer
                 }
             }
 
+            // The men off a burnt-out vehicle are picked up in the same breath as everyone else
+            // getting back into their own seats.
+            everyoneAboard &= TickOrphans();
+
             if (everyoneAboard)
             {
                 return true;
@@ -546,6 +735,9 @@ namespace BanditPlugin.FakePlayer
                 element.RallyOrders.Clear();
             }
 
+            _orphans.Clear();
+            _orphanOrders.Clear();
+
             return true;
         }
 
@@ -560,7 +752,15 @@ namespace BanditPlugin.FakePlayer
             if (ride.Vehicle == null || ride.Vehicle.isDead || ride.Vehicle.isExploded)
             {
                 // Vanilla throws the occupants clear when a vehicle goes up. They are bandits on
-                // foot in a squad now, which is a perfectly good thing to be.
+                // foot in a squad now, which is a perfectly good thing to be - and if the column
+                // still has a spare seat anywhere, they are getting back in it.
+                foreach (BanditBotController survivor in ride.Riders)
+                {
+                    Orphan(survivor);
+                }
+
+                Orphan(ride.Driver);
+
                 element.Finished = true;
                 return;
             }
@@ -681,31 +881,104 @@ namespace BanditPlugin.FakePlayer
                     break;
             }
 
-            // The vehicle in front is the nearest one still running ahead of it in the column; a
-            // burnt-out one in between is not something to keep an interval behind.
-            for (int ahead = position - 1; ahead >= 0; ahead--)
+            float closest = ClosestGapAhead(position, vehiclePosition);
+
+            if (closest >= DesiredGapMetres)
             {
-                Element leader = _elements[ahead];
-                if (leader.Finished || leader.Ride.Vehicle == null)
+                return pace;
+            }
+
+            if (closest <= MinimumGapMetres)
+            {
+                return 0f;
+            }
+
+            return pace * Mathf.InverseLerp(MinimumGapMetres, DesiredGapMetres, closest);
+        }
+
+        /// <summary>
+        /// How much clear road there is between this vehicle's nose and the back of whatever is in
+        /// front of it.
+        ///
+        /// Two things here were wrong and together they let a tank drive into a lorry. The gap was
+        /// measured centre to centre, so two seven-metre vehicles reported ten metres of daylight
+        /// while their bumpers were touching - the interval was being kept between origins, not
+        /// between vehicles. And only vehicles earlier in the column were considered, on the
+        /// assumption that the column stays in the order it spawned in; once anything overtakes,
+        /// swaps places after a rally, or is simply quicker away from a stop, the vehicle actually
+        /// in front is the one nobody was looking at.
+        ///
+        /// So: every other running vehicle, whichever end of the column it belongs to, and the
+        /// distance measured between bumpers using the footprints the drivers already measured off
+        /// their own colliders. Only what is genuinely in front counts - a vehicle alongside on a
+        /// wide road is not something to brake for, and one behind is its own driver's problem.
+        /// </summary>
+        private float ClosestGapAhead(int position, Vector3 vehiclePosition)
+        {
+            Element self = _elements[position];
+            InteractableVehicle vehicle = self.Ride.Vehicle;
+            if (vehicle == null)
+            {
+                return float.MaxValue;
+            }
+
+            Vector3 forward = vehicle.transform.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f)
+            {
+                return float.MaxValue;
+            }
+
+            forward.Normalize();
+
+            float selfHalfLength = HalfLengthOf(self);
+            float closest = float.MaxValue;
+
+            for (int i = 0; i < _elements.Count; i++)
+            {
+                if (i == position)
                 {
                     continue;
                 }
 
-                float gap = HorizontalDistance(vehiclePosition, leader.Ride.Vehicle.transform.position);
-                if (gap >= DesiredGapMetres)
+                Element other = _elements[i];
+                InteractableVehicle otherVehicle = other.Ride.Vehicle;
+                if (other.Finished || otherVehicle == null || otherVehicle.isDead || otherVehicle.isExploded)
                 {
-                    break;
+                    continue;
                 }
 
-                if (gap <= MinimumGapMetres)
+                Vector3 offset = otherVehicle.transform.position - vehiclePosition;
+                offset.y = 0f;
+
+                float along = Vector3.Dot(offset, forward);
+                if (along <= 0f)
                 {
-                    return 0f;
+                    continue; // behind us
                 }
 
-                return pace * Mathf.InverseLerp(MinimumGapMetres, DesiredGapMetres, gap);
+                // Inside the lane rather than merely somewhere in front, so a vehicle passing the
+                // other way on a wide road does not stop the column dead.
+                float lateral = Vector3.Distance(offset, forward * along);
+                if (lateral > LaneHalfWidthMetres)
+                {
+                    continue;
+                }
+
+                closest = Mathf.Min(closest, along - selfHalfLength - HalfLengthOf(other));
             }
 
-            return pace;
+            return closest;
+        }
+
+        /// <summary>Half the length of a vehicle, from the footprint its driver measured off the
+        /// colliders. The fallback is car-sized, for a vehicle nobody is sitting in yet.</summary>
+        private static float HalfLengthOf(Element element)
+        {
+            BanditVehicleDriver driver = element.Ride.Driver?.Driver;
+            return driver != null && driver.IsSeated
+                ? Mathf.Max(1.5f, driver.Footprint.HalfLength)
+                : 3f;
         }
 
         /// <summary>Everyone out - riders and, since the vehicle is finished either way, the driver
@@ -715,15 +988,143 @@ namespace BanditPlugin.FakePlayer
             foreach (BanditBotController rider in element.Ride.Riders)
             {
                 BanditEvent.Disembark(rider);
+                Orphan(rider);
             }
 
             if (!element.Ride.IsArmed && element.Ride.DriverDismounts)
             {
                 BanditEvent.Disembark(element.Ride.Driver);
+                Orphan(element.Ride.Driver);
             }
 
             element.RiderSeats.Clear();
             element.RallyOrders.Clear();
+        }
+
+        /// <summary>Remembers a man who has lost his ride, so the column can pick him up again.</summary>
+        private void Orphan(BanditBotController bandit)
+        {
+            if (bandit != null && !_orphans.Contains(bandit))
+            {
+                _orphans.Add(bandit);
+            }
+        }
+
+        /// <summary>
+        /// Puts the men from a dead vehicle into the spare seats of a live one.
+        ///
+        /// A convoy is nearly always carrying empty seats - a crew is what the configuration says it
+        /// is, and a Stryker has more room than that - so a burnt-out vehicle's survivors walking
+        /// home while the column drives past with three seats free is simply waste. They are already
+        /// armed, already in a squad, and already going the same way.
+        ///
+        /// Seat zero is never offered. A vehicle whose driver died is out of the convoy by then, and
+        /// putting a rifleman behind the wheel of one would quietly resurrect a vehicle the column
+        /// has already written off.
+        /// </summary>
+        private bool TickOrphans()
+        {
+            bool everyoneAboard = true;
+            List<BanditBotController> collected = null;
+
+            foreach (BanditBotController orphan in _orphans)
+            {
+                bool gone = orphan == null || orphan.Self == null
+                    || (orphan.Self.life != null && orphan.Self.life.isDead);
+
+                if (gone || (orphan.Driver != null && orphan.Driver.IsSeated))
+                {
+                    (collected ?? (collected = new List<BanditBotController>())).Add(orphan);
+                    continue;
+                }
+
+                if (orphan.HasPendingSeat)
+                {
+                    everyoneAboard = false;
+                    continue;
+                }
+
+                if (!TryFindSpareSeat(orphan, out InteractableVehicle vehicle, out byte seat))
+                {
+                    continue; // nowhere to put him; he walks, and the deadline will leave him
+                }
+
+                everyoneAboard = false;
+
+                Vector3 where = vehicle.transform.position;
+                float distance = Vector3.Distance(orphan.Self.transform.position, where);
+
+                if (distance > RemountRadiusMetres)
+                {
+                    if (!_orphanOrders.TryGetValue(orphan, out Vector3 ordered)
+                        || (ordered - where).sqrMagnitude > RallyReorderDistanceSquared)
+                    {
+                        _orphanOrders[orphan] = where;
+                        orphan.Brain?.GoTo(where);
+                    }
+
+                    continue;
+                }
+
+                _orphanOrders.Remove(orphan);
+                orphan.Brain?.StopMoving();
+                orphan.RequestSeat(vehicle, seat, false);
+            }
+
+            if (collected != null)
+            {
+                foreach (BanditBotController orphan in collected)
+                {
+                    _orphans.Remove(orphan);
+                    _orphanOrders.Remove(orphan);
+                }
+            }
+
+            return everyoneAboard;
+        }
+
+        /// <summary>The nearest running vehicle in the column with a seat nobody is in.</summary>
+        private bool TryFindSpareSeat(BanditBotController orphan, out InteractableVehicle vehicle, out byte seat)
+        {
+            vehicle = null;
+            seat = 0;
+
+            Vector3 from = orphan.Self.transform.position;
+            float nearest = float.MaxValue;
+
+            foreach (Element element in _elements)
+            {
+                InteractableVehicle candidate = element.Ride.Vehicle;
+                if (element.Finished || candidate == null || candidate.isDead || candidate.isExploded)
+                {
+                    continue;
+                }
+
+                Passenger[] seats = candidate.passengers;
+                if (seats == null)
+                {
+                    continue;
+                }
+
+                float distance = Vector3.Distance(from, candidate.transform.position);
+                if (distance >= nearest)
+                {
+                    continue;
+                }
+
+                for (byte index = 1; index < seats.Length; index++)
+                {
+                    if (seats[index] != null && seats[index].player == null)
+                    {
+                        vehicle = candidate;
+                        seat = index;
+                        nearest = distance;
+                        break;
+                    }
+                }
+            }
+
+            return vehicle != null;
         }
 
         /// <summary>

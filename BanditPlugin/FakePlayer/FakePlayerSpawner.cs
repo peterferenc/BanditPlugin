@@ -280,6 +280,9 @@ namespace BanditPlugin.FakePlayer
 
             SpawnedBotSteamIds.Add(fakeSteamId.m_SteamID);
             LastSpawnedController = controller;
+
+            AnnounceConnected(fakeSteamId);
+
             return steamPlayer.player;
         }
 
@@ -332,6 +335,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             LeaveTeam(steamPlayer);
+            AnnounceDisconnected(steamPlayer.playerID.steamID);
             Provider.kick(steamPlayer.playerID.steamID, "bandit killed");
         }
 
@@ -364,6 +368,51 @@ namespace BanditPlugin.FakePlayer
             }
 
             return controllers;
+        }
+
+        /// <summary>
+        /// Tells the rest of the server a bot has joined, and later that it has left.
+        ///
+        /// The companion to <see cref="AttachRocketPlayerComponents"/>, and the same shape of bug.
+        /// Rocket's own connect event is raised by a component's Start, so attaching the components
+        /// covers it - but <see cref="Provider.onServerConnected"/> is raised by vanilla's real
+        /// connection handshake, which a bot never goes through, so anything listening to *that*
+        /// never learns the bot exists. uEssentials keeps its player registry off exactly that
+        /// event, which is why every bandit death threw a NullReferenceException out of its
+        /// GenericPlayerDeath handler: it looked the dying bot up, got nothing, and dereferenced it.
+        /// Its join and leave messages worked the whole time because those read the name straight
+        /// off the argument and never touch the registry, which is what made it look unrelated.
+        ///
+        /// Raising both halves is the honest signal - a player did arrive, and later did leave -
+        /// and it is what makes a bot a first-class player to every plugin rather than only to
+        /// Rocket. Each listener is allowed to throw without taking the spawn down with it: this is
+        /// other people's code, and a bandit failing to spawn because some plugin dislikes a bot is
+        /// a worse outcome than that plugin missing an event.
+        /// </summary>
+        private static void AnnounceConnected(Steamworks.CSteamID steamId)
+        {
+            try
+            {
+                Provider.onServerConnected?.Invoke(steamId);
+            }
+            catch (System.Exception e)
+            {
+                Rocket.Core.Logging.Logger.LogWarning("[Bandit] A plugin threw while being told a bot "
+                    + $"connected: {e.Message}");
+            }
+        }
+
+        private static void AnnounceDisconnected(Steamworks.CSteamID steamId)
+        {
+            try
+            {
+                Provider.onServerDisconnected?.Invoke(steamId);
+            }
+            catch (System.Exception e)
+            {
+                Rocket.Core.Logging.Logger.LogWarning("[Bandit] A plugin threw while being told a bot "
+                    + $"disconnected: {e.Message}");
+            }
         }
 
         /// <summary>
@@ -483,6 +532,7 @@ namespace BanditPlugin.FakePlayer
                 }
 
                 LeaveTeam(client);
+                AnnounceDisconnected(client.playerID.steamID);
                 Provider.kick(client.playerID.steamID, "bandit despawned");
                 removed++;
             }

@@ -598,7 +598,7 @@ namespace BanditPlugin.Navigation
                 return false;
             }
 
-            return IsGroundClimbable(vehicle, footprint, heading, lookahead);
+            return IsGroundClimbable(vehicle, footprint, heading, lookahead, ignoreOverlap);
         }
 
         /// <summary>
@@ -606,7 +606,8 @@ namespace BanditPlugin.Navigation
         /// the obstacle sweep - at bumper height every upslope would read as a wall - so this is the
         /// only thing stopping a bandit from driving up the side of a mountain.
         /// </summary>
-        private static bool IsGroundClimbable(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading, float lookahead)
+        private static bool IsGroundClimbable(InteractableVehicle vehicle, BanditVehicleFootprint footprint,
+            Vector3 heading, float lookahead, bool wedged = false)
         {
             Transform root = vehicle.transform;
             Vector3 here = root.position;
@@ -648,8 +649,15 @@ namespace BanditPlugin.Navigation
                     return false;
                 }
 
+                // The slope test is dropped for a vehicle that is trying to get itself unwedged.
+                // It is asking whether it may back out of something it is already touching, and the
+                // ground right behind a vehicle that has beached itself on a fence post or a ditch
+                // lip is exactly the ground this test calls a wall. Refusing there is how a vehicle
+                // that could trivially reverse out ends up reporting itself boxed in and stopping.
+                // The other two refusals stand: no ground at all is still a cliff edge, and deep
+                // water is still deep water, and reversing into either is not a recovery.
                 float run = FlatDistance(previous, ground);
-                if (run >= 0.01f
+                if (!wedged && run >= 0.01f
                     && Mathf.Atan2(ground.y - previous.y, run) * Mathf.Rad2Deg > MaxClimbDegrees)
                 {
                     return false;

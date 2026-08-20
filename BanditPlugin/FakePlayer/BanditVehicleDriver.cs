@@ -81,19 +81,26 @@ namespace BanditPlugin.FakePlayer
         private const float MaxStepUpMetres = 1f;
 
         /// <summary>
-        /// Heading error at which the steering is on full lock, under physics driving.
+        /// How far off the wanted heading a vehicle may be pointing before it steers at all.
         ///
-        /// Deliberately small. A real driver corrects hard and early; easing the wheel in proportion
-        /// to a wide error makes a vehicle drift wide of every corner and saw at the wheel down the
-        /// straights. The wheel code applies its own turn rate on top of this, so nothing here can
-        /// snap the steering round faster than the vehicle's SteeringAngleTurnSpeed allows.
+        /// Steering is a key press, not a dial, so without a deadband a vehicle holds full lock one
+        /// way then the other all the way down a straight road. Wide enough to sit still on a
+        /// straight, narrow enough that the vehicle is never visibly crabbing.
         /// </summary>
-        private const float FullSteeringLockDegrees = 25f;
+        private const float SteeringDeadbandDegrees = 4f;
 
         /// <summary>How far over its speed limit a vehicle gets before it brakes rather than simply
         /// lifting off. Coasting down covers the ordinary case; this is for arriving at the top of a
         /// hill with gravity helping.</summary>
         private const float OverspeedBrakeMetresPerSecond = 2f;
+
+        /// <summary>Walking pace, for coming round a corner too tight to take at speed. Enough to
+        /// make the steering bite, slow enough to be a manoeuvre rather than a lunge.</summary>
+        private const float CreepMetresPerSecond = 2.5f;
+
+        /// <summary>At or below this SpeedScale the vehicle is being held deliberately, so it is not
+        /// judged for making no progress. See <see cref="UpdateProgress"/>.</summary>
+        private const float HeldSpeedScale = 0.05f;
 
         /// <summary>How far a measured ride height may differ from the one the body's colliders
         /// imply before it is treated as a vehicle that is not resting on anything. Roughly the
@@ -172,9 +179,6 @@ namespace BanditPlugin.FakePlayer
         /// same reason the footprint is - it does not change while the bandit is sitting in it.</summary>
         private Rigidbody _body;
         private InteractableVehicle _bodyMeasuredFor;
-
-        /// <summary>Said once per bandit rather than once per packet.</summary>
-        private bool _warnedAboutGears;
 
         /// <summary>The driving packet last handed to PlayerInput, kept so its pose can be held
         /// current until the server reads it. See <see cref="RefreshPendingPose"/>.</summary>
@@ -882,23 +886,10 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            // Torque for a geared vehicle is metered out by the gearbox, and the gearbox lives in a
-            // private method vanilla only runs for the client that is driving. Handing the wheels
-            // zero torque would leave it sitting there revving, so those keep the old path until
-            // there is somewhere to get the figure from.
-            if (UsesGears(vehicle.asset))
-            {
-                if (!_warnedAboutGears)
-                {
-                    _warnedAboutGears = true;
-                    Rocket.Core.Logging.Logger.Log($"[Bandit] {DescribeVehicle(vehicle)} uses engine RPM "
-                        + "and gears, so it is driven by the older kinematic step.");
-                }
-
-                return false;
-            }
-
-            return true;
+            // Everything hangs on being able to run vanilla's own gearbox-and-torque pass, because
+            // every vehicle on this server turns out to declare gear ratios - the Offroader and the
+            // Ural included - and a geared vehicle handed no torque sits still and revs.
+            return WheelPhysicsPass != null;
         }
 
         /// <summary>
@@ -962,43 +953,61 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Whether the asset drives through a gearbox, which decides whether its wheels can be given
-        /// torque from out here.
+        /// Vanilla's gearbox-and-torque pass, which is the one piece of driving a dedicated server
+        /// genuinely does not run.
         ///
-        /// Read by reflection because vanilla marks the property internal and offers no public
-        /// equivalent - every public RPM field has a default and so says nothing about whether the
-        /// asset actually declared any gear ratios. Cached per asset, since it is a fact about the
-        /// asset and not about the vehicle. If the lookup ever stops working, the answer defaults to
-        /// "geared", which is the conservative direction: that vehicle keeps the older step rather
-        /// than being handed no torque and sitting there.
+        /// <c>InteractableVehicle.isDriver</c> is compiled to a flat <c>false</c> in the server
+        /// build, so the branch that calls this never fires. Everything else about driving is
+        /// reachable - <see cref="InteractableVehicle.simulate"/> is public and is the client's own
+        /// entry point - but this one method is private, and it is where the gears are selected, the
+        /// engine RPM is integrated and the motor torque is finally handed to each wheel. Without it
+        /// a geared vehicle gets no torque at all, and every vehicle on this server is geared.
+        ///
+        /// Bound once as an open delegate rather than invoked through MethodInfo each time, so the
+        /// per-packet cost is an ordinary call. If it cannot be bound, physics driving reports
+        /// itself unavailable and the older kinematic step takes over.
         /// </summary>
-        private static bool UsesGears(VehicleAsset asset)
+        private static System.Action<InteractableVehicle, float> WheelPhysicsPass
         {
-            if (GearedAssets.TryGetValue(asset, out bool geared))
+            get
             {
-                return geared;
-            }
+                if (_wheelPhysicsResolved)
+                {
+                    return _wheelPhysicsPass;
+                }
 
-            System.Reflection.PropertyInfo property = typeof(VehicleAsset).GetProperty(
-                "UsesEngineRpmAndGears",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public
-                    | System.Reflection.BindingFlags.NonPublic);
+                _wheelPhysicsResolved = true;
 
-            try
-            {
-                geared = property == null || (bool)property.GetValue(asset);
-            }
-            catch (System.Exception)
-            {
-                geared = true;
-            }
+                System.Reflection.MethodInfo method = typeof(InteractableVehicle).GetMethod(
+                    "UpdateLocallyDrivenWheelPhysicsAndGears",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                        | System.Reflection.BindingFlags.Public);
 
-            GearedAssets[asset] = geared;
-            return geared;
+                try
+                {
+                    _wheelPhysicsPass = method == null
+                        ? null
+                        : (System.Action<InteractableVehicle, float>)System.Delegate.CreateDelegate(
+                            typeof(System.Action<InteractableVehicle, float>), method);
+                }
+                catch (System.Exception)
+                {
+                    _wheelPhysicsPass = null;
+                }
+
+                if (_wheelPhysicsPass == null)
+                {
+                    Rocket.Core.Logging.Logger.LogWarning("[Bandit] Could not reach the game's wheel "
+                        + "physics pass, so bandits fall back to the older kinematic drive step. "
+                        + "This usually means the game updated and the method was renamed.");
+                }
+
+                return _wheelPhysicsPass;
+            }
         }
 
-        private static readonly System.Collections.Generic.Dictionary<VehicleAsset, bool> GearedAssets =
-            new System.Collections.Generic.Dictionary<VehicleAsset, bool>();
+        private static System.Action<InteractableVehicle, float> _wheelPhysicsPass;
+        private static bool _wheelPhysicsResolved;
 
         /// <summary>
         /// One packet's worth of driving the vehicle with its own physics: work out where the
@@ -1026,7 +1035,7 @@ namespace BanditPlugin.FakePlayer
                 // Parked. Still worked every packet, because a physical vehicle left alone on a hill
                 // rolls down it - the handbrake is the thing standing in for the kinematic freeze
                 // the engine would otherwise have applied.
-                ApplyWheelInputs(vehicle, deltaTime, 0f, 0f, brake: true);
+                ApplyWheelInputs(vehicle, deltaTime, 0, 0, brake: true);
                 steeringInput = 0f;
                 _reversing = false;
                 return;
@@ -1040,7 +1049,7 @@ namespace BanditPlugin.FakePlayer
 
             if (travel.sqrMagnitude < 0.0001f)
             {
-                ApplyWheelInputs(vehicle, deltaTime, 0f, 0f, brake: true);
+                ApplyWheelInputs(vehicle, deltaTime, 0, 0, brake: true);
                 steeringInput = 0f;
                 return;
             }
@@ -1049,14 +1058,21 @@ namespace BanditPlugin.FakePlayer
             float noseYaw = reverse ? travelYaw + 180f : travelYaw;
             float headingError = Mathf.DeltaAngle(yaw, noseYaw);
 
-            // Full lock well before the error is large, so the vehicle actually commits to a corner
-            // rather than easing into it and running wide. Backing up steers the other way, because
-            // the wheels that turn are still at the front while the vehicle travels tail first.
-            steeringInput = Mathf.Clamp(headingError / FullSteeringLockDegrees, -1f, 1f);
+            // Left, right, or straight ahead - the same three states a player's keyboard offers, and
+            // the wheel code turns them into an angle at the asset's own steering speed. The
+            // deadband is what stops a vehicle sawing at the wheel down a straight. Backing up
+            // steers the other way, because the wheels that turn are still at the front while the
+            // vehicle travels tail first.
+            int steer = Mathf.Abs(headingError) < SteeringDeadbandDegrees
+                ? 0
+                : (headingError > 0f ? 1 : -1);
+
             if (reverse)
             {
-                steeringInput = -steeringInput;
+                steer = -steer;
             }
+
+            steeringInput = steer;
 
             // Speed is held by lifting off rather than by writing a number, which is what makes the
             // acceleration curve the vehicle's own. SpeedScale is the convoy's interval keeping and
@@ -1064,7 +1080,7 @@ namespace BanditPlugin.FakePlayer
             float limit = (reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle)) * Mathf.Clamp01(SpeedScale);
             float along = reverse ? -forwardVelocity : forwardVelocity;
 
-            float throttle;
+            int throttle;
             bool brake = false;
 
             if (limit <= 0.01f)
@@ -1072,30 +1088,37 @@ namespace BanditPlugin.FakePlayer
                 // "Stay put with the engine running" - the convoy's rallying state, and a follower
                 // that has closed right up on the vehicle in front. Coasting is not staying put on
                 // a hill, so this is the brake rather than simply no throttle.
-                throttle = 0f;
+                throttle = 0;
                 brake = true;
             }
             else if (Mathf.Abs(headingError) > StopAndTurnDegrees)
             {
-                // Pointing the wrong way entirely. Stop, and let the steering bring the nose round
-                // before any power goes down.
-                throttle = 0f;
-                brake = true;
+                // Pointing the wrong way entirely - so creep round it rather than stopping to turn.
+                //
+                // Stopping was right when this class wrote the pose itself, because it could simply
+                // rotate the vehicle on the spot. A real one cannot: steered wheels do nothing at a
+                // standstill, so braking until the nose comes round is a vehicle that never moves
+                // again, and the only thing that eventually breaks the deadlock is the stall
+                // detector deciding it is wedged. Creeping forward on full lock is how the manoeuvre
+                // is actually done, and if there genuinely is no room the clearance sweep is what
+                // says so.
+                limit = Mathf.Min(limit, CreepMetresPerSecond);
+                throttle = along > limit ? 0 : (reverse ? -1 : 1);
             }
             else if (along > limit)
             {
-                throttle = 0f;
+                throttle = 0;
                 brake = along > limit + OverspeedBrakeMetresPerSecond;
             }
             else
             {
-                throttle = reverse ? -1f : 1f;
+                throttle = reverse ? -1 : 1;
             }
 
             ClearSquadmatesFromPath(vehicle, vehicleTransform.position,
                 reverse ? -vehicleTransform.forward : vehicleTransform.forward, Mathf.Abs(forwardVelocity));
 
-            ApplyWheelInputs(vehicle, deltaTime, steeringInput, throttle, brake);
+            ApplyWheelInputs(vehicle, deltaTime, steer, throttle, brake);
 
             // Only so /banditv status reports the speed it is really doing rather than nothing.
             _speed = Mathf.Abs(forwardVelocity);
@@ -1103,33 +1126,31 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Hands the wheels their controls, through vanilla's own two-step: the first call records
-        /// the inputs the way a driving client's does, the second turns them into steer angle, motor
-        /// torque and brake torque. Both are marked obsolete only because they were never meant to
-        /// be reachable from outside the assembly; they are the live code path a real client uses
-        /// every frame.
+        /// Hands the vehicle its controls, down the same two calls a real driving client makes.
+        ///
+        /// <see cref="InteractableVehicle.simulate"/> is the client's driving entry point and is
+        /// public. It is worth far more than poking the wheel colliders by hand, because it is also
+        /// where everything that keeps a vehicle the right way up lives: the wheel balancing force,
+        /// the roll damping, and the downforce that scales with speed. Driving without it is what a
+        /// T-72 clipping a fire hydrant and ending up on its side looks like. It also gates torque
+        /// properly - no fuel, drowned, dead or engine off and the wheels get nothing, which is the
+        /// correct behaviour rather than something to reimplement.
+        ///
+        /// Then the gearbox pass, which the server would otherwise skip. See
+        /// <see cref="WheelPhysicsPass"/>.
+        ///
+        /// Steering and throttle are whole numbers because that is what the signature takes: a real
+        /// player drives with keys, so the wheel code is built to smooth -1/0/1 into an angle at the
+        /// asset's own steering speed. Feeding it a fraction would not steer more finely, it would
+        /// just be a fraction of a key press.
         /// </summary>
-        private void ApplyWheelInputs(InteractableVehicle vehicle, float deltaTime, float steering,
-            float acceleration, bool brake)
+        private void ApplyWheelInputs(InteractableVehicle vehicle, float deltaTime, int steering,
+            int acceleration, bool brake)
         {
-            Wheel[] tires = vehicle.tires;
-            if (tires == null)
-            {
-                return;
-            }
+            vehicle.simulate(0u, _self.input.recov, steering, acceleration, 0f, 0f, brake,
+                inputStamina: false, deltaTime);
 
-            foreach (Wheel tire in tires)
-            {
-                if (tire == null || tire.wheel == null || tire.IsDead)
-                {
-                    continue;
-                }
-
-#pragma warning disable 618
-                tire.simulate(steering, acceleration, brake, deltaTime);
-                tire.update(deltaTime);
-#pragma warning restore 618
-            }
+            WheelPhysicsPass?.Invoke(vehicle, deltaTime);
         }
 
         /// <summary>
@@ -1292,6 +1313,18 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private void UpdateProgress()
         {
+            // A vehicle that is being held on purpose is not a vehicle that is stuck. SpeedScale at
+            // or near zero is the convoy holding its interval, crawling under contact, or waiting
+            // for its men - and in every one of those cases the vehicle is doing exactly as it was
+            // told. Letting the stall timer run through it meant the follower in a nose-to-tail
+            // column decided it was wedged, banned the direction it was "failing" in, and reversed
+            // into whatever was behind it. Which is the vehicle behind it.
+            if (SpeedScale <= HeldSpeedScale)
+            {
+                _lastProgressTime = Time.time;
+                return;
+            }
+
             float remaining = _navigator.RemainingDistance;
 
             if (remaining < _bestRemaining - ProgressMetres)

@@ -68,6 +68,7 @@ Two separate routes per map, and they are not the same list.
 |---|---|
 | `/banditwp add\|remove\|clear\|list` (alias `/banditwaypoint`) | Edits this map's **patrol** route, recorded at your feet. What `/banditpatrol` walks. |
 | `/banditevent wp set [marker]\|list\|remove <n>\|clear` | Edits this map's **convoy** route, at your feet or your map marker. What `/banditevent convoy` drives. Removal is by the number the list prints. |
+| `/banditevent convoy clear` | Removes the last convoy spawned - its vehicles destroyed and its men despawned, including any walking after losing their ride. Leaves any other convoy running; `/banditclear` is still the big hammer. |
 | `/banditroads [route]` (alias `/broads`) | Reports what the road graph found on this map, how many gaps between roads it had to bridge to make the network routable, and what a route from you to your map marker costs - including how much of it crosses those gaps. |
 
 ## Teams

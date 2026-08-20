@@ -143,6 +143,20 @@ namespace BanditPlugin.Commands
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
             Player player = ((UnturnedPlayer)caller).Player;
 
+            if (args.Length > 0 && args[0].Equals("clear", StringComparison.OrdinalIgnoreCase))
+            {
+                if (BanditConvoy.ClearLast(out string cleared))
+                {
+                    UnturnedChat.Say(caller, $"Cleared {cleared}.", Color.green);
+                }
+                else
+                {
+                    UnturnedChat.Say(caller, $"Nothing to clear - {cleared}.", Color.yellow);
+                }
+
+                return;
+            }
+
             args = ExtractUseRoads(args, out bool useRoads);
             args = ExtractCount(args, "vehicles", out int? vehicleLimit);
             args = ExtractCount(args, "crew", out int? crewLimit);
@@ -155,6 +169,8 @@ namespace BanditPlugin.Commands
                     + "the shape to test a route with, since nothing is following anything.", Color.grey);
                 UnturnedChat.Say(caller, "The route comes from /banditevent wp - the column spawns at "
                     + "the first waypoint and drives through the rest.", Color.grey);
+                UnturnedChat.Say(caller, "/banditevent convoy clear removes the last convoy spawned.",
+                    Color.grey);
                 return;
             }
 
@@ -245,8 +261,9 @@ namespace BanditPlugin.Commands
             for (int i = 0; i < plan.Vehicles.Count; i++)
             {
                 // Back down the route, so the head of the column is on the first waypoint and the
-                // tail is behind it rather than in front.
-                Vector3 slot = BanditPlacement.SnapToGround(start - travel * (i * config.ConvoySpacing));
+                // tail is behind it rather than in front - and onto the road and out of whatever
+                // happens to be standing there. See ResolveSpawnSlot.
+                Vector3 slot = ResolveSpawnSlot(start - travel * (i * config.ConvoySpacing), travel, useRoads);
 
                 BanditPlacement.Result placed = new BanditPlacement.Result
                 {
@@ -311,6 +328,81 @@ namespace BanditPlugin.Commands
         /// Off is worth having: it is how you find out whether a convoy that took a strange line was
         /// routed badly or driven badly.
         /// </summary>
+        /// <summary>
+        /// Where a vehicle in the column can actually be put down.
+        ///
+        /// Spacing the column back along a straight line is right for the first few metres and wrong
+        /// after that: the line runs towards the *next waypoint*, the road does not, and a route that
+        /// starts on a bend puts the tail of the column through whatever is inside the corner. Which
+        /// on PEI is a house - vehicles were spawning in living rooms.
+        ///
+        /// So the straight line only proposes a distance back down the column, and the road decides
+        /// where that is. Snapping each slot onto the nearest road node keeps the column on the
+        /// tarmac, which is flat, clear and the thing it is about to drive along anyway. Then the
+        /// slot is checked for whatever is standing in it regardless, because a road with a parked
+        /// car or a fence post on it is still no place to put a lorry, and the search steps further
+        /// back and then sideways until it finds room.
+        /// </summary>
+        private static Vector3 ResolveSpawnSlot(Vector3 desired, Vector3 travel, bool useRoads)
+        {
+            Vector3 right = Vector3.Cross(Vector3.up, travel);
+
+            for (int attempt = 0; attempt < SpawnSlotAttempts; attempt++)
+            {
+                // Each attempt gives up a little more ground backwards, and alternates to either
+                // side of the line, so the column stays a column rather than fanning out.
+                Vector3 candidate = desired
+                    - travel * (attempt * SpawnSlotBackStepMetres)
+                    + right * (attempt % 3 == 1 ? SpawnSlotSideStepMetres
+                        : attempt % 3 == 2 ? -SpawnSlotSideStepMetres : 0f);
+
+                if (useRoads && BanditRoadGraph.TryGetNearest(candidate, SpawnSlotRoadSnapMetres,
+                        out int node, out float _))
+                {
+                    BanditRoadGraph.RoadNode roadNode = BanditRoadGraph.Get(node);
+                    if (roadNode != null)
+                    {
+                        candidate = roadNode.Position;
+                    }
+                }
+
+                candidate = BanditPlacement.SnapToGround(candidate);
+
+                if (IsSpawnSlotClear(candidate, travel))
+                {
+                    return candidate;
+                }
+            }
+
+            // Nothing clear anywhere along the search. Put it where it was asked for - a vehicle
+            // wedged in something is still better than no vehicle, and the driver will reverse out.
+            return BanditPlacement.SnapToGround(desired);
+        }
+
+        /// <summary>Whether a vehicle-sized box at this spot is free of buildings, fences, trees and
+        /// anything already parked there.</summary>
+        private static bool IsSpawnSlotClear(Vector3 spot, Vector3 travel)
+        {
+            const int Mask = RayMasks.LARGE | RayMasks.MEDIUM | RayMasks.SMALL | RayMasks.RESOURCE
+                | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE;
+
+            // Sized for something the width of a lorry, and lifted so the box is the body of the
+            // vehicle rather than the ground it is standing on.
+            Vector3 halfExtents = new Vector3(1.6f, 1f, 3.4f);
+            Quaternion orientation = travel.sqrMagnitude > 0.0001f
+                ? Quaternion.LookRotation(travel, Vector3.up)
+                : Quaternion.identity;
+
+            return !Physics.CheckBox(spot + Vector3.up * (halfExtents.y + 0.3f), halfExtents,
+                orientation, Mask, QueryTriggerInteraction.Ignore);
+        }
+
+        /// <summary>How hard to look for a clear spawn slot, and how far each step moves.</summary>
+        private const int SpawnSlotAttempts = 8;
+        private const float SpawnSlotBackStepMetres = 4f;
+        private const float SpawnSlotSideStepMetres = 3f;
+        private const float SpawnSlotRoadSnapMetres = 20f;
+
         /// <summary>
         /// Pulls "&lt;name&gt;:&lt;number&gt;" out of the words, wherever it sits.
         ///
