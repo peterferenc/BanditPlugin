@@ -154,6 +154,43 @@ namespace BanditPlugin.FakePlayer
         /// <summary>Heading error at which the vehicle stops moving and only turns.</summary>
         private const float StopAndTurnDegrees = 120f;
 
+        /// <summary>
+        /// The heading error at which the driver gives up arcing toward the target and does a proper
+        /// three-point turn, and the smaller error at which it decides the turn is done. The gap
+        /// between them is hysteresis, so it does not drop in and out of the manoeuvre on the
+        /// boundary.
+        /// </summary>
+        private const float TurnAroundEnterDegrees = 80f;
+        private const float TurnAroundExitDegrees = 50f;
+
+        /// <summary>How far ahead or behind a manoeuvre step checks for room before it commits to
+        /// moving that way. One check before every movement, which is the whole discipline of a
+        /// tight turn: never move in a direction you have not just proven is clear.</summary>
+        private const float ManeuverProbeMetres = 3.5f;
+
+        /// <summary>How far off the nearest road centre a manoeuvre may carry the vehicle before it
+        /// counts as leaving the road. The node half-width plus this, so it uses the full
+        /// carriageway and a good deal of shoulder but does not swing out into a field. Generous on
+        /// purpose: a vehicle that insists on the exact crown of the road backs out of an
+        /// intersection it could have driven through slightly off to one side.</summary>
+        private const float OnRoadMarginMetres = 4.5f;
+
+        /// <summary>The extra room allowed around a junction node - a crossroads or a tee, where
+        /// several road pieces meet and the drivable area is far wider than any one of their
+        /// half-widths. Without this the vehicle treats the open middle of an intersection as
+        /// off-road and reverses to find the centre line of a single street.</summary>
+        private const float JunctionRoadMarginMetres = 10f;
+
+        /// <summary>How far to look for a road when deciding whether a point is still on one. Beyond
+        /// this the vehicle is somewhere the graph does not cover, and the road restriction is lifted
+        /// rather than freezing it.</summary>
+        private const float OnRoadSearchMetres = 30f;
+
+        /// <summary>How much the heading must improve to count as the turn making progress, so the
+        /// stall detector stays quiet through a legitimate multi-step turn but still fires on one
+        /// that is genuinely wedged.</summary>
+        private const float TurnProgressDegrees = 3f;
+
         /// <summary>Beyond this a player is not worth turning a turret onto.</summary>
         private const float TurretTrackRangeMetres = 250f;
 
@@ -164,6 +201,13 @@ namespace BanditPlugin.FakePlayer
         /// <summary>When the current reverse hop must end, and the earliest another may start. See
         /// <see cref="ReverseHopSeconds"/>.</summary>
         private float _reverseUntil;
+
+        /// <summary>Three-point-turn state: whether one is in progress, whether the current leg is
+        /// the reverse one, and the best (smallest) heading error the turn has reached, for judging
+        /// whether it is still making progress.</summary>
+        private bool _turning;
+        private bool _turningReverse;
+        private float _turnBestError = 180f;
         private float _reverseCooldownUntil;
 
         private const float ConsumableCheckIntervalSeconds = 1f;
@@ -1151,106 +1195,103 @@ namespace BanditPlugin.FakePlayer
             }
 
             _navigator.Tick(vehicle, _footprint, deltaTime, forwardVelocity);
-            UpdateProgress();
 
             float yaw = vehicleTransform.eulerAngles.y;
-            Vector3 travel = ResolveTravelDirection(vehicle, yaw, out bool reverse);
+            Vector3 heading = _navigator.DesiredDirection;
 
-            if (travel.sqrMagnitude < 0.0001f)
+            if (heading.sqrMagnitude < 0.0001f)
             {
+                // Nowhere clear to steer - the navigator could not find a heading that fits. Hold on
+                // the brake; the stall detector decides when to give up.
+                UpdateProgress();
                 ApplyWheelInputs(vehicle, deltaTime, 0, 0, brake: true);
                 steeringInput = 0f;
+                _reversing = false;
+                _turning = false;
                 return;
             }
 
-            float travelYaw = Mathf.Atan2(travel.x, travel.z) * Mathf.Rad2Deg;
-            float noseYaw = reverse ? travelYaw + 180f : travelYaw;
-            float headingError = Mathf.DeltaAngle(yaw, noseYaw);
+            float desiredYaw = Mathf.Atan2(heading.x, heading.z) * Mathf.Rad2Deg;
 
-            // Left, right, or straight ahead - the same three states a player's keyboard offers, and
-            // the wheel code turns them into an angle at the asset's own steering speed. The
-            // deadband is what stops a vehicle sawing at the wheel down a straight. Backing up
-            // steers the other way, because the wheels that turn are still at the front while the
-            // vehicle travels tail first.
-            // Steered on where the nose will be pointing shortly rather than where it is pointing
-            // now - see SteeringDampingSeconds. The rate comes off the rigidbody, which is the real
-            // one under physics driving.
-            float yawRate = body != null ? body.angularVelocity.y * Mathf.Rad2Deg : 0f;
-            float steerError = headingError - yawRate * SteeringDampingSeconds;
+            // The signed error of the nose from where we want it pointing, always measured against
+            // the real target heading rather than against whichever way we happen to be driving.
+            // Getting this wrong - measuring it against a straight-back reverse direction, so it read
+            // as zero - is why the old reverse just went straight and never turned the vehicle round.
+            float headingError = Mathf.DeltaAngle(yaw, desiredYaw);
+            float absError = Mathf.Abs(headingError);
 
-            int steer = Mathf.Abs(steerError) < SteeringDeadbandDegrees
-                ? 0
-                : (steerError > 0f ? 1 : -1);
-
-            if (reverse)
+            // Enter a three-point turn when the target is well off the nose, leave it once the nose
+            // has come most of the way round. In open ground the "turn" never needs its reverse leg
+            // and is just a hard forward arc; in a tight space it alternates, which is the manoeuvre.
+            if (!_turning && absError > TurnAroundEnterDegrees)
             {
-                steer = -steer;
+                _turning = true;
+                _turningReverse = false;
+                _turnBestError = absError;
+            }
+            else if (_turning && absError < TurnAroundExitDegrees)
+            {
+                _turning = false;
             }
 
-            steeringInput = steer;
-
-            // Speed is held by lifting off rather than by writing a number, which is what makes the
-            // acceleration curve the vehicle's own. SpeedScale is the convoy's interval keeping and
-            // its crawl under contact, and it works here unchanged.
-            float limit = (reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle)) * Mathf.Clamp01(SpeedScale);
-            float along = reverse ? -forwardVelocity : forwardVelocity;
-
-            // Held to what it could stop from inside the road it can actually see, but only going
-            // forward. ClearAheadMetres is measured along the navigator's forward heading, so
-            // clamping a reverse hop with it is clamping the wrong direction - and a vehicle that
-            // reverses precisely because the way ahead is blocked would then be forbidden from
-            // reversing by that same block. The reverse is a short bounded hop whose own path was
-            // already swept clear before it was chosen (see ResolveTravelDirection).
-            if (!reverse)
-            {
-                limit = Mathf.Min(limit, StoppableSpeed(_navigator.ClearAheadMetres));
-            }
-
+            int steer;
             int throttle;
             bool brake = false;
+            bool reverse;
 
-            if (limit <= 0.01f)
+            // A stall recovery, set by UpdateProgress when the vehicle has stopped getting closer,
+            // takes precedence over both driving and turning: back straight out of whatever it is
+            // wedged against, with the wheels turned toward the target so the reverse also starts
+            // lining it up. This is the head-on case a three-point turn does not cover - nose into a
+            // wall, target dead ahead - and without it a physics-driven vehicle had no way to
+            // reverse out of anything, because the reverse used to live on a path this no longer
+            // takes.
+            if (Time.time < _unstickUntil && _navigator.IsTravelClear(vehicle, _footprint,
+                    -(Quaternion.Euler(0f, yaw, 0f) * Vector3.forward), ignoreOverlap: true))
             {
-                // "Stay put with the engine running" - the convoy's rallying state, and a follower
-                // that has closed right up on the vehicle in front. Coasting is not staying put on
-                // a hill, so this is the brake rather than simply no throttle.
-                throttle = 0;
-                brake = true;
+                reverse = true;
+                _turning = false;
+                int toward = absError < SteeringDeadbandDegrees ? 0 : (headingError > 0f ? 1 : -1);
+                steer = -toward;
+                float reverseSpeed = -forwardVelocity;
+                throttle = reverseSpeed > CreepMetresPerSecond ? 0 : -1;
+                brake = reverseSpeed > CreepMetresPerSecond;
             }
-            else if (Mathf.Abs(headingError) > StopAndTurnDegrees)
+            else if (_turning)
             {
-                // Pointing the wrong way entirely - so creep round it rather than stopping to turn.
-                //
-                // Stopping was right when this class wrote the pose itself, because it could simply
-                // rotate the vehicle on the spot. A real one cannot: steered wheels do nothing at a
-                // standstill, so braking until the nose comes round is a vehicle that never moves
-                // again, and the only thing that eventually breaks the deadlock is the stall
-                // detector deciding it is wedged. Creeping forward on full lock is how the manoeuvre
-                // is actually done, and if there genuinely is no room the clearance sweep is what
-                // says so.
-                limit = Mathf.Min(limit, CreepMetresPerSecond);
-                throttle = along > limit ? 0 : (reverse ? -1 : 1);
-            }
-            else if (along > limit)
-            {
-                throttle = 0;
-                brake = along > limit + OverspeedBrakeMetresPerSecond;
+                StepThreePointTurn(vehicle, yaw, headingError, absError, forwardVelocity,
+                    out steer, out throttle, out brake, out reverse);
             }
             else
             {
-                throttle = reverse ? -1 : 1;
+                StepForwardDrive(vehicle, body, headingError, forwardVelocity,
+                    out steer, out throttle, out brake, out reverse);
             }
+
+            // The heading that stopped working is the one a stall bans, so the reroute goes a
+            // different way. Only while going forward - the way out of a reverse is not a direction
+            // to forbid.
+            if (!reverse)
+            {
+                _lastTravelDirection = heading.normalized;
+            }
+
+            UpdateProgress();
+
+            steeringInput = steer;
 
             ClearSquadmatesFromPath(vehicle, vehicleTransform.position,
                 reverse ? -vehicleTransform.forward : vehicleTransform.forward, Mathf.Abs(forwardVelocity));
 
             ApplyWheelInputs(vehicle, deltaTime, steer, throttle, brake);
 
+            float along = reverse ? -forwardVelocity : forwardVelocity;
             BanditNavLog.Trace(this,
-                $"v={along:0.0}/{limit:0.0}m/s scale={SpeedScale:0.00} steer={steer} thr={throttle}"
+                $"v={along:0.0}m/s scale={SpeedScale:0.00} steer={steer} thr={throttle}"
                 + (brake ? " BRAKE" : string.Empty)
                 + (reverse ? " REV" : string.Empty)
-                + $" err={headingError:0}deg yaw'={yawRate:0}deg/s"
+                + (_turning ? (_turningReverse ? " TURN-REV" : " TURN-FWD") : string.Empty)
+                + $" err={headingError:0}deg"
                 + $" clear={(_navigator.ClearAheadMetres >= float.MaxValue * 0.5f ? "inf" : _navigator.ClearAheadMetres.ToString("0.0"))}m"
                 + $" left={_navigator.RemainingDistance:0.0}m"
                 + (_navigator.AvoidanceDegrees != 0f ? $" avoid={_navigator.AvoidanceDegrees:0}deg" : string.Empty)
@@ -1397,6 +1438,165 @@ namespace BanditPlugin.FakePlayer
 
             float allowedRise = travelled * MaxClimbTangent + MaxStepUpMetres;
             return ground.y - currentSurface <= allowedRise;
+        }
+
+        /// <summary>
+        /// Ordinary driving: aimed at the target, arcing toward it, at a speed it can stop from
+        /// within the road it can see. Used whenever the nose is roughly the right way round; a big
+        /// turn is the three-point turn's job instead.
+        /// </summary>
+        private void StepForwardDrive(InteractableVehicle vehicle, Rigidbody body, float headingError,
+            float forwardVelocity, out int steer, out int throttle, out bool brake, out bool reverse)
+        {
+            reverse = false;
+            brake = false;
+
+            // Steered on where the nose will be pointing shortly rather than where it is now, so it
+            // unwinds the wheel before it is straight instead of sawing across the line. The rate
+            // comes off the rigidbody, which is the real body under physics driving.
+            float yawRate = body != null ? body.angularVelocity.y * Mathf.Rad2Deg : 0f;
+            float steerError = headingError - yawRate * SteeringDampingSeconds;
+
+            steer = Mathf.Abs(steerError) < SteeringDeadbandDegrees ? 0 : (steerError > 0f ? 1 : -1);
+
+            float limit = CruiseSpeed(vehicle) * Mathf.Clamp01(SpeedScale);
+            limit = Mathf.Min(limit, StoppableSpeed(_navigator.ClearAheadMetres));
+
+            if (limit <= 0.01f)
+            {
+                throttle = 0;
+                brake = true;
+                return;
+            }
+
+            if (forwardVelocity > limit)
+            {
+                throttle = 0;
+                brake = forwardVelocity > limit + OverspeedBrakeMetresPerSecond;
+            }
+            else
+            {
+                throttle = 1;
+            }
+        }
+
+        /// <summary>
+        /// A three-point turn. The one manoeuvre a vehicle cannot fake and the old code got wrong.
+        ///
+        /// The rule is the one a driver uses: rotate the nose toward where you want to go, going
+        /// forward while there is room ahead and backward when there is not - and crucially, when
+        /// backing up, turn the wheels the *opposite* way, because a reversing car pivots its nose
+        /// the other way for a given steering input. Steering the same way in both gears is what
+        /// made the old reverse cancel the forward leg and leave the vehicle rocking on the spot.
+        ///
+        /// Every leg is checked before it is driven - both for something solid in the way and for
+        /// the edge of the road - so the turn never grinds into a wall and never swings off the
+        /// tarmac. When a leg is blocked the other gear is taken; when both are blocked it holds,
+        /// and the stall detector ends the trip.
+        /// </summary>
+        private void StepThreePointTurn(InteractableVehicle vehicle, float yaw, float headingError,
+            float absError, float forwardVelocity, out int steer, out int throttle, out bool brake,
+            out bool reverse)
+        {
+            // Heading progress keeps the stall detector quiet: a turn that is still bringing the
+            // nose round is working, however little ground it is covering.
+            if (absError < _turnBestError - TurnProgressDegrees)
+            {
+                _turnBestError = absError;
+                _lastProgressTime = Time.time;
+            }
+
+            Vector3 nose = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
+
+            // Two separate questions per leg: is it clear of obstacles, and does it keep us on the
+            // road. Clearance is a hard no - we never drive into things. The road is only a
+            // preference: a vehicle turning across a road has its nose and tail pointing at the two
+            // shoulders, so a straight probe forward and back both read as off-road even though the
+            // arc between them is fine. Treating the road as a hard rule there froze the turn with
+            // clear tarmac all around it, which is the "refuses to move" in the log. So we prefer a
+            // leg that is both clear and on-road, and fall back to one that is merely clear.
+            bool forwardClear = _navigator.IsTravelClear(vehicle, _footprint, nose, ignoreOverlap: false);
+            bool reverseClear = _navigator.IsTravelClear(vehicle, _footprint, -nose, ignoreOverlap: true);
+            bool forwardOnRoad = forwardClear && IsOnRoad(vehicle.transform.position + nose * ManeuverProbeMetres);
+            bool reverseOnRoad = reverseClear && IsOnRoad(vehicle.transform.position - nose * ManeuverProbeMetres);
+
+            // Switch leg when the current one is no longer the better choice. Preference order:
+            // a clear-and-on-road leg beats a merely-clear leg beats nothing.
+            bool currentGood = _turningReverse ? reverseOnRoad : forwardOnRoad;
+            bool otherGood = _turningReverse ? forwardOnRoad : reverseOnRoad;
+            bool currentClear = _turningReverse ? reverseClear : forwardClear;
+            bool otherClear = _turningReverse ? forwardClear : reverseClear;
+
+            if (!currentGood && otherGood)
+            {
+                _turningReverse = !_turningReverse;
+            }
+            else if (!currentClear && otherClear)
+            {
+                _turningReverse = !_turningReverse;
+            }
+
+            reverse = _turningReverse;
+            bool legOpen = reverse ? reverseClear : forwardClear;
+
+            // Wheels toward the target going forward; the opposite lock going backward, which is
+            // what actually swings the nose the same way in reverse.
+            int toward = absError < SteeringDeadbandDegrees ? 0 : (headingError > 0f ? 1 : -1);
+            steer = reverse ? -toward : toward;
+
+            float along = reverse ? -forwardVelocity : forwardVelocity;
+
+            if (!legOpen)
+            {
+                // The chosen leg is blocked and so is the other, or we just flipped to a leg that is
+                // itself blocked. Hold, brake, and let the stall timer run.
+                steer = 0;
+                throttle = 0;
+                brake = true;
+                return;
+            }
+
+            // A crawl - a turn in a confined space is not a place for speed - and braked down to it
+            // if we are somehow going faster.
+            if (along > CreepMetresPerSecond)
+            {
+                throttle = 0;
+                brake = true;
+            }
+            else
+            {
+                throttle = reverse ? -1 : 1;
+                brake = false;
+            }
+        }
+
+        /// <summary>
+        /// Whether a point is on (or close enough to) a road, by the graph's own idea of where the
+        /// roads are and how wide they are.
+        ///
+        /// When there is no road within reach the restriction is lifted rather than enforced - off
+        /// the graph's coverage, "stay on the road" has no meaning and would only freeze the
+        /// vehicle. On the road, the tolerance is the carriageway half-width plus a shoulder.
+        /// </summary>
+        private static bool IsOnRoad(Vector3 point)
+        {
+            if (!BanditRoadGraph.TryGetNearest(point, OnRoadSearchMetres, out int nodeIndex, out float distance))
+            {
+                return true; // no road here to be off of
+            }
+
+            BanditRoadGraph.RoadNode node = BanditRoadGraph.Get(nodeIndex);
+            float half = node != null ? node.HalfWidth : 4f;
+
+            // A junction is wide open - the middle of a crossroads is drivable in every direction,
+            // not just along one street's centre line - so a node where several roads meet gets a
+            // much larger allowance, which is what lets a vehicle cut across an intersection off to
+            // one side instead of reversing to line up on the crown.
+            float margin = node != null && node.Links.Count > 2
+                ? JunctionRoadMarginMetres
+                : OnRoadMarginMetres;
+
+            return distance <= half + margin;
         }
 
         private Vector3 ResolveTravelDirection(InteractableVehicle vehicle, float yaw, out bool reverse)
