@@ -444,6 +444,23 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
+            // Already aboard the vehicle this order names, by whatever route - the order that put
+            // it there succeeded and something asked again, or a rally seated it before this tick
+            // ran. TryEnter would refuse that with "it is already in a Ural", the retry would refuse
+            // it identically every frame, and the whole thing would end in a log line saying the man
+            // gave up and is fighting on foot while he sits in the seat he was asked for. Which is
+            // exactly what the server log was full of.
+            if (Driver.IsSeated && Driver.Vehicle == _pendingSeatVehicle)
+            {
+                if (_pendingSeatIsGunner)
+                {
+                    Driver.TrackNearestPlayer = true;
+                }
+
+                _pendingSeatVehicle = null;
+                return;
+            }
+
             if (Driver.TryEnter(_pendingSeatVehicle, _pendingSeat, out string reason))
             {
                 // A turret crewman tracks and engages on its own from here; a driver holds the

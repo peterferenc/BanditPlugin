@@ -1,9 +1,9 @@
 # Convoys
 
-`/banditevent convoy 300` buys three hundred points of crewed vehicles, spawns them nose-to-tail at
-the first waypoint of `/banditevent wp`, and drives them through the rest. No foot squads are drawn:
-a squad spawned beside the road would be left behind by the first leg. At the last waypoint they
-stop and stay.
+`/banditevent convoy 300` buys three hundred points of crewed vehicles, forms them up on the first
+waypoint of `/banditevent wp`, and drives them through the rest. No foot squads are drawn: a squad
+spawned beside the road would be left behind by the first leg. At the last waypoint they stop and
+stay.
 
 The difference from the vehicles an ordinary event spawns is what they are *for*. Those are an
 ambush - they sit until the event sees somebody, drive at them and empty out on top of them, so the
@@ -126,10 +126,112 @@ stops rather than motoring along the bottom. The convoy drops that vehicle from 
 is put out of it, since a rider ordered into deep water drowns as surely as the vehicle did, and a
 column that waits for it never moves again.
 
-Each vehicle picks its own lane through a road point: over to the right if half the carriageway can
-hold its width plus a margin, down the middle if it cannot. That is measured against the footprint
-the driver already measures from the vehicle's colliders, so a bike and a tank on the same road make
-different choices.
+Vehicles drive **down the middle of the road** - the route point itself, with no lane offset. They
+used to take the right-hand half of the carriageway, which is what a real driver does and read badly
+here for a reason worth keeping: the graph's half-width is an approximation off a spline, so an
+offset computed from it lands somewhere between the crown and the verge depending on how good that
+approximation was at this node. The node *is* the middle, so the middle needs no approximation to be
+right.
+
+## The column builds itself one vehicle at a time
+
+Nothing is on the ground when `/banditevent convoy` returns. The vehicles are handed to the convoy
+as factories and spawned from its own tick, leapfrogging:
+
+1. Put the head of the column on the start line and wait for its crew to climb in.
+2. Roll everything already spawned forward until the start line is clear again.
+3. Everybody stops for two seconds.
+4. Put the next one down on the ground the column has just physically vacated. Repeat.
+
+When the last one is down the column does **not** leave on the strength of that one driver sitting
+down. It waits for the whole of itself - every vehicle crewed, and every vehicle at rest, since one
+that has just been dropped is still settling on its suspension - and then holds two seconds more
+before it drives. Leaving the moment the last driver was seated is what had the head of the column
+pulling away while its tail was still arriving.
+
+Every wait is bounded, so a crewman who never reaches his seat and a lead vehicle that has driven
+into a tree both cost a timeout rather than the rest of the convoy.
+
+This replaced laying the whole column out at once, spaced back down a straight line drawn at the
+next waypoint, searching sideways whenever a slot was occupied. That line is only the road for the
+first few metres: a route starting on a bend puts the tail of the column through whatever is inside
+the corner, which on PEI is somebody's house. No amount of searching fixes the underlying problem,
+which is that nothing knew where the vehicles would actually fit. Driving the first one out of the
+way does know - that ground was holding a vehicle a second ago.
+
+### Guns at the ends
+
+The order is by armament, and it is also the spawn order, head first:
+
+| Armed vehicles | Column |
+| --- | --- |
+| 0 | as drawn |
+| 1 | armed, then the rest |
+| 2 | armed, unarmed…, armed |
+| 3+ | all but one armed, unarmed…, last armed |
+
+"Armed" means the asset has a turret on a seat the type's crew list actually fills - a vehicle with
+turrets and nobody in one is a taxi, and a crew list naming a seat the vehicle does not have is a
+passenger. `crew:1` therefore makes the whole column unarmed, which is correct: every vehicle turns
+up with only its driver.
+
+## Roads are objects, and objects are obstacles
+
+The single worst driving bug on this map, and it took `/banditnavlog` to see it. Roads in Unturned
+are level *objects*, on the same layers as buildings: the road mesh is `Segment_n` on Environment,
+and the surface pieces are `Road_Line_n`, `Road_Tee_n`, `Road_Line_Cap_n` on Large. The clearance
+sweep looks for buildings on Large - so it was finding the road it was driving along. One convoy's
+log:
+
+| Refused the heading | Times |
+| --- | --- |
+| `Road_Line_0` (Large) | 243 |
+| `Alive` (Medium) | 95 |
+| `Segment_0` (Environment) | 69 |
+| `Fire_Hydrant_0` (Medium) | 55 |
+
+It only bites where the surface ahead rises into the sweep plate - a crest, a tee, the join between
+two segments, a vehicle sitting nose-down - which is why it read as "they get off the road at a
+segment transition", "the stryker stopped on an empty road" and "they wobble a lot".
+
+The fix is the division of labour the mask already implied: **this sweep refuses walls, and whether
+a surface can be climbed is the slope test's business.** A contact whose normal is within the climb
+limit is not an obstacle, whatever layer it is on. Environment leaves the mask entirely, since it
+holds roads and bridges and `VehicleTerrain.GroundMask` already treats it as ground - a layer cannot
+sensibly be a surface to the ground probe and a wall to the sweep.
+
+## A reverse hop has to end
+
+Reversing was latched and the latch had no exit. It ended when the heading error fell below seventy
+degrees or the destination got more than twenty-seven metres away - but a reversing vehicle points
+its *tail* at the destination, so the heading error sits near a hundred and eighty by construction,
+and a vehicle following a route is handed a fresh target twelve metres ahead the whole way, so the
+distance never grows. `REV err=-56 left=12.0m`, held for the length of the trip: they drove the
+route backwards.
+
+A hop is a manoeuvre with an end now - a couple of seconds, then forwards whatever the geometry
+says, then a cooldown before another is allowed. Which is also how a person does it: reverse once,
+then drive out of it.
+
+They were also being *aimed* backwards. The column faced the straight line to the next waypoint,
+while the road leaving the start point can run the other way before it turns - so the first point of
+the planned route sat behind them, a hundred and twenty degrees off the nose, and they reversed at
+it from the first packet. The spawn now faces along the route that was actually planned.
+
+## Nobody drives into the back of anybody
+
+The clearance sweep only ever answered yes or no, at seven metres - which at road speed arrives
+about half a second before the impact does, leaving a swerve or a collision as the only two options.
+The navigator now also reports **how much clear road there is** along the heading it settled on, out
+to thirty metres, and the driver holds itself to a speed it could stop from within it. Following a
+slower vehicle, slowing for a parked car before deciding whether to go round it, and stopping behind
+something impassable all fall out of that one rule.
+
+It also reports whether the nearest thing is a *vehicle* or scenery, because the difference decides
+what patience means. Traffic clears; a wall does not. Sitting behind traffic does not feed the stall
+detector for twelve seconds, so a follower in a column that stops does not decide it is wedged and
+reverse into whoever is behind it - and after twelve seconds it goes looking for a way past anyway,
+so a burnt-out wreck across the road does not stop the convoy for good.
 
 Interval keeping is **speed, not steering**. Everything is driving the same route, so a follower
 that is too close does not need to go round the vehicle in front - it needs to stop pushing into it,

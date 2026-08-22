@@ -221,13 +221,15 @@ namespace BanditPlugin.Commands
         }
 
         /// <summary>
-        /// Puts the column on the ground at the first waypoint, nose-to-tail along the first leg,
-        /// and hands it to <see cref="BanditConvoy"/> to drive.
+        /// Works out where the column starts, what order it drives in, and hands the whole thing to
+        /// <see cref="BanditConvoy"/> to put on the ground one vehicle at a time.
         ///
-        /// Spawning in column rather than on the ring an event uses is the whole difference in
-        /// layout: these vehicles are going somewhere together, in an order, and dropping them in a
-        /// circle would have them spend the first hundred metres sorting themselves out - or, worse,
-        /// driving through each other while they do.
+        /// Nothing is spawned here any more. It used to lay the entire column out at once, spaced
+        /// back down a straight line drawn at the next waypoint, and search sideways whenever a slot
+        /// was occupied - and the vehicles still ended up in houses, because that line stops being
+        /// the road the moment the route bends. The convoy spawns them itself now, leapfrogging: one
+        /// vehicle, driven forward, next vehicle onto the ground it just left. See
+        /// BanditConvoy.TickForming.
         /// </summary>
         private static void Spawn(IRocketPlayer caller, BanditConfiguration config, Player player,
             BanditEventPlan plan, BanditTeam team, IReadOnlyList<Vector3> route, bool useRoads, int seed,
@@ -252,72 +254,144 @@ namespace BanditPlugin.Commands
                 }
             }
 
+            start = ResolveSpawnSlot(start, travel, useRoads);
+
             float facing = Mathf.Atan2(travel.x, travel.z) * Mathf.Rad2Deg;
             Vector3 right = Vector3.Cross(Vector3.up, travel);
+            Vector3 origin = player.transform.position;
 
             BanditEvent banditEvent = BanditEvent.Create(plan.Budget);
-            List<BanditEvent.Ride> rides = new List<BanditEvent.Ride>();
+            List<BanditVehicleType> order = OrderColumn(plan.Vehicles, crewLimit);
+            List<BanditConvoy.VehicleFactory> factories =
+                new List<BanditConvoy.VehicleFactory>(order.Count);
 
-            for (int i = 0; i < plan.Vehicles.Count; i++)
+            foreach (BanditVehicleType type in order)
             {
-                // Back down the route, so the head of the column is on the first waypoint and the
-                // tail is behind it rather than in front - and onto the road and out of whatever
-                // happens to be standing there. See ResolveSpawnSlot.
-                Vector3 slot = ResolveSpawnSlot(start - travel * (i * config.ConvoySpacing), travel, useRoads);
+                // Captured rather than spawned: the convoy decides when each of these runs, and the
+                // spot it passes in is the start line as it stands at that moment.
+                BanditVehicleType captured = type;
 
-                BanditPlacement.Result placed = new BanditPlacement.Result
+                factories.Add((spot, spawnFacing) =>
                 {
-                    Origin = player.transform.position,
-                    Centre = slot,
-                    Forward = travel,
-                    Right = right,
-                    Facing = facing,
-                    UsedMarker = false
-                };
+                    BanditPlacement.Result placed = new BanditPlacement.Result
+                    {
+                        Origin = origin,
+                        Centre = spot,
+                        Forward = travel,
+                        Right = right,
+                        Facing = spawnFacing,
+                        UsedMarker = false
+                    };
 
-                int before = banditEvent.Rides.Count;
-                CommandBanditEvent.SpawnRide(config, banditEvent, team, placed, plan.Vehicles[i], slot,
-                    crewLimit);
-
-                for (int added = before; added < banditEvent.Rides.Count; added++)
-                {
-                    rides.Add(banditEvent.Rides[added]);
-                }
+                    return CommandBanditEvent.SpawnRide(config, banditEvent, team, placed, captured, spot,
+                        crewLimit);
+                });
             }
 
             banditEvent.Spent = plan.Spent;
 
-            if (rides.Count == 0)
-            {
-                UnturnedChat.Say(caller, "Nothing could be spawned - check the vehicle names with "
-                    + "/banditevent check.", Color.red);
-                return;
-            }
-
-            // The first waypoint is where they are standing, so the route they drive is everything
-            // after it.
+            // The first waypoint is where they start, so the route they drive is everything after it.
             List<Vector3> legs = new List<Vector3>(route.Count - 1);
             for (int i = 1; i < route.Count; i++)
             {
                 legs.Add(route[i]);
             }
 
-            BanditConvoy convoy = BanditConvoy.Create(banditEvent, rides, start, legs, useRoads, out string summary);
+            BanditConvoy convoy = BanditConvoy.Create(banditEvent, factories, start, travel, legs, useRoads,
+                config.ConvoySpacing, out string summary);
 
             if (convoy == null)
             {
-                UnturnedChat.Say(caller, $"Could not plan the route: {summary}. The vehicles are "
-                    + "spawned and holding.", Color.red);
+                UnturnedChat.Say(caller, $"Could not plan the route: {summary}. Nothing was spawned.",
+                    Color.red);
                 return;
             }
 
             UnturnedChat.Say(caller, $"Convoy {convoy.Id}: {plan.Spent:0} of {plan.Budget:0} pts, "
-                + $"{rides.Count} vehicle(s), {banditEvent.BanditCount} bandit(s), "
-                + $"{route.Count} waypoint(s)"
+                + $"{factories.Count} vehicle(s), {route.Count} waypoint(s)"
                 + (team != null ? $", team {team.Label}" : ", no team") + ".", Color.green);
+
+            UnturnedChat.Say(caller, $"  Forming up at ({start.x:0}, {start.z:0}) - one vehicle at a "
+                + "time, each pulling forward to make room for the next.", Color.grey);
 
             UnturnedChat.Say(caller, $"  Route: {summary}, {convoy.PointCount} point(s) "
                 + $"({convoy.RoadPointCount} on road). Seed {seed}.", Color.grey);
+        }
+
+        /// <summary>
+        /// The order the column drives in: guns at the ends, soft skin in the middle.
+        ///
+        /// One armed vehicle leads. Two, and the second one brings up the rear. More than two, and
+        /// only one stays at the back - everything else goes to the front, because the head of a
+        /// column is where it meets whatever it is going to meet. The unarmed vehicles are what is
+        /// being escorted, so they ride between.
+        ///
+        /// This is also the order they spawn in, head first, which is what makes the leapfrog work:
+        /// the vehicle that drives away to make room is the one that should be in front anyway.
+        /// </summary>
+        private static List<BanditVehicleType> OrderColumn(List<BanditVehicleType> vehicles, int crewLimit)
+        {
+            List<BanditVehicleType> armed = new List<BanditVehicleType>();
+            List<BanditVehicleType> unarmed = new List<BanditVehicleType>();
+
+            foreach (BanditVehicleType type in vehicles)
+            {
+                (IsArmed(type, crewLimit) ? armed : unarmed).Add(type);
+            }
+
+            List<BanditVehicleType> column = new List<BanditVehicleType>(vehicles.Count);
+
+            // Everything armed except the last one leads; with a single gun there is no last one to
+            // hold back, so it simply leads.
+            int lead = armed.Count >= 2 ? armed.Count - 1 : armed.Count;
+
+            for (int i = 0; i < lead; i++)
+            {
+                column.Add(armed[i]);
+            }
+
+            column.AddRange(unarmed);
+
+            for (int i = lead; i < armed.Count; i++)
+            {
+                column.Add(armed[i]);
+            }
+
+            return column;
+        }
+
+        /// <summary>
+        /// Whether this vehicle type will actually arrive with a gun manned.
+        ///
+        /// Both halves matter: a vehicle with turrets and nobody configured into one of them is a
+        /// taxi, and a crew list naming a turret seat the vehicle does not have is a passenger. The
+        /// asset is the authority on which seats carry guns, so the two are checked against each
+        /// other rather than either being taken on trust. crewLimit is honoured because "crew:1" is
+        /// a real thing to type and it means every vehicle turns up with only its driver.
+        /// </summary>
+        private static bool IsArmed(BanditVehicleType type, int crewLimit)
+        {
+            if (type?.Crew == null)
+            {
+                return false;
+            }
+
+            VehicleAsset asset = BanditVehicleSpawner.Resolve(type.Vehicle, out string _);
+            if (asset == null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < type.Crew.Count && i < crewLimit; i++)
+            {
+                BanditVehicleSeat seat = type.Crew[i];
+                if (seat != null && CommandBanditEvent.IsTurretSeat(asset, seat.Seat))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -368,7 +442,7 @@ namespace BanditPlugin.Commands
 
                 candidate = BanditPlacement.SnapToGround(candidate);
 
-                if (IsSpawnSlotClear(candidate, travel))
+                if (BanditPlacement.IsVehicleSlotClear(candidate, travel))
                 {
                     return candidate;
                 }
@@ -377,24 +451,6 @@ namespace BanditPlugin.Commands
             // Nothing clear anywhere along the search. Put it where it was asked for - a vehicle
             // wedged in something is still better than no vehicle, and the driver will reverse out.
             return BanditPlacement.SnapToGround(desired);
-        }
-
-        /// <summary>Whether a vehicle-sized box at this spot is free of buildings, fences, trees and
-        /// anything already parked there.</summary>
-        private static bool IsSpawnSlotClear(Vector3 spot, Vector3 travel)
-        {
-            const int Mask = RayMasks.LARGE | RayMasks.MEDIUM | RayMasks.SMALL | RayMasks.RESOURCE
-                | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE;
-
-            // Sized for something the width of a lorry, and lifted so the box is the body of the
-            // vehicle rather than the ground it is standing on.
-            Vector3 halfExtents = new Vector3(1.6f, 1f, 3.4f);
-            Quaternion orientation = travel.sqrMagnitude > 0.0001f
-                ? Quaternion.LookRotation(travel, Vector3.up)
-                : Quaternion.identity;
-
-            return !Physics.CheckBox(spot + Vector3.up * (halfExtents.y + 0.3f), halfExtents,
-                orientation, Mask, QueryTriggerInteraction.Ignore);
         }
 
         /// <summary>How hard to look for a clear spawn slot, and how far each step moves.</summary>

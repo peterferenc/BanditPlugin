@@ -220,7 +220,9 @@ namespace BanditPlugin.Commands
         /// standing beside the vehicle, armed and in the squad, which is a perfectly serviceable
         /// outcome.
         /// </summary>
-        internal static void SpawnRide(BanditConfiguration config, BanditEvent banditEvent, BanditTeam team,
+        /// <returns>The ride, or null if the vehicle itself could not be put on the ground. A
+        /// convoy spawns one vehicle at a time and has to know which one it just got.</returns>
+        internal static BanditEvent.Ride SpawnRide(BanditConfiguration config, BanditEvent banditEvent, BanditTeam team,
             BanditPlacement.Result placed, BanditVehicleType type, Vector3 spot, int crewLimit = int.MaxValue)
         {
             InteractableVehicle vehicle = BanditVehicleSpawner.Spawn(type.Vehicle, spot, placed.Facing,
@@ -230,7 +232,7 @@ namespace BanditPlugin.Commands
             {
                 Rocket.Core.Logging.Logger.LogWarning($"[Bandit] Event {banditEvent.Id}: could not spawn "
                     + $"'{type.Name}' - {vehicleError}. Check its Vehicle setting with /banditevent check.");
-                return;
+                return null;
             }
 
             BanditEvent.Ride ride = new BanditEvent.Ride
@@ -321,9 +323,13 @@ namespace BanditPlugin.Commands
             {
                 banditEvent.Squads.Add(squad);
             }
+
+            return ride;
         }
 
-        private static bool IsTurretSeat(VehicleAsset asset, byte seat)
+        /// <summary>Whether this seat of this vehicle carries a gun. Read off the asset, because the
+        /// seat a turret is on is a fact about the vehicle rather than something to configure.</summary>
+        internal static bool IsTurretSeat(VehicleAsset asset, byte seat)
         {
             if (asset?.turrets == null)
             {

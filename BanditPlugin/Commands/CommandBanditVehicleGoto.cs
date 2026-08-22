@@ -45,6 +45,7 @@ namespace BanditPlugin.Commands
 
             if (command.Length > 0 && command[0].ToLowerInvariant() == "stop")
             {
+                BanditRouteDrive.Stop(bandit);
                 bandit.Driver.StopDriving();
                 UnturnedChat.Say(caller, "Bandit holding station.", Color.green);
                 return;
@@ -54,6 +55,13 @@ namespace BanditPlugin.Commands
             {
                 UnturnedChat.Say(caller, "That bandit is on foot - put it in a vehicle with /banditv drive, "
                     + "or send it walking with /banditgoto.", Color.red);
+                return;
+            }
+
+            if (command.Length > 0 && (command[0].ToLowerInvariant() == "wp"
+                || command[0].ToLowerInvariant() == "route"))
+            {
+                DriveRoute(caller, bandit, command);
                 return;
             }
 
@@ -85,6 +93,62 @@ namespace BanditPlugin.Commands
                 + $"{footprint.HalfWidth * 2f:0.0}m wide by {footprint.HalfLength * 2f:0.0}m long. "
                 + "/banditstatus for progress.",
                 Color.green);
+        }
+
+        /// <summary>
+        /// Sends the bandit round the recorded convoy route, on its own.
+        ///
+        /// Deliberately the same route planner and the same driver a convoy uses - the point of this
+        /// is to be a convoy with everything except the driving removed, so a line it takes badly
+        /// here is a line a column would take badly too, and one it takes well narrows the problem
+        /// to the column.
+        /// </summary>
+        private static void DriveRoute(IRocketPlayer caller, BanditBotController bandit, string[] command)
+        {
+            // Both waypoint lists, in that order. There are two of them - /banditevent wp records a
+            // convoy route, /banditwp records a patrol route - and which one somebody has filled in
+            // is not something worth being pedantic about when they have asked a vehicle to drive
+            // waypoints and there is exactly one list with anything in it.
+            IReadOnlyList<Vector3> route = BanditConvoyRoute.Current;
+            string source = "/banditevent wp";
+
+            if (route.Count < 1)
+            {
+                route = BanditWaypointStore.Current;
+                source = "/banditwp";
+            }
+
+            if (route.Count < 1)
+            {
+                UnturnedChat.Say(caller, "No waypoints on this map. /banditevent wp set records a "
+                    + "convoy route where you stand, /banditwp records a patrol route.", Color.red);
+                return;
+            }
+
+            bool useRoads = true;
+            for (int i = 1; i < command.Length; i++)
+            {
+                string word = command[i].ToLowerInvariant();
+                if (word == "noroads" || word == "offroad" || word == "useroads:false")
+                {
+                    useRoads = false;
+                }
+            }
+
+            if (!BanditRouteDrive.Start(bandit, route, useRoads, out string summary))
+            {
+                UnturnedChat.Say(caller, $"Cannot drive the route: {summary}.", Color.red);
+                return;
+            }
+
+            BanditVehicleFootprint footprint = bandit.Driver.Footprint;
+
+            UnturnedChat.Say(caller, $"Driving {route.Count} waypoint(s) from {source} - {summary}. "
+                + $"{footprint.HalfWidth * 2f:0.0}m wide by {footprint.HalfLength * 2f:0.0}m long.",
+                Color.green);
+
+            UnturnedChat.Say(caller, "/banditnavlog on for the commentary, /banditvgoto stop to end it.",
+                Color.grey);
         }
     }
 }

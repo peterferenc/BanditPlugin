@@ -37,25 +37,78 @@ namespace BanditPlugin.FakePlayer
 
         public enum ConvoyState
         {
+            /// <summary>Putting itself on the ground one vehicle at a time. See <see cref="TickForming"/>.</summary>
+            Forming,
             Cruise,
             Contact,
             Rallying,
             Arrived
         }
 
+        /// <summary>Which step of the leapfrog the column is on while it forms up.</summary>
+        private enum FormPhase
+        {
+            /// <summary>Put the next vehicle down on the start line.</summary>
+            Spawn,
+
+            /// <summary>Wait for the crew that just spawned to climb aboard.</summary>
+            Board,
+
+            /// <summary>Roll the column forward far enough to clear the start line again.</summary>
+            Advance,
+
+            /// <summary>Stand still for a moment so the column settles before the next one lands.</summary>
+            Hold,
+
+            /// <summary>The last vehicle is down. Wait for the whole column - not just that one - to
+            /// be crewed and at rest before anybody drives anywhere.</summary>
+            Settle,
+
+            /// <summary>Formed up and about to leave. The two-second pause before it does.</summary>
+            Depart
+        }
+
         /// <summary>
-        /// How near the current route point a vehicle has to get before it is given the next one.
+        /// Puts one vehicle on the ground and returns it, or null if it could not be spawned.
         ///
-        /// Larger than the navigator's own arrival radius on purpose. Route points are eight metres
-        /// apart, and a column that had to put its bumper on each one in turn would brake into every
-        /// single one of them - the vehicle is handed the next point while it is still rolling at
-        /// the current one, so a straight road is driven as a straight road.
+        /// A delegate rather than a list of vehicle types because everything a spawn needs - the
+        /// team, the budget it came out of, the crew kits, the event it belongs to - lives in the
+        /// command that drew it, and none of that is a convoy's business. The convoy's business is
+        /// only *when*.
         /// </summary>
-        private const float AdvanceRadiusMetres = 14f;
+        public delegate BanditEvent.Ride VehicleFactory(Vector3 spot, float facing);
+
+
+        /// <summary>
+        /// How far ahead along the route a vehicle steers.
+        ///
+        /// Separate from which point it has *reached*, and that separation is the point. Route
+        /// points come eight metres apart; aiming at the next one it has not yet reached means
+        /// aiming at something that may be half a metre away, which is a full-lock steering input
+        /// for no reason. Aiming a fixed distance up the road instead is how the road gets followed
+        /// rather than connected dot to dot.
+        /// </summary>
+        /// <summary>
+        /// Scaled with speed rather than fixed, and clamped at both ends.
+        ///
+        /// A fixed twelve metres is too far for a ninety-degree turn - the aim point is already
+        /// round the corner while the vehicle is still short of it, so it starts the turn late, cuts
+        /// the inside and runs wide - and too near for a straight, where a close target is what
+        /// makes a vehicle chase small errors. Tying it to speed gets both: the vehicle slows for
+        /// the corner (the clearance probe sees the far side of the junction), the aim point comes
+        /// in with it, and the turn is driven tightly.
+        /// </summary>
+        private const float SteerLookaheadSeconds = 1f;
+        private const float MinSteerLookaheadMetres = 6f;
+        private const float MaxSteerLookaheadMetres = 14f;
 
         /// <summary>How near the final waypoint counts as arrived. A convoy stops in the area, not
         /// on the pixel.</summary>
         private const float ArriveRadiusMetres = 12f;
+
+        /// <summary>How near a route point counts as reached without having driven past it. See
+        /// <see cref="HasPassed"/>.</summary>
+        private const float PointReachedRadiusMetres = 5f;
 
         /// <summary>
         /// The interval a following vehicle tries to keep, and the distance at which it stops rather
@@ -108,9 +161,37 @@ namespace BanditPlugin.FakePlayer
         private const int SkipPointsOnGiveUp = 5;
         private const int MaxGiveUps = 3;
 
-        /// <summary>How long the column waits at the start line for its crews to get aboard before
-        /// leaving without the stragglers. See <see cref="HasFormedUp"/>.</summary>
-        private const float FormUpTimeoutSeconds = 25f;
+        /// <summary>How long the column waits for one vehicle's crew to climb aboard before it
+        /// gives up on the stragglers and spawns the next. See <see cref="TickForming"/>.</summary>
+        private const float BoardTimeoutSeconds = 20f;
+
+        /// <summary>How long the leapfrog is allowed to spend rolling the column clear of the start
+        /// line before it spawns the next vehicle anyway. A backstop for a column that has driven
+        /// into something on its first ten metres, not a normal outcome.</summary>
+        private const float AdvanceTimeoutSeconds = 20f;
+
+        /// <summary>The pause the whole column takes between one vehicle joining and the next
+        /// landing. Two seconds, as asked for: long enough that the vehicles have actually come to
+        /// rest before something is dropped in behind them.</summary>
+        private const float FormHoldSeconds = 2f;
+
+        /// <summary>How fast the column moves while it is shuffling forward to make room. Slow, on
+        /// purpose - this is a manoeuvre in a confined space with a vehicle about to appear in
+        /// it.</summary>
+        private const float FormUpSpeedScale = 0.35f;
+
+        /// <summary>How long the column waits for the whole of itself to be crewed and stopped
+        /// before it leaves anyway. See <see cref="IsColumnReady"/>.</summary>
+        private const float SettleTimeoutSeconds = 15f;
+
+        /// <summary>How slow counts as stopped. A vehicle that has just been dropped is still
+        /// settling on its suspension, and a column that leaves during that is a column whose tail
+        /// is bouncing.</summary>
+        private const float AtRestMetresPerSecond = 0.5f;
+
+        /// <summary>How much further than the bare spacing the column will roll while waiting for
+        /// the start line to physically clear.</summary>
+        private const float FormClearanceSlackMetres = 10f;
 
         /// <summary>How far from a road either end of a leg may be before it is driven direct.</summary>
         public const float RoadSnapDistanceMetres = 80f;
@@ -132,9 +213,21 @@ namespace BanditPlugin.FakePlayer
         private float _lastContactTime = float.MinValue;
         private float _rallyDeadline;
 
-        /// <summary>Whether the column has finished loading and may leave. See <see cref="HasFormedUp"/>.</summary>
-        private bool _hasFormedUp;
-        private readonly float _formUpDeadline;
+        /// <summary>The start line: where every vehicle in the column is put down, one after
+        /// another, and the heading it is put down facing.</summary>
+        private Vector3 _spawnPoint;
+        private float _spawnFacing;
+        private Vector3 _spawnTravel = Vector3.forward;
+
+        /// <summary>The vehicles still to be spawned, in column order - the head of the column
+        /// first, because the head is what drives forward to make room for the rest.</summary>
+        private readonly Queue<VehicleFactory> _pending = new Queue<VehicleFactory>();
+
+        /// <summary>How much room the column leaves on the start line for the next vehicle.</summary>
+        private float _formSpacing = 20f;
+
+        private FormPhase _formPhase = FormPhase.Spawn;
+        private float _formPhaseDeadline;
 
         /// <summary>
         /// Men whose own vehicle is not going anywhere any more - it burned, or its driver was
@@ -195,7 +288,7 @@ namespace BanditPlugin.FakePlayer
         {
             Id = _nextId++;
             Event = banditEvent;
-            _formUpDeadline = Time.time + FormUpTimeoutSeconds;
+            State = ConvoyState.Forming;
             _path = path;
             UsesRoads = usesRoads;
 
@@ -269,6 +362,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             convoy._elements.Clear();
+            convoy._pending.Clear();
             convoy._orphans.Clear();
             convoy._orphanOrders.Clear();
             convoy.State = ConvoyState.Arrived;
@@ -296,15 +390,22 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Plans a route from where the column is standing, through every waypoint in order, and
-        /// starts it moving.
+        /// Plans a route through every waypoint in order and starts a column forming up on the
+        /// first one.
         ///
-        /// Returns null when there is no route worth driving - which in practice means fewer than
-        /// two points came out of the planner - rather than spawning a convoy that reports having
-        /// arrived on its first tick.
+        /// Nothing is on the ground yet when this returns. The vehicles are handed over as factories
+        /// and spawned one at a time from <see cref="TickForming"/>, which is the whole point: a
+        /// column dropped all at once has to be laid out by guessing where each vehicle will fit,
+        /// and the guess is what put lorries in living rooms. Spawning one, driving it forward, and
+        /// then spawning the next into the space it has just physically vacated needs no guess at
+        /// all - the ground is known to be clear because a vehicle was standing on it a moment ago.
+        ///
+        /// Returns null when there is no route worth driving, rather than spawning a convoy that
+        /// reports having arrived on its first tick.
         /// </summary>
-        public static BanditConvoy Create(BanditEvent banditEvent, List<BanditEvent.Ride> rides,
-            Vector3 start, IReadOnlyList<Vector3> waypoints, bool useRoads, out string summary)
+        public static BanditConvoy Create(BanditEvent banditEvent, IReadOnlyList<VehicleFactory> vehicles,
+            Vector3 start, Vector3 travel, IReadOnlyList<Vector3> waypoints, bool useRoads, float spacing,
+            out string summary)
         {
             List<RoutePoint> path = BuildPath(start, waypoints, useRoads, out int roadLegs, out int directLegs);
 
@@ -316,12 +417,36 @@ namespace BanditPlugin.FakePlayer
 
             BanditConvoy convoy = new BanditConvoy(banditEvent, path, useRoads);
 
-            foreach (BanditEvent.Ride ride in rides)
+            // Faced along the route that was actually planned, not along the straight line to the
+            // next waypoint. Those are frequently not the same thing and occasionally opposite: the
+            // road leaving the start point can run the other way before it turns, so the first
+            // point of the road route sits *behind* a column faced at the waypoint. The vehicles
+            // then found their destination a hundred and twenty degrees off the nose, decided it
+            // was behind them, and reversed - which is the "they weren't even going in the right
+            // direction" run, and the log has it at err=-56 REV from the first packet.
+            Vector3 routed = FirstLegDirection(path, start);
+            if (routed.sqrMagnitude > 0.0001f)
             {
-                // The event's own director drives a ride at whoever it sees. A convoy's vehicles
-                // are driven from here instead, and the two must not both be steering.
-                ride.DriveAtCaller = false;
-                convoy._elements.Add(new Element { Ride = ride });
+                travel = routed;
+            }
+
+            travel.y = 0f;
+            if (travel.sqrMagnitude < 0.0001f)
+            {
+                travel = Vector3.forward;
+            }
+
+            convoy._spawnPoint = start;
+            convoy._spawnTravel = travel.normalized;
+            convoy._spawnFacing = Mathf.Atan2(convoy._spawnTravel.x, convoy._spawnTravel.z) * Mathf.Rad2Deg;
+            convoy._formSpacing = Mathf.Max(10f, spacing);
+
+            foreach (VehicleFactory factory in vehicles)
+            {
+                if (factory != null)
+                {
+                    convoy._pending.Enqueue(factory);
+                }
             }
 
             summary = useRoads
@@ -329,6 +454,31 @@ namespace BanditPlugin.FakePlayer
                 : $"{path.Count} point(s), roads off";
 
             return convoy;
+        }
+
+        /// <summary>
+        /// Which way the planned route actually leaves the start point.
+        ///
+        /// Taken from the first route point far enough away to have a meaningful direction, rather
+        /// than from the very first one: road nodes are eight metres apart and the nearest of them
+        /// is often more or less underneath the column, where the direction is noise.
+        /// </summary>
+        private static Vector3 FirstLegDirection(List<RoutePoint> path, Vector3 start)
+        {
+            const float MeaningfulDistance = 10f;
+
+            foreach (RoutePoint point in path)
+            {
+                Vector3 offset = point.Position - start;
+                offset.y = 0f;
+
+                if (offset.sqrMagnitude >= MeaningfulDistance * MeaningfulDistance)
+                {
+                    return offset.normalized;
+                }
+            }
+
+            return Vector3.zero;
         }
 
         /// <summary>
@@ -342,6 +492,24 @@ namespace BanditPlugin.FakePlayer
         /// between them at all - is driven direct, which is exactly what a convoy with roads turned
         /// off does everywhere.
         /// </summary>
+        /// <summary>
+        /// The planned route as bare points, for anything that wants to drive the same line a convoy
+        /// would without being a convoy. See <see cref="BanditRouteDrive"/>.
+        /// </summary>
+        public static List<Vector3> PlanRoute(Vector3 start, IReadOnlyList<Vector3> waypoints,
+            bool useRoads, out int roadLegs, out int directLegs)
+        {
+            List<RoutePoint> path = BuildPath(start, waypoints, useRoads, out roadLegs, out directLegs);
+            List<Vector3> points = new List<Vector3>(path.Count);
+
+            foreach (RoutePoint point in path)
+            {
+                points.Add(point.Position);
+            }
+
+            return points;
+        }
+
         private static List<RoutePoint> BuildPath(Vector3 start, IReadOnlyList<Vector3> waypoints,
             bool useRoads, out int roadLegs, out int directLegs)
         {
@@ -410,8 +578,9 @@ namespace BanditPlugin.FakePlayer
                 }
             }
 
-            return $"convoy {Id}: {State}, {running}/{_elements.Count} vehicle(s) running, "
-                + $"{PointCount} route point(s)";
+            return $"convoy {Id}: {State}, {running}/{_elements.Count} vehicle(s) running"
+                + (_pending.Count > 0 ? $", {_pending.Count} still to spawn" : string.Empty)
+                + $", {PointCount} route point(s)";
         }
 
         private void Tick()
@@ -421,18 +590,22 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            // Before contact, deliberately. A column still loading is not in a fight it can do
-            // anything about: ordering the riders out at that moment takes them out of the seats
-            // they are in the middle of climbing into, which is both silly to watch and a deadlock -
-            // the column then waits for men to be aboard who it has just told to get out. Somebody
-            // shooting at a convoy on its start line still gets shot back at, by the gunners in the
-            // turrets and by every crew squad, which are weapons free from the moment they spawn.
-            if (!HasFormedUp())
-            {
-                return;
-            }
+            bool forming = State == ConvoyState.Forming;
 
-            UpdateContact();
+            if (forming)
+            {
+                // Contact is deliberately not read while the column is still arriving. A convoy
+                // half of which does not exist yet cannot do anything useful about being shot at:
+                // ordering the riders out takes them out of the seats they are in the middle of
+                // climbing into, and the column then waits for men to be aboard who it has just
+                // told to get out. Whoever is already here still shoots back - the gunners in the
+                // turrets and every crew squad are weapons free from the moment they spawn.
+                TickForming();
+            }
+            else
+            {
+                UpdateContact();
+            }
 
             bool allFinished = true;
 
@@ -447,7 +620,7 @@ namespace BanditPlugin.FakePlayer
                 allFinished &= element.Finished;
             }
 
-            if (allFinished)
+            if (allFinished && !forming)
             {
                 State = ConvoyState.Arrived;
 
@@ -466,32 +639,143 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Whether the column is loaded and ready to leave.
+        /// Builds the column on the start line, one vehicle at a time, leapfrogging forward to make
+        /// room for the next.
         ///
-        /// Crews are spawned on the ground beside their vehicle and have to walk round and climb in,
-        /// and vanilla refuses to seat anyone whose equip animation is still running - so for the
-        /// first second or two of a convoy's life some vehicles have a driver and some do not. Each
-        /// vehicle used to be told to drive the moment its own driver sat down, which is why the
-        /// head of the column left while the rest were still getting aboard.
+        /// The cycle is: put a vehicle down on the start line, wait for its crew to get in, roll the
+        /// whole column forward until the start line is empty again, everybody stops for a couple of
+        /// seconds, put the next one down. Repeat until there are none left, and then the convoy is
+        /// a convoy and drives.
         ///
-        /// So nobody moves until everybody can. Bounded by a deadline, because a crewman who never
-        /// makes it into his seat must not strand the whole convoy at the start line - after that
-        /// the column leaves with whoever is aboard, which is the same bargain the rally has.
+        /// This replaced laying the column out all at once, spaced back down a straight line drawn
+        /// towards the next waypoint. That line is only the road for the first few metres - a route
+        /// that starts on a bend puts the tail of the column through whatever is inside the corner,
+        /// which on this map is somebody's house - and no amount of searching sideways for a clear
+        /// slot fixes the underlying problem, which is that nothing knew where the vehicles would
+        /// actually fit. Driving the first one out of the way and dropping the second where it stood
+        /// does know: that ground was holding a vehicle a second ago.
+        ///
+        /// Every wait is bounded. A crewman who never makes it into his seat, or a head of column
+        /// that has driven into a tree, must not leave the rest of the convoy unspawned forever.
         /// </summary>
-        private bool HasFormedUp()
+        private void TickForming()
         {
-            if (_hasFormedUp)
+            switch (_formPhase)
             {
-                return true;
+                case FormPhase.Spawn:
+                    SpawnNext();
+                    break;
+
+                case FormPhase.Board:
+                    if (NewestElementAboard() || Time.time >= _formPhaseDeadline)
+                    {
+                        // The last one down does not go straight to the road. Everything spawned
+                        // before it was waited for when it was that vehicle's turn, but "waited for"
+                        // then meant its own crew - not that it had come to rest, and not that a
+                        // straggler off an earlier vehicle had finished climbing in. Leaving on the
+                        // strength of one driver sitting down is what left the tail of the column
+                        // still arriving while the head drove off.
+                        _formPhase = _pending.Count > 0 ? FormPhase.Advance : FormPhase.Settle;
+                        _formPhaseDeadline = Time.time
+                            + (_pending.Count > 0 ? AdvanceTimeoutSeconds : SettleTimeoutSeconds);
+                    }
+
+                    break;
+
+                case FormPhase.Settle:
+                    if (IsColumnReady() || Time.time >= _formPhaseDeadline)
+                    {
+                        _formPhase = FormPhase.Depart;
+                        _formPhaseDeadline = Time.time + FormHoldSeconds;
+                    }
+
+                    break;
+
+                case FormPhase.Depart:
+                    if (Time.time >= _formPhaseDeadline)
+                    {
+                        State = ConvoyState.Cruise;
+                        Logger.Log($"[Bandit] Convoy {Id} formed up - {_elements.Count} vehicle(s) "
+                            + "on the road.");
+                    }
+
+                    break;
+
+                case FormPhase.Advance:
+                    if (IsStartLineClear() || Time.time >= _formPhaseDeadline)
+                    {
+                        _formPhase = FormPhase.Hold;
+                        _formPhaseDeadline = Time.time + FormHoldSeconds;
+                    }
+
+                    break;
+
+                case FormPhase.Hold:
+                    if (Time.time >= _formPhaseDeadline)
+                    {
+                        _formPhase = FormPhase.Spawn;
+                    }
+
+                    break;
+            }
+        }
+
+        /// <summary>Puts the next vehicle in the queue on the start line and starts waiting for its
+        /// crew.</summary>
+        private void SpawnNext()
+        {
+            while (_pending.Count > 0)
+            {
+                BanditEvent.Ride ride = _pending.Dequeue()(_spawnPoint, _spawnFacing);
+
+                if (ride == null)
+                {
+                    continue; // could not be put on the ground; the spawner has already said why
+                }
+
+                // The event's own director drives a ride at whoever it sees. A convoy's vehicles
+                // are driven from here instead, and the two must not both be steering.
+                ride.DriveAtCaller = false;
+                _elements.Add(new Element { Ride = ride });
+
+                _formPhase = FormPhase.Board;
+                _formPhaseDeadline = Time.time + BoardTimeoutSeconds;
+                return;
             }
 
-            if (Time.time >= _formUpDeadline)
-            {
-                _hasFormedUp = true;
-                Logger.Log($"[Bandit] Convoy {Id} moving off without the crew that did not get aboard.");
-                return true;
-            }
+            // Every remaining factory failed. Whatever is already here is the convoy.
+            State = ConvoyState.Cruise;
+            Logger.Log($"[Bandit] Convoy {Id} formed up - {_elements.Count} vehicle(s) on the road.");
+        }
 
+        /// <summary>
+        /// Whether the vehicle that landed last has everybody in it who is coming.
+        ///
+        /// Only the newest one, because this is the gate on spawning the *next* vehicle and the rest
+        /// of the column was waited for when it was their turn. The gate on actually leaving is
+        /// <see cref="IsColumnReady"/>, which asks about all of them.
+        ///
+        /// A crewman with a seat request still pending is still climbing in - RequestSeat retries on
+        /// its own - and one with neither a seat nor a request is not coming at all, so waiting the
+        /// deadline out for him would hold up a vehicle that is otherwise ready.
+        /// </summary>
+        private bool NewestElementAboard()
+        {
+            return _elements.Count == 0 || IsElementAboard(_elements[_elements.Count - 1]);
+        }
+
+        /// <summary>
+        /// Whether the whole column is crewed, stopped and ready to be a convoy.
+        ///
+        /// The gate on leaving the start line, and it asks about every vehicle rather than the one
+        /// that landed last. Being at rest is part of it: a vehicle is dropped from a height so it
+        /// settles onto its own suspension rather than spawning half inside the road, and a column
+        /// that pulls away during that has a tail that is still bouncing. Bounded by
+        /// <see cref="SettleTimeoutSeconds"/>, because a vehicle wedged nose-down in a ditch is
+        /// never going to report itself ready and the convoy still has somewhere to be.
+        /// </summary>
+        private bool IsColumnReady()
+        {
             foreach (Element element in _elements)
             {
                 if (element.Finished || element.Ride.Vehicle == null)
@@ -499,39 +783,101 @@ namespace BanditPlugin.FakePlayer
                     continue;
                 }
 
-                BanditBotController driver = element.Ride.Driver;
-                if (driver == null || driver.Self == null || (driver.Self.life != null && driver.Self.life.isDead))
-                {
-                    continue; // never going to arrive; not something to wait for
-                }
-
-                if (driver.Driver == null || !driver.Driver.IsSeated || driver.HasPendingSeat)
+                if (!IsElementAboard(element))
                 {
                     return false;
                 }
 
-                // The riders too, or the column pulls away from men still walking round to the door -
-                // but only the ones still trying. RequestSeat retries on its own, so a man who wants
-                // a seat has one pending; a man with neither a seat nor a pending request is not
-                // coming, and waiting the full deadline out for him holds up a column that is
-                // otherwise ready to go.
-                foreach (BanditBotController rider in element.Ride.Riders)
+                Rigidbody body = element.Ride.Vehicle.GetComponent<Rigidbody>();
+                if (body != null && !body.isKinematic && body.velocity.magnitude > AtRestMetresPerSecond)
                 {
-                    if (rider == null || rider.Self == null
-                        || (rider.Self.life != null && rider.Self.life.isDead))
-                    {
-                        continue;
-                    }
-
-                    if (rider.HasPendingSeat)
-                    {
-                        return false;
-                    }
+                    return false;
                 }
             }
 
-            _hasFormedUp = true;
             return true;
+        }
+
+        /// <summary>Whether one vehicle has everybody in it who is still coming.</summary>
+        private static bool IsElementAboard(Element element)
+        {
+            if (element.Finished || element.Ride.Vehicle == null)
+            {
+                return true;
+            }
+
+            BanditBotController driver = element.Ride.Driver;
+            bool driverComing = driver != null && driver.Self != null
+                && (driver.Self.life == null || !driver.Self.life.isDead);
+
+            if (driverComing && (driver.Driver == null || !driver.Driver.IsSeated || driver.HasPendingSeat))
+            {
+                return false;
+            }
+
+            foreach (BanditBotController rider in element.Ride.Riders)
+            {
+                if (rider != null && rider.Self != null
+                    && (rider.Self.life == null || !rider.Self.life.isDead)
+                    && rider.HasPendingSeat)
+                {
+                    return false;
+                }
+            }
+
+            foreach (BanditBotController gunner in element.Ride.Gunners)
+            {
+                if (gunner != null && gunner.Self != null
+                    && (gunner.Self.life == null || !gunner.Self.life.isDead)
+                    && gunner.HasPendingSeat)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Whether the start line is far enough behind the column, and physically empty, to drop
+        /// another vehicle on.
+        ///
+        /// Both halves are needed. The distance is what says the column has actually moved rather
+        /// than sat revving; the box check is what says nothing is standing on the spot - which the
+        /// distance alone would miss for a vehicle that pulled forward and then rolled back, or one
+        /// whose crew is walking across the line.
+        /// </summary>
+        private bool IsStartLineClear()
+        {
+            float nearest = float.MaxValue;
+            bool any = false;
+
+            foreach (Element element in _elements)
+            {
+                InteractableVehicle vehicle = element.Ride.Vehicle;
+                if (vehicle == null || vehicle.isDead || vehicle.isExploded)
+                {
+                    continue;
+                }
+
+                any = true;
+                nearest = Mathf.Min(nearest, HorizontalDistance(vehicle.transform.position, _spawnPoint));
+            }
+
+            if (!any)
+            {
+                return true; // nothing left to get out of the way
+            }
+
+            if (nearest < _formSpacing)
+            {
+                return false;
+            }
+
+            // Rolled far enough. Past that, keep going only while something is still standing on the
+            // spot, and not for ever - see FormClearanceSlackMetres.
+            return nearest >= _formSpacing + FormClearanceSlackMetres
+                || BanditPlacement.IsVehicleSlotClear(_spawnPoint, _spawnTravel);
         }
 
         /// <summary>
@@ -797,18 +1143,25 @@ namespace BanditPlugin.FakePlayer
 
             Vector3 vehiclePosition = ride.Vehicle.transform.position;
 
-            // How far along the route it is. More than one point can fall inside the advance radius
-            // on a tight bend, or after a skip, so this walks rather than steps.
-            while (element.Target < _path.Count - 1
-                && HorizontalDistance(vehiclePosition, TargetPosition(element, element.Target)) <= AdvanceRadiusMetres)
+            // How far along the route it is - measured by which points it has actually driven past,
+            // not by which ones are within fourteen metres of it.
+            //
+            // The radius test was corner cutting, and on this map that means leaving the road. Route
+            // points are eight metres apart, so a fourteen-metre radius routinely swallowed two of
+            // them at once; on a bend the two it swallowed were the two that described the bend, and
+            // the vehicle drove the chord across the verge instead. Passing a point is a fact about
+            // the geometry rather than a tolerance: the vehicle is past it when it is on the far
+            // side of it, along the segment leading to the next one.
+            while (element.Target < _path.Count - 1 && HasPassed(vehiclePosition, element.Target))
             {
                 element.Target++;
             }
 
             bool atLastPoint = element.Target >= _path.Count - 1;
-            Vector3 target = TargetPosition(element, element.Target);
+            Vector3 target = SteerTarget(element, vehiclePosition);
 
-            if (atLastPoint && HorizontalDistance(vehiclePosition, target) <= ArriveRadiusMetres)
+            if (atLastPoint
+                && HorizontalDistance(vehiclePosition, _path[_path.Count - 1].Position) <= ArriveRadiusMetres)
             {
                 vehicleDriver.StopDriving();
                 vehicleDriver.SpeedScale = 1f;
@@ -823,21 +1176,30 @@ namespace BanditPlugin.FakePlayer
 
                 if (element.GiveUps > MaxGiveUps)
                 {
-                    Logger.Log($"[Bandit] Convoy {Id}: {ride.TypeName} could not get through - "
-                        + "unloading where it stands.");
+                    Logger.Log($"[Bandit] Convoy {Id}: {ride.TypeName} could not get through at route "
+                        + $"point {element.Target}/{_path.Count - 1}, ({vehiclePosition.x:0}, "
+                        + $"{vehiclePosition.z:0}) - unloading where it stands. Turn on /banditnavlog "
+                        + "to find out why.");
                     DismountElement(element);
                     vehicleDriver.StopDriving();
                     element.Finished = true;
                     return;
                 }
 
+                Logger.Log($"[Bandit] Convoy {Id}: {ride.TypeName} gave up on route point "
+                    + $"{element.Target}/{_path.Count - 1} (attempt {element.GiveUps} of {MaxGiveUps}) - "
+                    + "skipping ahead.");
+
                 element.Target = Mathf.Min(element.Target + SkipPointsOnGiveUp, _path.Count - 1);
                 element.IssuedTarget = -1;
-                target = TargetPosition(element, element.Target);
+                target = SteerTarget(element, vehiclePosition);
             }
 
             if (element.IssuedTarget != element.Target || !vehicleDriver.HasDestination)
             {
+                BanditNavLog.Write(vehicleDriver, $"convoy {Id}: point {element.Target}/{_path.Count - 1}, "
+                    + $"aiming ({target.x:0}, {target.z:0})");
+
                 if (vehicleDriver.TrySetDestination(target, out string reason))
                 {
                     element.IssuedTarget = element.Target;
@@ -871,6 +1233,17 @@ namespace BanditPlugin.FakePlayer
             float pace;
             switch (State)
             {
+                case ConvoyState.Forming:
+                    // Only the leapfrog moves the column, and only at a shuffle. Every other moment
+                    // of forming up is the column standing still with the engines running, which is
+                    // the point: a vehicle is about to appear on the start line behind them.
+                    if (_formPhase != FormPhase.Advance)
+                    {
+                        return 0f;
+                    }
+
+                    pace = FormUpSpeedScale;
+                    break;
                 case ConvoyState.Contact:
                     pace = ContactSpeedScale;
                     break;
@@ -1128,44 +1501,84 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Where on the route this particular vehicle should be. On a road that is its own lane -
-        /// over to the right if it fits, down the middle if it does not - which is why the answer
-        /// depends on the vehicle and not only on the point.
+        /// Whether the vehicle is past a route point, i.e. on the far side of it along the segment
+        /// running to the next one.
+        ///
+        /// The radius is only for the degenerate cases - two points on top of each other, and a
+        /// vehicle that has come to rest exactly on a point without crossing the plane through it.
+        /// Without one of those a column can sit on a point for ever waiting to pass it.
         /// </summary>
-        private Vector3 TargetPosition(Element element, int index)
+        private bool HasPassed(Vector3 position, int index)
         {
-            RoutePoint point = _path[index];
-            if (point.NodeIndex < 0)
+            Vector3 point = _path[index].Position;
+
+            if (HorizontalDistance(position, point) <= PointReachedRadiusMetres)
             {
-                return point.Position;
+                return true;
             }
 
-            float halfWidth = 1.2f;
-            if (element.Ride.Driver != null && element.Ride.Driver.Driver != null
-                && element.Ride.Driver.Driver.IsSeated)
+            Vector3 segment = _path[index + 1].Position - point;
+            segment.y = 0f;
+            if (segment.sqrMagnitude < 0.01f)
             {
-                halfWidth = Mathf.Max(0.5f, element.Ride.Driver.Driver.Footprint.HalfWidth);
+                return true;
             }
 
-            return BanditRoadGraph.GetLanePosition(point.NodeIndex, TravelDirection(index), halfWidth);
+            Vector3 offset = position - point;
+            offset.y = 0f;
+
+            return Vector3.Dot(offset, segment.normalized) > 0f;
         }
 
-        /// <summary>Which way the route is running at a point, which is what decides which side of
-        /// the road is the right-hand one.</summary>
-        private Vector3 TravelDirection(int index)
+        /// <summary>
+        /// The point on the route a vehicle should be steering at: a fixed distance up the road from
+        /// where it is, interpolated along the polyline rather than snapped to a node.
+        ///
+        /// Interpolated because a node is a step and a step is a swerve. Walking the route until the
+        /// nodes are far enough away and then aiming at the last one would hand the driver a target
+        /// that jumps eight metres sideways every time the column advances, and the vehicle would
+        /// steer at each jump. Sliding the aim point smoothly along the road means the steering
+        /// input changes smoothly too.
+        /// </summary>
+        private Vector3 SteerTarget(Element element, Vector3 position)
         {
-            if (index + 1 < _path.Count)
+            BanditVehicleDriver driver = element.Ride.Driver?.Driver;
+            float lookahead = Mathf.Clamp(
+                (driver != null ? driver.Speed : 0f) * SteerLookaheadSeconds,
+                MinSteerLookaheadMetres, MaxSteerLookaheadMetres);
+
+            int start = Mathf.Clamp(element.Target, 0, _path.Count - 1);
+
+            Vector3 previous = _path[start].Position;
+            float previousDistance = HorizontalDistance(position, previous);
+
+            if (previousDistance >= lookahead || start >= _path.Count - 1)
             {
-                return _path[index + 1].Position - _path[index].Position;
+                return previous;
             }
 
-            if (index > 0)
+            for (int i = start + 1; i < _path.Count; i++)
             {
-                return _path[index].Position - _path[index - 1].Position;
+                Vector3 candidate = _path[i].Position;
+                float distance = HorizontalDistance(position, candidate);
+
+                if (distance >= lookahead)
+                {
+                    float span = distance - previousDistance;
+                    float t = span > 0.01f
+                        ? Mathf.Clamp01((lookahead - previousDistance) / span)
+                        : 1f;
+
+                    return Vector3.Lerp(previous, candidate, t);
+                }
+
+                previous = candidate;
+                previousDistance = distance;
             }
 
-            return Vector3.forward;
+            return _path[_path.Count - 1].Position;
         }
+
 
         private static float HorizontalDistance(Vector3 a, Vector3 b)
         {

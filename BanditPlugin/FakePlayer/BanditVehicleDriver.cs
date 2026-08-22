@@ -89,6 +89,22 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private const float SteeringDeadbandDegrees = 4f;
 
+        /// <summary>
+        /// How far ahead the steering looks at its own rate of turn, in seconds.
+        ///
+        /// This is the whole of the wobble fix. Steering input is three states - left, straight,
+        /// right - because that is what the wheel code takes, and it holds full lock until it is
+        /// told otherwise. Steering purely on "which side of the wanted heading am I on" therefore
+        /// holds full lock right up to the moment it crosses, overshoots, holds full lock the other
+        /// way, and the vehicle saws down the road at whatever frequency the packet rate allows.
+        ///
+        /// Judging the error the vehicle *will* have if it keeps turning at the rate it is already
+        /// turning is what a person does without thinking about it: you unwind the wheel before the
+        /// car is straight. A third of a second is enough to unwind in time at road speed without
+        /// making the steering feel lazy.
+        /// </summary>
+        private const float SteeringDampingSeconds = 0.35f;
+
         /// <summary>How far over its speed limit a vehicle gets before it brakes rather than simply
         /// lifting off. Coasting down covers the ordinary case; this is for arriving at the top of a
         /// hill with gravity helping.</summary>
@@ -102,6 +118,34 @@ namespace BanditPlugin.FakePlayer
         /// judged for making no progress. See <see cref="UpdateProgress"/>.</summary>
         private const float HeldSpeedScale = 0.05f;
 
+        /// <summary>
+        /// How hard a bandit is willing to brake, and how much clear road it insists on keeping in
+        /// hand, when pacing itself against whatever is in front.
+        ///
+        /// Together these are the whole of "do not drive into things": the speed limit for this
+        /// packet is whatever the vehicle could still stop from within the clear road the navigator
+        /// measured, less the margin. It falls out of that automatically that a bandit follows a
+        /// slower vehicle at a sane distance, slows for a parked car before deciding whether to go
+        /// round it, and stops behind something it cannot get past - none of which needed a rule of
+        /// its own. Three and a half metres per second squared is unhurried braking; the vehicle can
+        /// do far better in an emergency, and asking for less than it can do is what makes it look
+        /// like a driver rather than a solver.
+        /// </summary>
+        private const float ComfortBrakingMetresPerSecondSquared = 3.5f;
+        private const float FollowingMarginMetres = 2.5f;
+
+        /// <summary>
+        /// How long a bandit will sit behind another vehicle before it decides that one is not going
+        /// anywhere either and starts looking for a way past.
+        ///
+        /// Waiting behind traffic is not being stuck, and the stall detector cannot tell the two
+        /// apart on its own - it only sees a vehicle that has stopped getting closer to where it was
+        /// sent. Left to it, a follower in a column that stops for thirty seconds decides it is
+        /// wedged and reverses into whoever is behind it. But the patience has to end somewhere, or
+        /// a burnt-out wreck across the road stops the convoy for good.
+        /// </summary>
+        private const float TrafficPatienceSeconds = 12f;
+
         /// <summary>How far a measured ride height may differ from the one the body's colliders
         /// imply before it is treated as a vehicle that is not resting on anything. Roughly the
         /// suspension travel, which is the whole of the honest difference between the two.</summary>
@@ -112,6 +156,15 @@ namespace BanditPlugin.FakePlayer
 
         /// <summary>Beyond this a player is not worth turning a turret onto.</summary>
         private const float TurretTrackRangeMetres = 250f;
+
+        /// <summary>When the patience for the vehicle in front runs out. Zero when nothing is in
+        /// the way. See <see cref="TrafficPatienceSeconds"/>.</summary>
+        private float _trafficHoldUntil;
+
+        /// <summary>When the current reverse hop must end, and the earliest another may start. See
+        /// <see cref="ReverseHopSeconds"/>.</summary>
+        private float _reverseUntil;
+        private float _reverseCooldownUntil;
 
         private const float ConsumableCheckIntervalSeconds = 1f;
 
@@ -131,13 +184,40 @@ namespace BanditPlugin.FakePlayer
         private const int MaxUnstickAttempts = 3;
 
         /// <summary>
+        /// The longest a reverse hop may last, and how long the vehicle must then drive forwards
+        /// before it is allowed another.
+        ///
+        /// Both exist because the old exit conditions could not fire. A reverse hop ended when the
+        /// heading error dropped below seventy degrees or the destination got further away than
+        /// twenty-seven metres - and while reversing, the vehicle deliberately points its *tail* at
+        /// the destination, so the heading error sits near a hundred and eighty by construction and
+        /// never drops. The distance could not save it either, because a vehicle following a route
+        /// is handed a fresh target twelve metres ahead the whole way, so the remaining distance
+        /// never grows. The log showed the result exactly: REV, err=-56, left=12.0m, held for the
+        /// length of the trip. They drove the route backwards.
+        ///
+        /// A hop is now a manoeuvre with an end. Back up for a couple of seconds, then go forwards
+        /// whatever the geometry says - which is also how a person gets a vehicle round: reverse
+        /// once, then drive out of it. The cooldown is what stops it going straight back into
+        /// reverse on the next packet and reinventing the same latch.
+        /// </summary>
+        private const float ReverseHopSeconds = 2.5f;
+        private const float ReverseCooldownSeconds = 4f;
+
+        /// <summary>
         /// How long the vehicle may fail to get closer to where it was sent before it counts as
         /// stuck. This is the whole definition: not "is something in front of me" - the navigator
         /// already sweeps for that and drives round it - but "I was supposed to be making progress
         /// and I am not". A vehicle grinding along a wall is moving and getting nowhere; a vehicle
         /// waiting to finish a turn is still and perfectly fine.
         /// </summary>
-        private const float NoProgressSeconds = 2.5f;
+        /// Two and a half seconds was far too quick. A vehicle held up for one traffic light's
+        /// worth of time, or crawling round a bend behind something slower, had done nothing wrong
+        /// and was being put through a recovery manoeuvre for it - and the recovery is destructive
+        /// enough (reverse, then refuse the route's own direction for several seconds) that firing
+        /// it wrongly is much worse than firing it late. Seven seconds of gaining under a metre is
+        /// eighty metres of driving at road speed: unambiguous.
+        private const float NoProgressSeconds = 7f;
 
         /// <summary>How much closer counts as progress rather than noise.</summary>
         private const float ProgressMetres = 0.75f;
@@ -149,8 +229,17 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private const float RepathJumpMetres = 15f;
 
-        /// <summary>How long the direction that failed stays banned after a reverse.</summary>
-        private const float BanFailedDirectionSeconds = 7f;
+        /// <summary>
+        /// How long the direction that failed stays banned after a reverse.
+        ///
+        /// Cut from seven seconds, and it needed cutting. The ban refuses a fifty-degree arc around
+        /// a world direction, and on a road the direction that "failed" is the direction of the
+        /// road - so a wrongly-fired recovery did not merely pause the vehicle, it forbade it from
+        /// driving down the road it was on and sent it into the field beside it at the first angle
+        /// the fan would accept. Long enough to make the vehicle try somewhere else, short enough
+        /// that being wrong about it costs one manoeuvre rather than the trip.
+        /// </summary>
+        private const float BanFailedDirectionSeconds = 3f;
 
         /// <summary>How long the trigger stays down once a turret opens up, and how long it waits
         /// afterwards. A latched trigger fires at the gun's own rate; re-pulling cannot, because
@@ -274,6 +363,10 @@ namespace BanditPlugin.FakePlayer
         /// the moment the scale comes back up.
         /// </summary>
         public float SpeedScale { get; set; } = 1f;
+
+        /// <summary>How fast it is actually going, in metres per second. Read by whatever is feeding
+        /// it destinations, so a route can be followed more tightly the slower the vehicle is.</summary>
+        public float Speed => _speed;
 
         /// <summary>Where the bandit is driving to, if anywhere.</summary>
         public bool HasDestination => _navigator.HasDestination;
@@ -483,6 +576,7 @@ namespace BanditPlugin.FakePlayer
             _unstickAttempts = 0;
             _unstickUntil = 0f;
             _reversing = false;
+            _reverseUntil = 0f;
             _bestRemaining = float.MaxValue;
             _lastProgressTime = Time.time;
 
@@ -1041,7 +1135,7 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            _navigator.Tick(vehicle, _footprint, deltaTime);
+            _navigator.Tick(vehicle, _footprint, deltaTime, forwardVelocity);
             UpdateProgress();
 
             float yaw = vehicleTransform.eulerAngles.y;
@@ -1063,9 +1157,15 @@ namespace BanditPlugin.FakePlayer
             // deadband is what stops a vehicle sawing at the wheel down a straight. Backing up
             // steers the other way, because the wheels that turn are still at the front while the
             // vehicle travels tail first.
-            int steer = Mathf.Abs(headingError) < SteeringDeadbandDegrees
+            // Steered on where the nose will be pointing shortly rather than where it is pointing
+            // now - see SteeringDampingSeconds. The rate comes off the rigidbody, which is the real
+            // one under physics driving.
+            float yawRate = body != null ? body.angularVelocity.y * Mathf.Rad2Deg : 0f;
+            float steerError = headingError - yawRate * SteeringDampingSeconds;
+
+            int steer = Mathf.Abs(steerError) < SteeringDeadbandDegrees
                 ? 0
-                : (headingError > 0f ? 1 : -1);
+                : (steerError > 0f ? 1 : -1);
 
             if (reverse)
             {
@@ -1079,6 +1179,11 @@ namespace BanditPlugin.FakePlayer
             // its crawl under contact, and it works here unchanged.
             float limit = (reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle)) * Mathf.Clamp01(SpeedScale);
             float along = reverse ? -forwardVelocity : forwardVelocity;
+
+            // Held to what it could stop from inside the road it can actually see. See
+            // ComfortBrakingMetresPerSecondSquared - this is the one thing standing between a
+            // bandit and the back of the vehicle in front of it.
+            limit = Mathf.Min(limit, StoppableSpeed(_navigator.ClearAheadMetres));
 
             int throttle;
             bool brake = false;
@@ -1120,9 +1225,36 @@ namespace BanditPlugin.FakePlayer
 
             ApplyWheelInputs(vehicle, deltaTime, steer, throttle, brake);
 
+            BanditNavLog.Trace(this,
+                $"v={along:0.0}/{limit:0.0}m/s scale={SpeedScale:0.00} steer={steer} thr={throttle}"
+                + (brake ? " BRAKE" : string.Empty)
+                + (reverse ? " REV" : string.Empty)
+                + $" err={headingError:0}deg yaw'={yawRate:0}deg/s"
+                + $" clear={(_navigator.ClearAheadMetres >= float.MaxValue * 0.5f ? "inf" : _navigator.ClearAheadMetres.ToString("0.0"))}m"
+                + $" left={_navigator.RemainingDistance:0.0}m"
+                + (_navigator.AvoidanceDegrees != 0f ? $" avoid={_navigator.AvoidanceDegrees:0}deg" : string.Empty)
+                + (_navigator.IsBlocked ? " BLOCKED" : string.Empty)
+                + (_navigator.ObstacleAhead != null ? $" ahead={_navigator.ObstacleAhead}" : string.Empty)
+                + (_navigator.RefusedReason != null ? $" refused={_navigator.RefusedReason}" : string.Empty));
+
             // Only so /banditv status reports the speed it is really doing rather than nothing.
             _speed = Mathf.Abs(forwardVelocity);
             _reversing = reverse;
+        }
+
+        /// <summary>The fastest a vehicle may go and still pull up short of something this far
+        /// ahead, braking no harder than it would want to.</summary>
+        private static float StoppableSpeed(float clearAhead)
+        {
+            if (clearAhead >= float.MaxValue * 0.5f)
+            {
+                return float.MaxValue;
+            }
+
+            float usable = clearAhead - FollowingMarginMetres;
+            return usable <= 0f
+                ? 0f
+                : Mathf.Sqrt(2f * ComfortBrakingMetresPerSecondSquared * usable);
         }
 
         /// <summary>
@@ -1280,15 +1412,24 @@ namespace BanditPlugin.FakePlayer
             if (_reversing)
             {
                 // Sticky, or the vehicle changes its mind about which gear it is in every time the
-                // heading error crosses the threshold and never actually goes anywhere.
-                if (forwardError < ResumeForwardDegrees || remaining > ReverseHopMetres * 1.5f)
+                // heading error crosses the threshold and never actually goes anywhere - but sticky
+                // with an end to it. See ReverseHopSeconds.
+                if (Time.time >= _reverseUntil
+                    || forwardError < ResumeForwardDegrees
+                    || remaining > ReverseHopMetres * 1.5f)
                 {
                     _reversing = false;
+                    _reverseCooldownUntil = Time.time + ReverseCooldownSeconds;
+                    BanditNavLog.Write(this, $"out of reverse - {forwardError:0}deg off, {remaining:0.0}m out");
                 }
             }
-            else if (forwardError > ReverseBehindDegrees && remaining <= ReverseHopMetres)
+            else if (Time.time >= _reverseCooldownUntil
+                && forwardError > ReverseBehindDegrees
+                && remaining <= ReverseHopMetres)
             {
                 _reversing = true;
+                _reverseUntil = Time.time + ReverseHopSeconds;
+                BanditNavLog.Write(this, $"reverse hop - target {forwardError:0}deg behind, {remaining:0.0}m out");
             }
 
             reverse = _reversing;
@@ -1322,7 +1463,28 @@ namespace BanditPlugin.FakePlayer
             if (SpeedScale <= HeldSpeedScale)
             {
                 _lastProgressTime = Time.time;
+                _trafficHoldUntil = 0f;
                 return;
+            }
+
+            // Held up by another vehicle rather than by the scenery. Give it a while to move off
+            // before treating this as being stuck - see TrafficPatienceSeconds.
+            if (_navigator.BlockedByVehicle)
+            {
+                if (_trafficHoldUntil <= 0f)
+                {
+                    _trafficHoldUntil = Time.time + TrafficPatienceSeconds;
+                }
+
+                if (Time.time < _trafficHoldUntil)
+                {
+                    _lastProgressTime = Time.time;
+                    return;
+                }
+            }
+            else
+            {
+                _trafficHoldUntil = 0f;
             }
 
             float remaining = _navigator.RemainingDistance;
@@ -1351,6 +1513,8 @@ namespace BanditPlugin.FakePlayer
 
             if (_unstickAttempts >= MaxUnstickAttempts)
             {
+                BanditNavLog.Write(this, $"giving up - {_unstickAttempts} unstick attempt(s) and still "
+                    + $"{remaining:0.0}m out; blocked by {_navigator.ObstacleAhead ?? "nothing it can name"}");
                 _navigator.GiveUp();
                 return;
             }
@@ -1360,7 +1524,19 @@ namespace BanditPlugin.FakePlayer
             _lastProgressTime = Time.time; // the reverse gets its own window before it is judged
             _bestRemaining = remaining;
 
-            _navigator.BanDirection(_lastTravelDirection, BanFailedDirectionSeconds);
+            BanditNavLog.Write(this, $"stalled at {remaining:0.0}m out - backing up "
+                + $"({_unstickAttempts}/{MaxUnstickAttempts}); ahead: "
+                + $"{_navigator.ObstacleAhead ?? "clear"}, refused: {_navigator.RefusedReason ?? "nothing"}");
+
+            // The route's own direction is not banned for traffic. Whatever is in front is going the
+            // same way and will move; forbidding a fifty-degree arc around the road for it is how a
+            // vehicle that only needed to wait ends up in the field beside the road. It still backs
+            // off, which is what breaks a nose-to-tail deadlock, but it comes back to the same
+            // heading afterwards.
+            if (!_navigator.BlockedByVehicle)
+            {
+                _navigator.BanDirection(_lastTravelDirection, BanFailedDirectionSeconds);
+            }
         }
 
         /// <summary>

@@ -46,6 +46,19 @@ namespace BanditPlugin.Navigation
             LocalBottom = 0f
         };
 
+        /// <summary>
+        /// A collider this thin in two of its three dimensions is a pole, an aerial or a gun barrel,
+        /// and it is left out of the box.
+        ///
+        /// Not cosmetic tidying: the box is what every clearance test sweeps, and a Stryker measured
+        /// 4.8m wide by 10.4m long - against a real 2.7 by 7 - because its aerials and its barrel
+        /// were in it. That box does not fit in a lane, so the vehicle spent its life refusing
+        /// headings, and it made the arrival radius (which is derived from the length) so large that
+        /// it stopped a car's length short of everywhere it was sent. Nothing that thin is going to
+        /// stop a six-wheeled armoured car, and pretending otherwise made the vehicle undrivable.
+        /// </summary>
+        private const float ThinColliderMetres = 0.3f;
+
         public static BanditVehicleFootprint Measure(InteractableVehicle vehicle)
         {
             if (vehicle == null)
@@ -69,6 +82,14 @@ namespace BanditPlugin.Navigation
 
                 if (!TryGetLocalGeometry(collider, out Bounds geometry))
                 {
+                    continue;
+                }
+
+                if (IsThin(geometry.size))
+                {
+                    BanditNavLog.Write($"footprint {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")}",
+                        $"ignoring thin collider '{collider.name}' {geometry.size.x:0.00}x"
+                        + $"{geometry.size.y:0.00}x{geometry.size.z:0.00}");
                     continue;
                 }
 
@@ -109,12 +130,28 @@ namespace BanditPlugin.Navigation
                 return Default;
             }
 
+            BanditNavLog.Write($"footprint {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")}",
+                $"{local.size.x:0.00}m wide, {local.size.z:0.00}m long, {local.size.y:0.00}m tall; "
+                + $"underside {local.min.y:0.00}, centre ({local.center.x:0.00}, {local.center.y:0.00}, "
+                + $"{local.center.z:0.00})");
+
             return new BanditVehicleFootprint
             {
                 LocalCentre = local.center,
                 HalfExtents = local.extents,
                 LocalBottom = local.min.y
             };
+        }
+
+        /// <summary>Whether a collider is a pole rather than part of the hull - thin in its two
+        /// smallest dimensions. See <see cref="ThinColliderMetres"/>.</summary>
+        private static bool IsThin(Vector3 size)
+        {
+            float smallest = Mathf.Min(size.x, Mathf.Min(size.y, size.z));
+            float largest = Mathf.Max(size.x, Mathf.Max(size.y, size.z));
+            float middle = size.x + size.y + size.z - smallest - largest;
+
+            return smallest < ThinColliderMetres && middle < ThinColliderMetres;
         }
 
         /// <summary>
@@ -181,7 +218,7 @@ namespace BanditPlugin.Navigation
         public const int GroundMask = RayMasks.GROUND | RayMasks.GROUND2 | RayMasks.LARGE
             | RayMasks.MEDIUM | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.ENVIRONMENT;
 
-        private static readonly RaycastHit[] Hits = new RaycastHit[16];
+        private static readonly RaycastHit[] Hits = new RaycastHit[32];
 
         /// <summary>
         /// Finds the surface under a point, ignoring anything belonging to <paramref name="ignoreRoot"/>.
@@ -275,6 +312,47 @@ namespace BanditPlugin.Navigation
         /// <summary>True while every heading in the fan is blocked - i.e. it does not fit.</summary>
         public bool IsBlocked { get; private set; }
 
+        /// <summary>
+        /// How much clear road there is along the heading it settled on, out to
+        /// <see cref="ScanAheadMetres"/>.
+        ///
+        /// The clearance sweep only ever answered yes or no, and at the range it answers over -
+        /// seven metres - "no" arrives about half a second before the impact does. That is why
+        /// vehicles read as ignoring each other: by the time anything in front registered, the only
+        /// available responses were a swerve at full speed or a collision. A distance can be driven
+        /// to instead: the driver slows so it could stop in it, which is following a vehicle down a
+        /// road, and it keeps enough time in hand for the fan to find a way past.
+        /// </summary>
+        public float ClearAheadMetres { get; private set; } = float.MaxValue;
+
+        /// <summary>
+        /// Whether the nearest thing along that heading is another vehicle rather than scenery.
+        ///
+        /// The difference decides what patience means. Traffic clears - the vehicle in front is
+        /// going the same way and will move - so sitting behind it is following, not being stuck,
+        /// and the driver's stall detector must not read it as a reason to reverse into whoever is
+        /// behind. A wall does not clear, and being stopped by one is exactly what that detector is
+        /// for.
+        /// </summary>
+        public bool BlockedByVehicle { get; private set; }
+
+        /// <summary>
+        /// What the nearest thing along the chosen heading actually is, by name, and what refused
+        /// the heading the route wanted.
+        ///
+        /// Diagnostics only, and worth the two strings: "could not get through" on an empty road is
+        /// unanswerable without them. Everything this class decides is a boxcast against a mask, and
+        /// the difference between a fence, a road mesh, the vehicle in front and a clip volume
+        /// nobody can see is exactly the difference between a bug and correct behaviour.
+        /// </summary>
+        public string ObstacleAhead { get; private set; }
+
+        /// <summary>Why the heading the route wanted was refused, or null if it was taken.</summary>
+        public string RefusedReason { get; private set; }
+
+        /// <summary>How far off the wanted heading the fan had to go to find room, in degrees.</summary>
+        public float AvoidanceDegrees { get; private set; }
+
         public bool IsFollowingPath => _path.HasPath;
 
         /// <summary>How close counts as arrived. Scaled to the vehicle, because a bandit can walk
@@ -301,17 +379,43 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private const float ProbeFloorClearance = 0.35f;
 
-        // A plate the full width and height of the body, swept along the candidate heading. It was
-        // a thin band at bumper height, which is what let fence rails, railings and barriers through
-        // - anything whose collision sits above or below that one slice was invisible to it.
-        // Terrain is what a full-height plate would normally trip over, and terrain is not in the
-        // mask at all; slopes are the climb test's job instead.
-        private const float ProbePlateHalfDepth = 0.05f;
+        // The body's own box, swept along the candidate heading, oriented as the vehicle is.
+        //
+        // It was a thin plate at the body centre, cast for HalfLength + lookahead - an approximation
+        // that is only correct when the heading is the vehicle's own forward, and that has a much
+        // worse problem than inaccuracy: the first HalfLength of the cast is *inside the vehicle*.
+        // Anything the body is currently straddling is therefore an obstacle in front of it. The
+        // log caught it exactly - "refused: 'Road_Line_0' at 0.9m" on a Stryker whose nose is five
+        // metres from its centre: it was refusing to move because of the road it was parked on.
+        //
+        // Sweeping the real box for the real distance says what was meant all along: how far the
+        // vehicle can travel this way before any part of it touches anything. Distance zero then
+        // means genuinely overlapping, which is the one case worth special handling.
         private const float MinProbeHalfHeight = 0.35f;
 
         /// <summary>How far ahead to look for something in the way, at minimum. Longer for a long
         /// vehicle, because it needs the room to swing.</summary>
         private const float MinLookaheadMetres = 7f;
+
+        /// <summary>
+        /// How far ahead, in seconds of travel, the blocking sweep reaches at speed.
+        ///
+        /// A fixed seven metres is a fifth of a second at road speed, which is not a reaction, it is
+        /// a report of what has already happened. Distance that scales with speed means the vehicle
+        /// commits to going round something while going round it is still a steering input rather
+        /// than a swerve.
+        ///
+        /// Kept modest, and capped, because this sweep is a straight line and a road is not: look
+        /// far enough down a bend and the tree on the outside of it is "in the way", and the vehicle
+        /// steers off the road to avoid something it was never going to hit. Seeing further than
+        /// this is the distance probe's job, and that one only chooses a speed.
+        /// </summary>
+        private const float LookaheadSeconds = 0.6f;
+        private const float MaxLookaheadMetres = 12f;
+
+        /// <summary>How far the distance probe reaches. Only for slowing down, so it can afford to
+        /// see much further than the blocking sweep does.</summary>
+        private const float ScanAheadMetres = 30f;
 
         /// <summary>Steeper than this counts as a wall rather than a hill.</summary>
         private const float MaxClimbDegrees = 35f;
@@ -343,8 +447,30 @@ namespace BanditPlugin.Navigation
         /// not stop players or vehicles in vanilla, and a truck should drive through a bush.
         /// </summary>
         private const int ObstacleMask = RayMasks.LARGE | RayMasks.MEDIUM | RayMasks.RESOURCE
-            | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE | RayMasks.CLIP
-            | RayMasks.ENVIRONMENT;
+            | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE | RayMasks.CLIP;
+
+        /// <summary>
+        /// How far from vertical a surface's normal may be and still count as something to drive
+        /// onto rather than something to stop in front of.
+        ///
+        /// This is the difference between a road and a wall, and without it there was none. Roads in
+        /// Unturned are objects, on the same layers as buildings - the road mesh is Segment_n on
+        /// Environment, and the surface pieces are Road_Line_n, Road_Tee_n and friends on Large -
+        /// so a sweep looking for buildings finds the road it is driving along. It only shows where
+        /// the surface ahead rises into the plate: a crest, a tee, the join between two segments, or
+        /// a vehicle sitting nose-down. Which is exactly the "they get off the road at a segment
+        /// transition", "the stryker stopped on an empty road" and "they wobble" reports, and the
+        /// log bears it out - Road_Line_0 was the single most common thing refusing a heading, 243
+        /// times in one convoy.
+        ///
+        /// The rule that fixes it is the same division of labour the mask already implies: this
+        /// sweep refuses *walls*, and whether the vehicle can get up a *surface* is the slope test's
+        /// business. A surface whose normal is within the climb limit is therefore not an obstacle
+        /// here, whatever layer it is on. Environment comes out of the mask entirely, since it holds
+        /// roads and bridges and VehicleTerrain.GroundMask already treats it as ground - a layer
+        /// cannot sensibly be a surface to the ground probe and a wall to the sweep.
+        /// </summary>
+        private static readonly float MaxClimbNormalY = Mathf.Cos(MaxClimbDegrees * Mathf.Deg2Rad);
 
         // Wider fan than the on-foot navigator's 35/65/90: a vehicle cannot strafe, so a detour it
         // can actually drive has to start as a turn it can actually make.
@@ -354,7 +480,7 @@ namespace BanditPlugin.Navigation
         /// means a genuinely different way, narrow enough to leave the fan somewhere to go.</summary>
         private const float BannedArcDegrees = 50f;
 
-        private static readonly RaycastHit[] Hits = new RaycastHit[16];
+        private static readonly RaycastHit[] Hits = new RaycastHit[32];
 
         private readonly Player _self;
         private readonly BanditPathFollower _path;
@@ -363,6 +489,14 @@ namespace BanditPlugin.Navigation
 
         private int _avoidSign;
         private float _avoidSignExpiry;
+
+        /// <summary>How far the blocking sweep reaches this tick. Set from the speed the driver
+        /// reports, so a stopped vehicle looks a body length ahead and a moving one looks as far as
+        /// it will travel in <see cref="LookaheadSeconds"/>.</summary>
+        private float _lookaheadMetres = MinLookaheadMetres;
+
+        /// <summary>The last thing a sweep refused a heading for, for the diagnostics.</summary>
+        private string _lastBlocker;
 
         private Vector3 _bannedDirection;
         private float _bannedUntil;
@@ -441,6 +575,8 @@ namespace BanditPlugin.Navigation
         {
             HasDestination = false;
             IsBlocked = false;
+            ClearAheadMetres = float.MaxValue;
+            BlockedByVehicle = false;
             _path.Abandon();
             DesiredDirection = Vector3.zero;
         }
@@ -459,14 +595,24 @@ namespace BanditPlugin.Navigation
             return gaveUp;
         }
 
-        public void Tick(InteractableVehicle vehicle, BanditVehicleFootprint footprint, float deltaTime)
+        /// <param name="speed">
+        /// How fast the vehicle is actually travelling, which is what sets how far ahead this looks.
+        /// Zero is a safe default and means "look a body length ahead", which is what a stopped
+        /// vehicle needs.
+        /// </param>
+        public void Tick(InteractableVehicle vehicle, BanditVehicleFootprint footprint, float deltaTime,
+            float speed = 0f)
         {
             DesiredDirection = Vector3.zero;
 
             if (vehicle == null || !HasDestination)
             {
+                ClearAheadMetres = float.MaxValue;
                 return;
             }
+
+            _lookaheadMetres = Mathf.Max(MinLookaheadMetres,
+                Mathf.Min(MaxLookaheadMetres, Mathf.Abs(speed) * LookaheadSeconds));
 
             Vector3 position = vehicle.transform.position;
             _lastPosition = position;
@@ -494,6 +640,101 @@ namespace BanditPlugin.Navigation
             desired.Normalize();
 
             DesiredDirection = ChooseClearHeading(vehicle, footprint, desired);
+
+            // Measured along the heading it settled on rather than along the one it wanted: a
+            // vehicle that has already committed to going round something should be pacing itself
+            // against the way it is actually going.
+            if (DesiredDirection.sqrMagnitude > 0.0001f)
+            {
+                ClearAheadMetres = MeasureClearAhead(vehicle, footprint, DesiredDirection);
+            }
+            else
+            {
+                ClearAheadMetres = 0f;
+                BlockedByVehicle = false;
+                ObstacleAhead = null;
+            }
+        }
+
+        /// <summary>
+        /// How far the body could travel along a heading before it touched something.
+        ///
+        /// The same plate the blocking sweep uses, cast much further and read for its distance
+        /// instead of its yes-or-no. Only ever used to choose a speed, so seeing a long way is
+        /// cheap: an obstacle thirty metres off sets a limit far above anything the vehicle would
+        /// have driven at anyway, and the limit only bites once it is close.
+        /// </summary>
+        private float MeasureClearAhead(InteractableVehicle vehicle, BanditVehicleFootprint footprint,
+            Vector3 heading)
+        {
+            Transform root = vehicle.transform;
+            int count = SweepBody(vehicle, footprint, heading, ScanAheadMetres);
+
+            float nearest = ScanAheadMetres;
+            Transform nearestHit = null;
+
+            for (int i = 0; i < count; i++)
+            {
+                RaycastHit hit = Hits[i];
+                if (hit.transform == null || hit.transform.IsChildOf(root))
+                {
+                    continue;
+                }
+
+                // Distances are measured from the leading face of the plate, which already sits at
+                // the body's centre - so the nose is HalfLength ahead of it and that has to come off
+                // before this is a length of clear road.
+                if (IsDrivableSurface(hit))
+                {
+                    continue;
+                }
+
+                float clear = Mathf.Max(0f, hit.distance);
+                if (clear < nearest)
+                {
+                    nearest = clear;
+                    nearestHit = hit.transform;
+                }
+            }
+
+            // Asked once, of the nearest hit only: what a vehicle wants to know is what is stopping
+            // it, not an inventory of everything down the road.
+            InteractableVehicle blocker = nearestHit != null
+                ? nearestHit.GetComponentInParent<InteractableVehicle>()
+                : null;
+
+            BlockedByVehicle = blocker != null;
+            ObstacleAhead = nearestHit == null
+                ? null
+                : $"{Describe(nearestHit)} at {nearest:0.0}m";
+
+            return nearest;
+        }
+
+        /// <summary>
+        /// Whether this contact is a surface the wheels would ride up rather than a wall they would
+        /// stop against. See <see cref="MaxClimbNormalY"/>.
+        ///
+        /// A zero-distance hit is excluded because a sweep that starts inside a collider reports a
+        /// meaningless normal, and something the body is already touching is not something to drive
+        /// onto in any case.
+        /// </summary>
+        private static bool IsDrivableSurface(RaycastHit hit)
+        {
+            return hit.distance > 0.01f && hit.normal.y >= MaxClimbNormalY;
+        }
+
+        /// <summary>A collider named usefully: the vehicle it belongs to if it is one, otherwise its
+        /// own name and the layer it is on, since a clip volume's name rarely says what it is.</summary>
+        private static string Describe(Transform hit)
+        {
+            InteractableVehicle vehicle = hit.GetComponentInParent<InteractableVehicle>();
+            if (vehicle != null)
+            {
+                return $"vehicle '{(vehicle.asset != null ? vehicle.asset.FriendlyName : hit.name)}'";
+            }
+
+            return $"'{hit.name}' (layer {LayerMask.LayerToName(hit.gameObject.layer)})";
         }
 
         /// <summary>
@@ -503,15 +744,24 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private Vector3 ChooseClearHeading(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 desired)
         {
-            if (!IsBanned(desired) && IsHeadingClear(vehicle, footprint, desired, ignoreOverlap: false))
+            bool banned = IsBanned(desired);
+
+            if (!banned && IsHeadingClear(vehicle, footprint, desired, ignoreOverlap: false))
             {
                 if (Time.time > _avoidSignExpiry)
                 {
                     _avoidSign = 0;
                 }
+
                 IsBlocked = false;
+                RefusedReason = null;
+                AvoidanceDegrees = 0f;
                 return desired;
             }
+
+            RefusedReason = banned
+                ? $"banned direction ({(_bannedUntil - Time.time):0.0}s left)"
+                : _lastBlocker ?? "no ground / too steep";
 
             // Keep turning the same way around an obstacle for a moment, or a vehicle sitting in
             // front of a wall picks left and right on alternate packets and drives straight into it.
@@ -527,12 +777,14 @@ namespace BanditPlugin.Navigation
                         _avoidSign = sign;
                         _avoidSignExpiry = Time.time + 2f;
                         IsBlocked = false;
+                        AvoidanceDegrees = AvoidanceAngles[i] * sign;
                         return candidate;
                     }
                 }
             }
 
             IsBlocked = true;
+            AvoidanceDegrees = 0f;
             return Vector3.zero;
         }
 
@@ -559,25 +811,9 @@ namespace BanditPlugin.Navigation
         private bool IsHeadingClear(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading, bool ignoreOverlap)
         {
             Transform root = vehicle.transform;
-            float lookahead = Mathf.Max(MinLookaheadMetres, footprint.HalfLength * 2f);
+            float lookahead = Mathf.Max(_lookaheadMetres, footprint.HalfLength * 2f);
 
-            // The band the body really occupies, minus the bottom few centimetres so the road under
-            // it is not mistaken for the wall in front of it.
-            float bottom = footprint.LocalBottom + ProbeFloorClearance;
-            float top = Mathf.Max(bottom + MinProbeHalfHeight * 2f, footprint.LocalCentre.y + footprint.HalfExtents.y);
-            float halfHeight = (top - bottom) * 0.5f;
-
-            Vector3 centre = root.TransformPoint(new Vector3(
-                footprint.LocalCentre.x,
-                bottom + halfHeight,
-                footprint.LocalCentre.z));
-
-            Vector3 halfExtents = new Vector3(footprint.HalfWidth, halfHeight, ProbePlateHalfDepth);
-            Quaternion orientation = Quaternion.LookRotation(heading, Vector3.up);
-            float distance = footprint.HalfLength + lookahead;
-
-            int count = Physics.BoxCastNonAlloc(centre, halfExtents, heading, Hits, orientation, distance,
-                ObstacleMask, QueryTriggerInteraction.Ignore);
+            int count = SweepBody(vehicle, footprint, heading, lookahead);
 
             for (int i = 0; i < count; i++)
             {
@@ -595,10 +831,49 @@ namespace BanditPlugin.Navigation
                     continue;
                 }
 
+                if (IsDrivableSurface(hit))
+                {
+                    continue;
+                }
+
+                _lastBlocker = $"{Describe(hit.transform)} at {hit.distance:0.0}m";
                 return false;
             }
 
+            _lastBlocker = null;
             return IsGroundClimbable(vehicle, footprint, heading, lookahead, ignoreOverlap);
+        }
+
+        /// <summary>
+        /// Sweeps the vehicle's own box along a heading and returns however many contacts it found
+        /// in <see cref="Hits"/>. Hit distances are therefore metres of travel, not distances from
+        /// some point inside the vehicle.
+        ///
+        /// Oriented with the vehicle rather than with the heading, because the body does not
+        /// instantly rotate to face a heading it has only just chosen - the question being asked is
+        /// "if this vehicle, as it is currently sitting, slid that way, what would it touch".
+        /// </summary>
+        private static int SweepBody(InteractableVehicle vehicle, BanditVehicleFootprint footprint,
+            Vector3 heading, float distance)
+        {
+            Transform root = vehicle.transform;
+
+            // The band the body really occupies, minus the bottom few centimetres so the road under
+            // it is not mistaken for the wall in front of it.
+            float bottom = footprint.LocalBottom + ProbeFloorClearance;
+            float top = Mathf.Max(bottom + MinProbeHalfHeight * 2f,
+                footprint.LocalCentre.y + footprint.HalfExtents.y);
+            float halfHeight = (top - bottom) * 0.5f;
+
+            Vector3 centre = root.TransformPoint(new Vector3(
+                footprint.LocalCentre.x,
+                bottom + halfHeight,
+                footprint.LocalCentre.z));
+
+            Vector3 halfExtents = new Vector3(footprint.HalfWidth, halfHeight, footprint.HalfLength);
+
+            return Physics.BoxCastNonAlloc(centre, halfExtents, heading, Hits, root.rotation, distance,
+                ObstacleMask, QueryTriggerInteraction.Ignore);
         }
 
         /// <summary>

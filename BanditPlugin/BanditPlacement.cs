@@ -201,6 +201,29 @@ namespace BanditPlugin
         /// puts the bandit on top of it rather than under it. A probe that hits nothing keeps the
         /// height it was given, which is the best guess available.
         /// </summary>
+        /// <summary>
+        /// Whether a vehicle-sized box at this spot is free of buildings, fences, trees and anything
+        /// already parked there.
+        ///
+        /// Sized for something the width of a lorry rather than for the particular vehicle, because
+        /// every caller asks this *before* it has one: it is the test for whether a spawn is worth
+        /// attempting at all. Erring large is the safe direction - a slot rejected for a truck is
+        /// still a fine slot for a quad, and the alternative error puts a lorry in a wall.
+        /// </summary>
+        public static bool IsVehicleSlotClear(Vector3 spot, Vector3 travel)
+        {
+            const int Mask = RayMasks.LARGE | RayMasks.MEDIUM | RayMasks.SMALL | RayMasks.RESOURCE
+                | RayMasks.STRUCTURE | RayMasks.BARRICADE | RayMasks.VEHICLE;
+
+            Vector3 halfExtents = new Vector3(1.6f, 1f, 3.4f);
+            Quaternion orientation = travel.sqrMagnitude > 0.0001f
+                ? Quaternion.LookRotation(travel, Vector3.up)
+                : Quaternion.identity;
+
+            return !Physics.CheckBox(spot + Vector3.up * (halfExtents.y + 0.3f), halfExtents,
+                orientation, Mask, QueryTriggerInteraction.Ignore);
+        }
+
         public static Vector3 SnapToGround(Vector3 point)
         {
             Vector3 probeOrigin = point + Vector3.up * GroundProbeHeight;

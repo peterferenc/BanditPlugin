@@ -514,6 +514,10 @@ namespace BanditPlugin.FakePlayer
         {
             int removed = 0;
 
+            // Before the bots go, or the route director keeps ticking drives whose bandit no longer
+            // exists. It copes with that, but it should not have to.
+            BanditRouteDrive.StopAll();
+
             // Match by SteamID rather than by SteamPlayer reference. SteamPlayerID overloads
             // operator== WITHOUT a null guard (it dereferences both sides to compare .steamID), so
             // an innocent-looking "steamPlayer.playerID == null" throws NullReferenceException -
