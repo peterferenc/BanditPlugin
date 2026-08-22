@@ -99,8 +99,13 @@ namespace BanditPlugin.FakePlayer
         /// in with it, and the turn is driven tightly.
         /// </summary>
         private const float SteerLookaheadSeconds = 1f;
-        private const float MinSteerLookaheadMetres = 6f;
+        private const float MinSteerLookaheadMetres = 8f;
         private const float MaxSteerLookaheadMetres = 14f;
+
+        /// <summary>How near the moving steer carrot counts as reached - small, because it is a
+        /// carrot and not the destination. See BanditRouteDrive for why a large one freezes the
+        /// vehicle.</summary>
+        private const float CarrotArriveRadiusMetres = 3f;
 
         /// <summary>How near the final waypoint counts as arrived. A convoy stops in the area, not
         /// on the pixel.</summary>
@@ -1326,7 +1331,7 @@ namespace BanditPlugin.FakePlayer
                 BanditNavLog.Write(vehicleDriver, $"convoy {Id}: point {element.Target}/{_path.Count - 1}, "
                     + $"aiming ({target.x:0}, {target.z:0})");
 
-                if (vehicleDriver.TrySetDestination(target, out string reason))
+                if (vehicleDriver.TrySetDestination(target, CarrotArriveRadiusMetres, out string reason))
                 {
                     element.IssuedTarget = element.Target;
                     BanditRouteDebug.CurrentTarget = target;

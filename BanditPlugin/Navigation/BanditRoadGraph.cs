@@ -60,6 +60,11 @@ namespace BanditPlugin.Navigation
         private const float MinJunctionRadiusMetres = 3f;
         private const float MaxJunctionRadiusMetres = 14f;
 
+        /// <summary>How far apart in height two nodes may be and still be one junction. A road and
+        /// the bridge crossing over it are closer than this in plan and much further in height, and
+        /// linking them would route a convoy off the overpass.</summary>
+        private const float MaxJunctionHeightMetres = 4f;
+
         /// <summary>
         /// How long a stretch of missing road may be before it is treated as two separate networks
         /// rather than one with a hole in it. See <see cref="BridgeGaps"/>.
@@ -87,6 +92,49 @@ namespace BanditPlugin.Navigation
         /// ever has to look at the nine cells around a node.
         /// </summary>
         private const float GridCellMetres = 16f;
+
+        /// <summary>
+        /// The name prefixes of the placed objects that make up a town's roads.
+        ///
+        /// This is the whole point of the object pass. Unturned has two unrelated road systems and
+        /// the graph used to read only one of them: the spline network in LevelRoads, which is the
+        /// rural highways, and nothing else. Town streets are built the other way - by hand-placing
+        /// prefab tiles from Bundles/Objects/Large/Roads (Road_Line, Road_Turn, Road_Tee and the
+        /// rest) - and those live in LevelObjects, not LevelRoads. On PEI that is 73 tiles the graph
+        /// could not see; on Russia 149; and it is exactly why a convoy drove the countryside and
+        /// then lost the road the moment it reached a town.
+        ///
+        /// Bridges and tunnels carry the road over and under things and are part of it. Sewers and
+        /// docks are not roads a vehicle drives, and are left out - Germany alone has sixty-odd
+        /// sewer tiles that would otherwise wire a phantom road network under the streets.
+        /// </summary>
+        private static readonly string[] RoadObjectPrefixes = { "Road_", "Bridge_", "Tunnel_", "Dam_" };
+
+        /// <summary>Height prefixes that keep the object's own Y instead of being dropped onto the
+        /// terrain - a bridge deck and a tunnel mouth are deliberately not at ground level.</summary>
+        private static readonly string[] ElevatedObjectPrefixes = { "Bridge_", "Tunnel_" };
+
+        /// <summary>
+        /// Every tile node is tagged with this as its RoadIndex, so <see cref="LinkJunctions"/>
+        /// leaves tile-to-tile pairs alone - their topology is built by <see cref="LinkTileNodes"/>
+        /// from actual adjacency - while still stitching tiles to the spline roads they meet, which
+        /// is a different-index pair and exactly what junction linking is for.
+        /// </summary>
+        private const int RoadObjectRoadIndex = -2;
+
+        /// <summary>Extra slack added to two tiles' half-sizes when deciding whether they are
+        /// neighbours. Enough to bridge the seam between two tiles laid edge to edge, small enough
+        /// that diagonally-touching tiles at a crossroads are not wired to each other.</summary>
+        private const float TileLinkMarginMetres = 2.5f;
+
+        /// <summary>The most a single road tile is assumed to span, for the neighbour search radius.
+        /// A backstop against a modded tile with an enormous stray collider dragging the search
+        /// radius out to nothing useful.</summary>
+        private const float MaxTileHalfSizeMetres = 14f;
+
+        /// <summary>Default half-width for a town street node, when nothing better is measured. Four
+        /// metres of half-width is an eight-metre carriageway, which is a two-lane street.</summary>
+        private const float TileHalfWidthMetres = 4f;
 
         /// <summary>
         /// What a metre of each kind of road costs to drive, relative to a metre of motorway.
@@ -124,6 +172,10 @@ namespace BanditPlugin.Navigation
 
             /// <summary>Half the flat drivable width. See <see cref="MeasureHalfWidth"/>.</summary>
             public float HalfWidth;
+
+            /// <summary>For a town-road tile node, half its footprint, used to decide which tiles
+            /// are neighbours. Zero for a spline sample, which is not linked by footprint.</summary>
+            public float TileHalfSize;
 
             /// <summary>The road this came from, and how it is classified on the chart.</summary>
             public int RoadIndex;
@@ -279,7 +331,12 @@ namespace BanditPlugin.Navigation
                 roadCount++;
             }
 
+            int splineNodeCount = Nodes.Count;
+            int tileNodeStart = Nodes.Count;
+            int tiles = AppendRoadObjects();
+
             BuildGrid();
+            LinkTileNodes(tileNodeStart);
             LinkJunctions();
             BridgeGaps();
 
@@ -296,7 +353,9 @@ namespace BanditPlugin.Navigation
 
             float elapsedMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
             Logger.Log($"[Bandit] Road graph for {_builtMap}: {Nodes.Count} node(s) across "
-                + $"{roadCount} road(s) in {elapsedMs:0}ms.");
+                + $"{roadCount} spline road(s) and {tiles} town-road tile(s) "
+                + $"({splineNodeCount} spline node(s), {Nodes.Count - splineNodeCount} tile node(s)) "
+                + $"in {elapsedMs:0}ms.");
         }
 
         /// <summary>
@@ -432,6 +491,209 @@ namespace BanditPlugin.Navigation
         /// underlying fields directly and keeps working on a server whose Road class predates that
         /// method. Both thresholds are the same road: 16m of flat width is a highway.
         /// </summary>
+        /// <summary>
+        /// Adds a node for every placed road tile in the level, so town streets become part of the
+        /// graph. Returns how many tiles were taken.
+        ///
+        /// One node per tile, at the tile's centre - which is the middle of the road, exactly where
+        /// a vehicle should drive. No attempt is made to read each prefab's connection geometry:
+        /// there are forty-odd road piece variants and no reliable per-prefab way to know where a
+        /// Tee's third arm points, so instead the topology is recovered afterwards from adjacency
+        /// (see <see cref="LinkTileNodes"/>) - tiles laid edge to edge are neighbours, and a
+        /// crossroads tile is simply a tile with three or four neighbours. That needs nothing but
+        /// positions and sizes, and it is robust to every piece the game or a mod defines.
+        ///
+        /// Each tile's half-size is measured from its colliders so the neighbour test scales to the
+        /// piece - a long bridge span and a short kerb tile are both handled by the same rule.
+        /// </summary>
+        private static int AppendRoadObjects()
+        {
+            if (LevelObjects.objects == null)
+            {
+                return 0;
+            }
+
+            int tiles = 0;
+            List<LevelObject>[,] regions = LevelObjects.objects;
+
+            for (int x = 0; x < regions.GetLength(0); x++)
+            {
+                for (int y = 0; y < regions.GetLength(1); y++)
+                {
+                    List<LevelObject> cell = regions[x, y];
+                    if (cell == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (LevelObject obj in cell)
+                    {
+                        if (obj == null || obj.transform == null || obj.asset == null)
+                        {
+                            continue;
+                        }
+
+                        string name = obj.asset.name;
+                        if (!IsRoadObject(name, out bool elevated))
+                        {
+                            continue;
+                        }
+
+                        AppendRoadObject(obj, elevated);
+                        tiles++;
+                    }
+                }
+            }
+
+            return tiles;
+        }
+
+        private static void AppendRoadObject(LevelObject obj, bool elevated)
+        {
+            Transform transform = obj.transform;
+            Vector3 position = transform.position;
+
+            // A road tile sits on the terrain and its origin is at road level; a bridge deck or a
+            // tunnel mouth keeps the height the mapper placed it at, the same distinction the spline
+            // pass makes with RoadJoint.ignoreTerrain.
+            if (!elevated)
+            {
+                position.y = LevelGround.getHeight(position);
+            }
+
+            // The tile's forward is its local +Z carried into the world - only used to give the
+            // node a direction for lane offsetting and steering; the actual road shape comes from
+            // how the tiles link up.
+            Vector3 forward = transform.forward;
+            forward.y = 0f;
+
+            Nodes.Add(new RoadNode
+            {
+                Position = position,
+                Direction = forward.sqrMagnitude > 0.0001f ? forward.normalized : Vector3.forward,
+                HalfWidth = TileHalfWidthMetres,
+                RoadIndex = RoadObjectRoadIndex,
+                Chart = EObjectChart.STREET,
+                TileHalfSize = MeasureTileHalfSize(obj)
+            });
+        }
+
+        /// <summary>Half the tile's largest horizontal footprint, from its colliders, for the
+        /// neighbour search. Falls back to a street-sized default when a tile has no measurable
+        /// collider.</summary>
+        private static float MeasureTileHalfSize(LevelObject obj)
+        {
+            Collider[] colliders = obj.transform.GetComponentsInChildren<Collider>(includeInactive: false);
+            float half = 0f;
+
+            foreach (Collider collider in colliders)
+            {
+                if (collider == null || collider.isTrigger)
+                {
+                    continue;
+                }
+
+                Bounds bounds = collider.bounds; // world AABB is fine - only a search radius
+                half = Mathf.Max(half, bounds.extents.x, bounds.extents.z);
+            }
+
+            if (half < 0.5f)
+            {
+                half = TileHalfWidthMetres;
+            }
+
+            return Mathf.Min(half, MaxTileHalfSizeMetres);
+        }
+
+        /// <summary>Whether a placed object is a piece of drivable town road, and whether it is one
+        /// that keeps its own height rather than being dropped onto the terrain.</summary>
+        private static bool IsRoadObject(string name, out bool elevated)
+        {
+            elevated = false;
+            if (string.IsNullOrEmpty(name))
+            {
+                return false;
+            }
+
+            bool isRoad = false;
+            for (int i = 0; i < RoadObjectPrefixes.Length; i++)
+            {
+                if (name.StartsWith(RoadObjectPrefixes[i], System.StringComparison.OrdinalIgnoreCase))
+                {
+                    isRoad = true;
+                    break;
+                }
+            }
+
+            if (!isRoad)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < ElevatedObjectPrefixes.Length; i++)
+            {
+                if (name.StartsWith(ElevatedObjectPrefixes[i], System.StringComparison.OrdinalIgnoreCase))
+                {
+                    elevated = true;
+                    break;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Wires the town-road tiles into a network by adjacency: two tiles whose footprints touch
+        /// are the same stretch of road and get linked.
+        ///
+        /// This is where the topology comes from, and it is the reason the tile pass needs no
+        /// per-prefab geometry. Tiles are laid edge to edge on a grid, so "their footprints touch"
+        /// is the whole of it - a straight run links into a chain, a Tee tile ends up with three
+        /// neighbours and a crossroads four, and the router treats those exactly as it treats a
+        /// spline junction. The height check keeps a bridge deck from linking to the road passing
+        /// under it, the same way <see cref="LinkJunctions"/> does.
+        /// </summary>
+        private static void LinkTileNodes(int tileNodeStart)
+        {
+            List<int> nearby = new List<int>();
+
+            for (int i = tileNodeStart; i < Nodes.Count; i++)
+            {
+                RoadNode node = Nodes[i];
+                nearby.Clear();
+                GatherCells(node.Position, nearby, node.TileHalfSize + MaxTileHalfSizeMetres);
+
+                foreach (int other in nearby)
+                {
+                    if (other <= i || other < tileNodeStart)
+                    {
+                        continue; // each tile pair once, and only tile-to-tile here
+                    }
+
+                    RoadNode candidate = Nodes[other];
+
+                    // Footprints touch, plus a small margin for the seam between them.
+                    float reach = node.TileHalfSize + candidate.TileHalfSize + TileLinkMarginMetres;
+
+                    Vector3 delta = candidate.Position - node.Position;
+                    float flat = delta.x * delta.x + delta.z * delta.z;
+                    if (flat > reach * reach)
+                    {
+                        continue;
+                    }
+
+                    // Two decks stacked at an overpass are close in plan and far in height; that is
+                    // not a link a vehicle can drive.
+                    if (Mathf.Abs(delta.y) > MaxJunctionHeightMetres)
+                    {
+                        continue;
+                    }
+
+                    Link(i, other);
+                }
+            }
+        }
+
         private static void Classify(Road road, out float halfWidth, out EObjectChart chart)
         {
             RoadAsset asset = road.GetRoadAsset();
@@ -539,7 +801,7 @@ namespace BanditPlugin.Navigation
                         MinJunctionRadiusMetres, MaxJunctionRadiusMetres);
 
                     Vector3 delta = candidate.Position - node.Position;
-                    if (Mathf.Abs(delta.y) > 4f)
+                    if (Mathf.Abs(delta.y) > MaxJunctionHeightMetres)
                     {
                         continue; // an overpass, not a junction
                     }

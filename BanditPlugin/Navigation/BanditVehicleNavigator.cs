@@ -162,7 +162,7 @@ namespace BanditPlugin.Navigation
                 // height, so the tank drove half a metre in the air and glided over everything. It
                 // only showed on some vehicles because a vehicle parked square to the world axes
                 // measures correctly.
-                if (collider is WheelCollider)
+                if (IsWheel(collider))
                 {
                     Vector3 centre = root.InverseTransformPoint(
                         collider.transform.TransformPoint(geometry.center));
@@ -262,6 +262,29 @@ namespace BanditPlugin.Navigation
 
         /// <summary>Whether a collider is a pole rather than part of the hull - thin in its two
         /// smallest dimensions. See <see cref="ThinColliderMetres"/>.</summary>
+        /// <summary>
+        /// Whether a collider is one of the vehicle's wheels.
+        ///
+        /// By name as well as by type, because Unturned's vehicles do not use Unity WheelColliders
+        /// for their bodies - the wheels are ordinary box or mesh colliders called "Wheel_0" and so
+        /// on. Checking only for the WheelCollider type is why the footprint clamp never fired: it
+        /// found no wheels, so it had nothing to cap the oversized collider union against, and the
+        /// Stryker stayed 4.76m wide and 10.30m long.
+        /// </summary>
+        private static bool IsWheel(Collider collider)
+        {
+            if (collider is WheelCollider)
+            {
+                return true;
+            }
+
+            string name = collider.name;
+            return !string.IsNullOrEmpty(name)
+                && (name.IndexOf("Wheel", System.StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("Tire", System.StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("Tyre", System.StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
         private static bool IsThin(Vector3 size)
         {
             float smallest = Mathf.Min(size.x, Mathf.Min(size.y, size.z));
@@ -805,15 +828,24 @@ namespace BanditPlugin.Navigation
                     continue;
                 }
 
-                // Distances are measured from the leading face of the plate, which already sits at
-                // the body's centre - so the nose is HalfLength ahead of it and that has to come off
-                // before this is a length of clear road.
+                // An overlap - the sweep started inside this collider - says nothing about how
+                // much road is ahead, so it must not be read as "zero metres of it". This is the
+                // freeze the log kept showing: a vehicle touching a fire hydrant reported clear=0,
+                // the speed limiter turned zero clear road into a full stop, and it sat on the
+                // brake for ever - and the reverse could not save it, because the same clamp held
+                // the reverse speed at zero too. An overlap is stepped over here exactly as it is
+                // in the heading test; whether it can be driven out of is the stall detector's job.
+                if (hit.distance <= 0.01f)
+                {
+                    continue;
+                }
+
                 if (IsDrivableSurface(hit))
                 {
                     continue;
                 }
 
-                float clear = Mathf.Max(0f, hit.distance);
+                float clear = hit.distance;
                 if (clear < nearest)
                 {
                     nearest = clear;

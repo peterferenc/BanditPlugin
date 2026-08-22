@@ -556,6 +556,23 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public bool TrySetDestination(Vector3 destination, out string reason)
         {
+            return TrySetDestination(destination, Mathf.Max(4f, _footprint.HalfLength + 2f), out reason);
+        }
+
+        /// <summary>
+        /// Drives to a point, told explicitly how near counts as arrived.
+        ///
+        /// The overload exists for route following, where the point handed over is not a
+        /// destination at all - it is a carrot a fixed distance up the road that moves with the
+        /// vehicle. Such a carrot must use a small arrival radius: with the default one (the
+        /// vehicle's own length plus a margin, seven metres for a Stryker) a carrot placed six
+        /// metres ahead is already "arrived" the instant it is issued, so the navigator stops, the
+        /// route re-issues the same point, and the vehicle sits on an empty road being told it has
+        /// reached somewhere it is nowhere near. The route layer decides real arrival itself; the
+        /// carrot only needs to steer.
+        /// </summary>
+        public bool TrySetDestination(Vector3 destination, float arriveRadius, out string reason)
+        {
             InteractableVehicle vehicle = Vehicle;
 
             reason = WhyCannotDriveTo(vehicle);
@@ -567,9 +584,7 @@ namespace BanditPlugin.FakePlayer
             EnsureFootprint(vehicle);
             CalibrateRideHeight(vehicle);
 
-            // A vehicle cannot put its centre on a point the way a person can stand on one. Arriving
-            // is its nose being there, which is its own length away from its origin.
-            _navigator.SetDestination(destination, Mathf.Max(4f, _footprint.HalfLength + 2f));
+            _navigator.SetDestination(destination, arriveRadius);
 
             // A fresh trip gets a fresh budget of attempts to back out of something, and a stall
             // sample taken from where it actually is rather than wherever the last trip ended.
@@ -1180,10 +1195,16 @@ namespace BanditPlugin.FakePlayer
             float limit = (reverse ? ReverseSpeed(vehicle) : CruiseSpeed(vehicle)) * Mathf.Clamp01(SpeedScale);
             float along = reverse ? -forwardVelocity : forwardVelocity;
 
-            // Held to what it could stop from inside the road it can actually see. See
-            // ComfortBrakingMetresPerSecondSquared - this is the one thing standing between a
-            // bandit and the back of the vehicle in front of it.
-            limit = Mathf.Min(limit, StoppableSpeed(_navigator.ClearAheadMetres));
+            // Held to what it could stop from inside the road it can actually see, but only going
+            // forward. ClearAheadMetres is measured along the navigator's forward heading, so
+            // clamping a reverse hop with it is clamping the wrong direction - and a vehicle that
+            // reverses precisely because the way ahead is blocked would then be forbidden from
+            // reversing by that same block. The reverse is a short bounded hop whose own path was
+            // already swept clear before it was chosen (see ResolveTravelDirection).
+            if (!reverse)
+            {
+                limit = Mathf.Min(limit, StoppableSpeed(_navigator.ClearAheadMetres));
+            }
 
             int throttle;
             bool brake = false;

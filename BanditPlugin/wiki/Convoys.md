@@ -175,6 +175,32 @@ turrets and nobody in one is a taxi, and a crew list naming a seat the vehicle d
 passenger. `crew:1` therefore makes the whole column unarmed, which is correct: every vehicle turns
 up with only its driver.
 
+## Two road systems, and we read both
+
+Unturned builds roads two entirely different ways, and the graph now reads each.
+
+- **Spline roads** (`LevelRoads`, `Environment/Paths.dat`) are Bezier curves with a width and a
+  chart type. These are the rural highways. Sampled every 8m into nodes.
+- **Road-tile objects** (`LevelObjects`, `Level/Objects.dat`) are hand-placed prefab pieces -
+  `Road_Line`, `Road_Turn`, `Road_Tee`, `Road_Quad`, plus `Bridge_` and `Tunnel_`. These are the
+  town streets, and the graph used to be blind to every one of them: PEI has 73, Russia 149,
+  Germany 213, and a convoy that drove the countryside perfectly lost the road the instant it
+  reached a town.
+
+The tile pass adds one node at each tile's centre - the middle of the road - and recovers the
+topology from adjacency rather than from any per-prefab geometry: tiles laid edge to edge are
+neighbours and get linked, so a straight run becomes a chain, a Tee tile ends up with three
+neighbours and a crossroads four. That needs nothing but positions and footprint sizes, and it
+works for every one of the forty-odd road piece variants without hand-tagging any of them. The
+existing junction-linking then stitches the tile network to the spline highways it meets, and gap
+bridging covers the rest, so town and country are one graph.
+
+Sewers and docks are deliberately left out - Germany alone has sixty-odd sewer tiles that would
+otherwise wire a phantom road network under the streets, and a vehicle does not drive either.
+
+`/banditroads show` colours a junction (three or more links) red, so a town lights up as a lattice
+of red crossroads joined by blue straights - which is the quickest confirmation the town was read.
+
 ## Roads are objects, and objects are obstacles
 
 The single worst driving bug on this map, and it took `/banditnavlog` to see it. Roads in Unturned

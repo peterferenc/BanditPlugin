@@ -47,8 +47,15 @@ namespace BanditPlugin.FakePlayer
         private const float ApproachMinimumScale = 0.18f;
 
         private const float SteerLookaheadSeconds = 1f;
-        private const float MinSteerLookaheadMetres = 6f;
+        private const float MinSteerLookaheadMetres = 8f;
         private const float MaxSteerLookaheadMetres = 14f;
+
+        /// <summary>How near the moving steer carrot counts as reached. Small on purpose - the
+        /// carrot is not the destination, it is a point a lookahead ahead that moves with the
+        /// vehicle, and a large radius here is what let the navigator declare it "arrived" the
+        /// instant it was issued and freeze the vehicle on an open road. Real arrival is decided by
+        /// distance to the last route point, not by this.</summary>
+        private const float CarrotArriveRadiusMetres = 3f;
 
         /// <summary>How many route points to step over when the navigator gives up, and how many
         /// times to allow that before the trip is called off.</summary>
@@ -228,7 +235,7 @@ namespace BanditPlugin.FakePlayer
 
             if (_issued != _target || !driver.HasDestination)
             {
-                if (!driver.TrySetDestination(aim, out string reason))
+                if (!driver.TrySetDestination(aim, CarrotArriveRadiusMetres, out string reason))
                 {
                     Logger.Log($"[Bandit] Route drive cannot drive the route ({reason}) - stopping.");
                     Finished = true;
