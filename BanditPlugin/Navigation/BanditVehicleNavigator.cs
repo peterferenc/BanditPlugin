@@ -59,6 +59,16 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private const float ThinColliderMetres = 0.3f;
 
+        /// <summary>The layer RayMasks.NAVMESH selects - 2^22 - which is where a vehicle's AI
+        /// avoidance volume lives.</summary>
+        private const int NavmeshLayer = 22;
+
+        /// <summary>How far a body may overhang its wheels before the measurement is treated as
+        /// something other than the vehicle. Generous - a real overhang is what these allow for -
+        /// but nothing like the metre-plus of stray collider this keeps out.</summary>
+        private const float WheelOverhangWidthMetres = 0.55f;
+        private const float WheelOverhangLengthMetres = 1.2f;
+
         public static BanditVehicleFootprint Measure(InteractableVehicle vehicle)
         {
             if (vehicle == null)
@@ -72,6 +82,11 @@ namespace BanditPlugin.Navigation
             bool any = false;
             Bounds local = new Bounds();
 
+            // Where the wheels are, in vehicle space. Collected alongside the body box because the
+            // body box cannot be trusted on its own - see the clamp below.
+            bool anyWheel = false;
+            Bounds wheelCentres = new Bounds();
+
             for (int i = 0; i < colliders.Length; i++)
             {
                 Collider collider = colliders[i];
@@ -80,18 +95,63 @@ namespace BanditPlugin.Navigation
                     continue;
                 }
 
+                // The people inside are not part of the vehicle.
+                //
+                // A seated player is parented to the seat transform, so GetComponentsInChildren
+                // walks straight into the crew and measures them as bodywork - and the footprint is
+                // taken once, on the first drive step, which is after they have climbed in. A
+                // Stryker came out 4.78m wide, 10.40m long and 4.52m tall against a real 2.7 by 7 by
+                // 2.6: the gunner standing in the hatch set the height, the men in the back set the
+                // length. That box does not fit in a lane, so every clearance test refused the road
+                // it was driving on, and the arrival radius is derived from the length, so it also
+                // stopped a bus length short of everywhere it was sent.
+                if (collider.GetComponentInParent<Player>() != null)
+                {
+                    continue;
+                }
+
+                // The vehicle's AI avoidance volume is not the vehicle either.
+                //
+                // Every vehicle carries a collider called "Nav" on the Navmesh layer, sized so that
+                // walking zombies give the thing a wide berth. On this Stryker it is 4.78 x 3.81 x
+                // 10.40 against a real hull of 2.60 x 1.09 x 7.72 - and being the largest collider
+                // on the vehicle it was setting the footprint single-handed. That is where "4.78m
+                // wide, 10.40m long" came from, and with a box that size the vehicle overlapped the
+                // road it was parked on, so every heading came back refused at zero distance and it
+                // sat in the road backing up until it ran out of attempts.
+                if (collider.gameObject.layer == NavmeshLayer
+                    || string.Equals(collider.name, "Nav", System.StringComparison.Ordinal))
+                {
+                    BanditNavLog.Write($"footprint {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")}",
+                        $"ignoring AI avoidance volume '{collider.name}'");
+                    continue;
+                }
+
                 if (!TryGetLocalGeometry(collider, out Bounds geometry))
                 {
                     continue;
                 }
 
-                if (IsThin(geometry.size))
+                // Measured in world units, not in the collider's own. A mesh collider reports the
+                // raw mesh bounds, which say nothing about size until the transform's scale is
+                // applied - so this test was comparing 0.04 against 0.3 for a part that is two
+                // metres long, and throwing away exactly the wrong colliders.
+                Vector3 scale = collider.transform.lossyScale;
+                Vector3 worldSize = new Vector3(
+                    Mathf.Abs(geometry.size.x * scale.x),
+                    Mathf.Abs(geometry.size.y * scale.y),
+                    Mathf.Abs(geometry.size.z * scale.z));
+
+                if (IsThin(worldSize))
                 {
                     BanditNavLog.Write($"footprint {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")}",
-                        $"ignoring thin collider '{collider.name}' {geometry.size.x:0.00}x"
-                        + $"{geometry.size.y:0.00}x{geometry.size.z:0.00}");
+                        $"ignoring thin collider '{collider.name}' {worldSize.x:0.00}x"
+                        + $"{worldSize.y:0.00}x{worldSize.z:0.00}");
                     continue;
                 }
+
+                BanditNavLog.Write($"footprint parts {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")}",
+                    $"'{collider.name}' {worldSize.x:0.00}x{worldSize.y:0.00}x{worldSize.z:0.00}");
 
                 // The collider's own geometry, carried into vehicle space through its own transform.
                 //
@@ -102,6 +162,22 @@ namespace BanditPlugin.Navigation
                 // height, so the tank drove half a metre in the air and glided over everything. It
                 // only showed on some vehicles because a vehicle parked square to the world axes
                 // measures correctly.
+                if (collider is WheelCollider)
+                {
+                    Vector3 centre = root.InverseTransformPoint(
+                        collider.transform.TransformPoint(geometry.center));
+
+                    if (!anyWheel)
+                    {
+                        wheelCentres = new Bounds(centre, Vector3.zero);
+                        anyWheel = true;
+                    }
+                    else
+                    {
+                        wheelCentres.Encapsulate(centre);
+                    }
+                }
+
                 Vector3 min = geometry.min;
                 Vector3 max = geometry.max;
 
@@ -130,15 +206,56 @@ namespace BanditPlugin.Navigation
                 return Default;
             }
 
-            BanditNavLog.Write($"footprint {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")}",
-                $"{local.size.x:0.00}m wide, {local.size.z:0.00}m long, {local.size.y:0.00}m tall; "
-                + $"underside {local.min.y:0.00}, centre ({local.center.x:0.00}, {local.center.y:0.00}, "
-                + $"{local.center.z:0.00})");
+            Vector3 extents = local.extents;
+            Vector3 centreOfBox = local.center;
+
+            // The body box is the union of every collider on the vehicle, and on modded content
+            // that is routinely nothing like the vehicle. This Stryker has a perfectly good hull
+            // collider at 2.60 x 1.09 x 7.72 and then a dozen others - armour panels, hitboxes,
+            // whatever the author left in - spanning 4.6m, so the union came out 4.76 wide and
+            // 10.30 long for a vehicle that is really 2.7 by 7. Nothing about that is fixable by
+            // picking a cleverer collider: there is no flag saying which one is the body.
+            //
+            // The wheels are the one thing that cannot lie. A vehicle is as wide as its track plus
+            // a little overhang and as long as its wheelbase plus a little more, on every road
+            // vehicle ever built, so the wheels put a ceiling on what the union is allowed to
+            // claim. Only a ceiling - a genuinely wide vehicle whose colliders agree with its
+            // wheels keeps its real size - and only for the two dimensions that decide whether it
+            // fits down a road and how near it has to get before it has arrived.
+            if (anyWheel)
+            {
+                float cappedHalfWidth = Mathf.Min(extents.x, wheelCentres.extents.x + WheelOverhangWidthMetres);
+                float cappedHalfLength = Mathf.Min(extents.z, wheelCentres.extents.z + WheelOverhangLengthMetres);
+
+                if (cappedHalfWidth < extents.x - 0.01f || cappedHalfLength < extents.z - 0.01f)
+                {
+                    Rocket.Core.Logging.Logger.Log(
+                        $"[Bandit] {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")} "
+                        + $"colliders claim {extents.x * 2f:0.00}m x {extents.z * 2f:0.00}m; its wheels "
+                        + $"say {cappedHalfWidth * 2f:0.00}m x {cappedHalfLength * 2f:0.00}m. Using the wheels.");
+
+                    extents.x = cappedHalfWidth;
+                    extents.z = cappedHalfLength;
+                    centreOfBox.x = Mathf.Clamp(centreOfBox.x, wheelCentres.center.x - 0.5f,
+                        wheelCentres.center.x + 0.5f);
+                    centreOfBox.z = Mathf.Clamp(centreOfBox.z, wheelCentres.center.z - 1f,
+                        wheelCentres.center.z + 1f);
+                }
+            }
+
+            // Always, not only with nav logging on. The footprint is measured once per vehicle and
+            // every clearance decision is made against it, so it is both the cheapest line in the
+            // log and the one that has explained the most - and it is measured on the first drive
+            // step, which is routinely before anybody thinks to switch the logging on.
+            Rocket.Core.Logging.Logger.Log(
+                $"[Bandit] {(vehicle.asset != null ? vehicle.asset.FriendlyName : "vehicle")} footprint: "
+                + $"{extents.x * 2f:0.00}m wide, {extents.z * 2f:0.00}m long, {extents.y * 2f:0.00}m tall; "
+                + $"underside {local.min.y:0.00}");
 
             return new BanditVehicleFootprint
             {
-                LocalCentre = local.center,
-                HalfExtents = local.extents,
+                LocalCentre = centreOfBox,
+                HalfExtents = extents,
                 LocalBottom = local.min.y
             };
         }
@@ -350,6 +467,9 @@ namespace BanditPlugin.Navigation
         /// <summary>Why the heading the route wanted was refused, or null if it was taken.</summary>
         public string RefusedReason { get; private set; }
 
+        /// <summary>What the body is currently overlapping, or null. Diagnostics only.</summary>
+        public string Overlapping { get; private set; }
+
         /// <summary>How far off the wanted heading the fan had to go to find room, in degrees.</summary>
         public float AvoidanceDegrees { get; private set; }
 
@@ -497,6 +617,10 @@ namespace BanditPlugin.Navigation
 
         /// <summary>The last thing a sweep refused a heading for, for the diagnostics.</summary>
         private string _lastBlocker;
+
+        /// <summary>Whatever the body is currently inside, if anything. Not a reason to refuse a
+        /// heading - see IsHeadingClear - but very much worth saying in the log.</summary>
+        private string _overlapping;
 
         private Vector3 _bannedDirection;
         private float _bannedUntil;
@@ -721,7 +845,68 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private static bool IsDrivableSurface(RaycastHit hit)
         {
+            // Road first, and before the overlap test rather than after it. A zero-distance hit
+            // means the sweep began inside the collider, which for anything else is a vehicle
+            // pressed against a wall - but for road surface it means the vehicle is standing on the
+            // road, which is where a vehicle is supposed to be. Testing overlap first is why the
+            // rule that a road never blocks a vehicle did not fire: the log is full of
+            // "refused: 'Road_Line_0' at 0.0m", and 0.0m is exactly the case it was skipping.
+            if (IsRoadPiece(hit.transform))
+            {
+                return true;
+            }
+
             return hit.distance > 0.01f && hit.normal.y >= MaxClimbNormalY;
+        }
+
+        /// <summary>
+        /// Whether this is a piece of road surface, by name.
+        ///
+        /// Name matching, and worth saying plainly why rather than dressing it up. Unturned has no
+        /// flag that means "this object is road": the pieces a mapper lays down - Road_Line_0,
+        /// Road_Turn_0, Road_Tee_0, Road_Quad_Cap_0 - are ordinary objects on the Large layer, the
+        /// same layer as houses, and the only thing distinguishing them from a wall is what they are
+        /// called. The normal test catches them wherever they are lying flat, which is nearly
+        /// everywhere; what it cannot catch is the vertical lip at the edge of a slab, or the seam
+        /// where two pieces meet at slightly different heights, and those are precisely the places
+        /// the log kept showing a vehicle refusing to move.
+        ///
+        /// So the rule is the one asked for: a road is wide enough, and a vehicle on a road is not
+        /// to be stopped by the road. Driving up onto something is still governed by the slope test
+        /// - ignoring a contact here does not make a two-metre embankment climbable - so the worst
+        /// this can do is let a vehicle try a kerb it will then be refused by the ground sampling.
+        /// </summary>
+        /// <summary>
+        /// The prefixes of every drivable piece in Bundles/Objects/Large/Roads. Bridges and the dam
+        /// are in there because they are road as far as a vehicle is concerned - the map's own
+        /// folder puts them together, and every one of them is something a car is meant to be on
+        /// top of.
+        /// </summary>
+        private static readonly string[] RoadPieceNames =
+        {
+            "Road_", "Bridge_", "Dam_", "Dock_", "Sewer_Entrance_"
+        };
+
+        private static bool IsRoadPiece(Transform hit)
+        {
+            for (Transform current = hit; current != null; current = current.parent)
+            {
+                string name = current.name;
+                if (name == null)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < RoadPieceNames.Length; i++)
+                {
+                    if (name.StartsWith(RoadPieceNames[i], System.StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         /// <summary>A collider named usefully: the vehicle it belongs to if it is one, otherwise its
@@ -823,11 +1008,20 @@ namespace BanditPlugin.Navigation
                     continue; // our own body, clip colliders and wheels
                 }
 
-                // A zero-distance hit is a collider the sweep started inside. That used to be
-                // forgiven, which meant a vehicle pressed against something reported every direction
-                // as clear and kept pushing. It is a wall, and the way out of it is reverse.
-                if (ignoreOverlap && hit.distance <= 0.01f)
+                // A zero-distance hit is a collider the sweep already starts inside, and it can
+                // never be a reason to prefer one heading over another: the overlap is there
+                // whichever way the vehicle is pointed, so counting it refuses the entire fan and
+                // the vehicle stops dead with nowhere it considers safe. That is the deadlock in
+                // the log - "BLOCKED refused=vehicle 'Bicycle' at 0.0m", a Stryker held at a
+                // standstill for minutes by a bicycle it was standing on top of.
+                //
+                // Steering cannot solve an overlap; only moving can. So it is recorded and stepped
+                // over, and the case it used to guard - a vehicle pressed against a wall pushing
+                // forever because every direction reads clear - is left to the stall detector,
+                // which is the thing that actually measures whether pushing is working.
+                if (hit.distance <= 0.01f)
                 {
+                    _overlapping = Describe(hit.transform);
                     continue;
                 }
 
@@ -841,6 +1035,9 @@ namespace BanditPlugin.Navigation
             }
 
             _lastBlocker = null;
+            Overlapping = _overlapping;
+            _overlapping = null;
+
             return IsGroundClimbable(vehicle, footprint, heading, lookahead, ignoreOverlap);
         }
 

@@ -110,6 +110,11 @@ namespace BanditPlugin.FakePlayer
         /// <see cref="HasPassed"/>.</summary>
         private const float PointReachedRadiusMetres = 5f;
 
+        /// <summary>How far out the column starts slowing for its last waypoint, and the slowest it
+        /// creeps while doing it.</summary>
+        private const float ApproachSlowdownMetres = 30f;
+        private const float ApproachMinimumScale = 0.18f;
+
         /// <summary>
         /// The interval a following vehicle tries to keep, and the distance at which it stops rather
         /// than closes. Measured bumper to bumper - see <see cref="ClosestGapAhead"/> - so these are
@@ -245,6 +250,11 @@ namespace BanditPlugin.FakePlayer
         {
             public Vector3 Position;
             public int NodeIndex;
+
+            /// <summary>What kind of point this is, purely so <see cref="BanditRouteDebug"/> can
+            /// colour it: a road node, a point on a rounded corner, or a waypoint that was asked
+            /// for.</summary>
+            public BanditRouteDebug.MarkerKind Kind;
         }
 
         /// <summary>One vehicle in the column, and where it has got to.</summary>
@@ -543,7 +553,12 @@ namespace BanditPlugin.FakePlayer
                             continue;
                         }
 
-                        path.Add(new RoutePoint { Position = roadNode.Position, NodeIndex = node });
+                        path.Add(new RoutePoint
+                        {
+                            Position = roadNode.Position,
+                            NodeIndex = node,
+                            Kind = BanditRouteDebug.MarkerKind.RoadPoint
+                        });
                     }
 
                     routed = true;
@@ -559,11 +574,119 @@ namespace BanditPlugin.FakePlayer
                     directLegs++;
                 }
 
-                path.Add(new RoutePoint { Position = waypoint, NodeIndex = -1 });
+                path.Add(new RoutePoint
+                {
+                    Position = waypoint,
+                    NodeIndex = -1,
+                    Kind = BanditRouteDebug.MarkerKind.Waypoint
+                });
+
                 cursor = waypoint;
             }
 
-            return path;
+            List<RoutePoint> rounded = RoundCorners(path);
+            RecordForDebug(rounded);
+            return rounded;
+        }
+
+        /// <summary>Keeps the finished plan where "/banditnavlog route" can draw it.</summary>
+        private static void RecordForDebug(List<RoutePoint> path)
+        {
+            List<BanditRouteDebug.Marker> markers = new List<BanditRouteDebug.Marker>(path.Count);
+
+            foreach (RoutePoint point in path)
+            {
+                markers.Add(new BanditRouteDebug.Marker { Position = point.Position, Kind = point.Kind });
+            }
+
+            BanditRouteDebug.SetPlan(markers);
+        }
+
+        /// <summary>How far back from a corner the turn starts, and how sharp a corner has to be
+        /// before it is worth rounding at all.</summary>
+        private const float CornerRadiusMetres = 10f;
+        private const float CornerMinDegrees = 12f;
+
+        /// <summary>How many points an arc is drawn with. Enough that the steering lookahead always
+        /// has one to interpolate between, few enough not to bloat a cross-map route.</summary>
+        private const int CornerSegments = 5;
+
+        /// <summary>
+        /// Replaces every sharp corner in the route with an arc through it.
+        ///
+        /// A road route is a list of node positions, and a junction is one node where two straight
+        /// runs meet at a right angle. Driving that literally means aiming at the corner itself,
+        /// which is not where the vehicle should ever be: it arrives pointing the wrong way, turns
+        /// on the spot, and in the meantime its nose has cut across whatever is on the inside of the
+        /// bend. On the Stratford crossroads that is the pavement, the kerb and a lamp post.
+        ///
+        /// The arc is a quadratic Bezier with the corner itself as the control point, starting and
+        /// ending ten metres back along each straight. That curve leaves the first road tangentially,
+        /// joins the second tangentially, and passes through the midpoint between the corner and the
+        /// straight line joining its two ends - which is the line a driver actually takes through a
+        /// junction, and it stays inside the carriageway the whole way round.
+        /// </summary>
+        private static List<RoutePoint> RoundCorners(List<RoutePoint> path)
+        {
+            if (path.Count < 3)
+            {
+                return path;
+            }
+
+            List<RoutePoint> rounded = new List<RoutePoint>(path.Count + 8) { path[0] };
+
+            for (int i = 1; i < path.Count - 1; i++)
+            {
+                Vector3 corner = path[i].Position;
+                Vector3 incoming = corner - path[i - 1].Position;
+                Vector3 outgoing = path[i + 1].Position - corner;
+
+                incoming.y = 0f;
+                outgoing.y = 0f;
+
+                if (incoming.sqrMagnitude < 0.01f || outgoing.sqrMagnitude < 0.01f)
+                {
+                    continue;
+                }
+
+                float turn = Vector3.Angle(incoming, outgoing);
+                if (turn < CornerMinDegrees)
+                {
+                    rounded.Add(path[i]); // near enough straight; leave it alone
+                    continue;
+                }
+
+                // Never more than half of either straight, or two arcs on a short link would
+                // overlap and the route would double back through itself.
+                float back = Mathf.Min(CornerRadiusMetres,
+                    Mathf.Min(incoming.magnitude, outgoing.magnitude) * 0.5f);
+
+                Vector3 start = corner - incoming.normalized * back;
+                Vector3 end = corner + outgoing.normalized * back;
+
+                for (int step = 0; step <= CornerSegments; step++)
+                {
+                    float t = (float)step / CornerSegments;
+                    float inverse = 1f - t;
+
+                    Vector3 point = inverse * inverse * start
+                        + 2f * inverse * t * corner
+                        + t * t * end;
+
+                    // The arc belongs to the road it is turning on, so it keeps the corner's node
+                    // index - only /banditroads and the "how much of this route is on tarmac" count
+                    // read that.
+                    rounded.Add(new RoutePoint
+                    {
+                        Position = point,
+                        NodeIndex = path[i].NodeIndex,
+                        Kind = BanditRouteDebug.MarkerKind.CornerArc
+                    });
+                }
+            }
+
+            rounded.Add(path[path.Count - 1]);
+            return rounded;
         }
 
         /// <summary>What the convoy is doing, for the command that spawned it and for /banditstatus.</summary>
@@ -1159,9 +1282,12 @@ namespace BanditPlugin.FakePlayer
 
             bool atLastPoint = element.Target >= _path.Count - 1;
             Vector3 target = SteerTarget(element, vehiclePosition);
+            float toEnd = HorizontalDistance(vehiclePosition, _path[_path.Count - 1].Position);
 
-            if (atLastPoint
-                && HorizontalDistance(vehiclePosition, _path[_path.Count - 1].Position) <= ArriveRadiusMetres)
+            // Near it, or past it. Overshooting used to leave a vehicle permanently travelling,
+            // because arrival was only ever tested as proximity and a vehicle eighty metres beyond
+            // the last waypoint is never near it again.
+            if (atLastPoint && (toEnd <= ArriveRadiusMetres || HasOvershotEnd(vehiclePosition)))
             {
                 vehicleDriver.StopDriving();
                 vehicleDriver.SpeedScale = 1f;
@@ -1203,6 +1329,7 @@ namespace BanditPlugin.FakePlayer
                 if (vehicleDriver.TrySetDestination(target, out string reason))
                 {
                     element.IssuedTarget = element.Target;
+                    BanditRouteDebug.CurrentTarget = target;
                 }
                 else
                 {
@@ -1216,7 +1343,18 @@ namespace BanditPlugin.FakePlayer
                 }
             }
 
-            vehicleDriver.SpeedScale = ResolveSpeedScale(element, position, vehiclePosition);
+            float scale = ResolveSpeedScale(element, position, vehiclePosition);
+
+            // Braking for the end of the route. The driver is handed a rolling aim point well ahead
+            // of it the whole way, so without this the last waypoint looks like any other and the
+            // column arrives at cruising speed.
+            if (atLastPoint)
+            {
+                scale = Mathf.Min(scale,
+                    Mathf.Max(ApproachMinimumScale, Mathf.Clamp01(toEnd / ApproachSlowdownMetres)));
+            }
+
+            vehicleDriver.SpeedScale = scale;
         }
 
         /// <summary>
@@ -1498,6 +1636,31 @@ namespace BanditPlugin.FakePlayer
             }
 
             return vehicle != null;
+        }
+
+        /// <summary>Whether a vehicle is past the last waypoint rather than short of it, measured
+        /// against the direction the route arrives from.</summary>
+        private bool HasOvershotEnd(Vector3 position)
+        {
+            if (_path.Count < 2)
+            {
+                return false;
+            }
+
+            Vector3 destination = _path[_path.Count - 1].Position;
+            Vector3 approach = destination - _path[_path.Count - 2].Position;
+            approach.y = 0f;
+
+            if (approach.sqrMagnitude < 0.01f)
+            {
+                return false;
+            }
+
+            Vector3 offset = position - destination;
+            offset.y = 0f;
+
+            return Vector3.Dot(offset, approach.normalized) > 0f
+                && offset.magnitude <= ArriveRadiusMetres * 2f;
         }
 
         /// <summary>

@@ -21,6 +21,89 @@ namespace BanditPlugin.Commands
     public class CommandBanditRoads : IRocketCommand
     {
         /// <summary>
+        /// Paints the road graph on the ground around you.
+        ///
+        /// This is what the plugin *believes* a road is, which is not the same thing as what you
+        /// can see - the graph is sampled off the map's road splines every eight metres, and every
+        /// routing decision is made against those samples rather than against the tarmac. If a
+        /// convoy takes a line that makes no sense, the first question is whether the centre line
+        /// it was following is where you would put it, and until now there was no way to look.
+        ///
+        /// Blue is an ordinary node, red is a junction - somewhere the graph joined two roads, or
+        /// bridged a gap between them - and green is the node you are standing nearest.
+        /// </summary>
+        private static void ShowNearbyRoads(IRocketPlayer caller, Vector3 position, string[] command)
+        {
+            float radius = 120f;
+            float seconds = 60f;
+
+            if (command.Length > 1 && float.TryParse(command[1], out float requestedRadius) && requestedRadius > 0f)
+            {
+                radius = Mathf.Min(requestedRadius, 400f);
+            }
+
+            if (command.Length > 2 && float.TryParse(command[2], out float requestedSeconds) && requestedSeconds > 0f)
+            {
+                seconds = Mathf.Min(requestedSeconds, 600f);
+            }
+
+            BanditRoadGraph.TryGetNearest(position, radius, out int nearest, out float _);
+
+            List<BanditRouteDebug.Marker> markers = new List<BanditRouteDebug.Marker>();
+            float radiusSquared = radius * radius;
+            int junctions = 0;
+
+            for (int i = 0; i < BanditRoadGraph.NodeCount; i++)
+            {
+                BanditRoadGraph.RoadNode node = BanditRoadGraph.Get(i);
+                if (node == null)
+                {
+                    continue;
+                }
+
+                Vector3 offset = node.Position - position;
+                offset.y = 0f;
+
+                if (offset.sqrMagnitude > radiusSquared)
+                {
+                    continue;
+                }
+
+                // More than two neighbours means roads meet here - or the gap bridging joined
+                // something. Two is open road, one is the end of a spline.
+                bool junction = node.Links.Count > 2;
+                if (junction)
+                {
+                    junctions++;
+                }
+
+                markers.Add(new BanditRouteDebug.Marker
+                {
+                    Position = node.Position,
+                    Kind = i == nearest
+                        ? BanditRouteDebug.MarkerKind.Current
+                        : junction
+                            ? BanditRouteDebug.MarkerKind.Junction
+                            : BanditRouteDebug.MarkerKind.RoadPoint
+                });
+            }
+
+            if (markers.Count == 0)
+            {
+                UnturnedChat.Say(caller, $"No road nodes within {radius:0}m of you.", Color.yellow);
+                return;
+            }
+
+            int drawn = BanditRouteDebug.Show(markers, seconds, BanditRouteDebug.DefaultMaxMarkers);
+
+            UnturnedChat.Say(caller, $"Roads within {radius:0}m: {markers.Count} node(s), "
+                + $"{junctions} junction(s); {drawn} marker(s) drawn for {seconds:0}s.", Color.green);
+
+            UnturnedChat.Say(caller, "  blue centre line, red junction, green the node nearest you. "
+                + "This is the line convoys steer down.", Color.grey);
+        }
+
+        /// <summary>
         /// How far from a road either end of a route may be. Generous, because the interesting
         /// failure is "these two places are not connected by road", not "you were standing in a
         /// field" - the convoy drives the last stretch off-road either way.
@@ -30,7 +113,7 @@ namespace BanditPlugin.Commands
         public AllowedCaller AllowedCaller => AllowedCaller.Player;
         public string Name => "banditroads";
         public string Help => "Reports the road graph, and routes from you to your map marker.";
-        public string Syntax => "[route]";
+        public string Syntax => "[route|show [radius] [seconds]|clear]";
         public List<string> Aliases => new List<string> { "broads" };
         public List<string> Permissions => new List<string> { "bandit.spawn" };
 
@@ -40,6 +123,19 @@ namespace BanditPlugin.Commands
             Vector3 position = player.transform.position;
 
             BanditRoadGraph.EnsureBuilt();
+
+            if (command.Length > 0 && command[0].Equals("clear", System.StringComparison.OrdinalIgnoreCase))
+            {
+                BanditRouteDebug.Clear();
+                UnturnedChat.Say(caller, "Road markers cleared.", Color.green);
+                return;
+            }
+
+            if (command.Length > 0 && command[0].Equals("show", System.StringComparison.OrdinalIgnoreCase))
+            {
+                ShowNearbyRoads(caller, position, command);
+                return;
+            }
 
             if (!BanditRoadGraph.IsAvailable)
             {

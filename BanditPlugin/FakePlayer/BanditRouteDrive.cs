@@ -32,6 +32,20 @@ namespace BanditPlugin.FakePlayer
         private const float PointReachedRadiusMetres = 5f;
         private const float ArriveRadiusMetres = 12f;
 
+        /// <summary>
+        /// How far out the vehicle starts slowing for the last point, and the slowest it is allowed
+        /// to creep while doing it.
+        ///
+        /// Nothing was braking for the destination at all. The driver is handed a rolling aim point
+        /// twelve metres up the road and told to go, so approaching the end looked exactly like
+        /// approaching anywhere else - it arrived at thirteen metres a second and went straight
+        /// past. Then it could never recover, because arriving was tested purely as "am I within
+        /// twelve metres of the last point", which is false forever once you are eighty metres
+        /// beyond it.
+        /// </summary>
+        private const float ApproachSlowdownMetres = 30f;
+        private const float ApproachMinimumScale = 0.18f;
+
         private const float SteerLookaheadSeconds = 1f;
         private const float MinSteerLookaheadMetres = 6f;
         private const float MaxSteerLookaheadMetres = 14f;
@@ -175,13 +189,18 @@ namespace BanditPlugin.FakePlayer
             }
 
             bool atLast = _target >= _path.Count - 1;
+            Vector3 destination = _path[_path.Count - 1];
+            float toEnd = Flat(position, destination);
 
-            if (atLast && Flat(position, _path[_path.Count - 1]) <= ArriveRadiusMetres)
+            // Arrived by being near it, or by having driven past it. The second half matters: a
+            // vehicle that overshoots is *closer to done* than one still approaching, and treating
+            // it as still travelling sent it away down the road looking for a point behind it.
+            if (atLast && (toEnd <= ArriveRadiusMetres || HasOvershot(position)))
             {
                 driver.StopDriving();
                 Finished = true;
                 Logger.Log($"[Bandit] Route drive finished - {_path.Count} point(s), "
-                    + $"{_giveUps} give-up(s).");
+                    + $"{_giveUps} give-up(s), stopped {toEnd:0.0}m from the destination.");
                 return;
             }
 
@@ -217,11 +236,46 @@ namespace BanditPlugin.FakePlayer
                 }
 
                 _issued = _target;
+                BanditRouteDebug.CurrentTarget = aim;
                 BanditNavLog.Write(driver, $"route: point {_target}/{_path.Count - 1}, "
                     + $"aiming ({aim.x:0}, {aim.z:0})");
             }
 
-            driver.SpeedScale = 1f;
+            // Braking for the end of the trip. Everywhere else full speed is right, because the
+            // aim point is always well ahead; the last point is the one place where it is not.
+            driver.SpeedScale = atLast
+                ? Mathf.Max(ApproachMinimumScale, Mathf.Clamp01(toEnd / ApproachSlowdownMetres))
+                : 1f;
+        }
+
+        /// <summary>
+        /// Whether the vehicle is past the destination rather than short of it.
+        ///
+        /// Measured against the direction the route arrives from, so "past" means what it means to
+        /// a driver: the destination is behind you now. Bounded, because a vehicle that is two
+        /// hundred metres beyond it went somewhere else entirely and should still be trying.
+        /// </summary>
+        private bool HasOvershot(Vector3 position)
+        {
+            if (_path.Count < 2)
+            {
+                return false;
+            }
+
+            Vector3 destination = _path[_path.Count - 1];
+            Vector3 approach = destination - _path[_path.Count - 2];
+            approach.y = 0f;
+
+            if (approach.sqrMagnitude < 0.01f)
+            {
+                return false;
+            }
+
+            Vector3 offset = position - destination;
+            offset.y = 0f;
+
+            return Vector3.Dot(offset, approach.normalized) > 0f
+                && offset.magnitude <= ArriveRadiusMetres * 2f;
         }
 
         /// <summary>Whether the vehicle is on the far side of a route point, along the segment

@@ -29,8 +29,9 @@ namespace BanditPlugin.Commands
 
         public AllowedCaller AllowedCaller => AllowedCaller.Player;
         public string Name => "banditvgoto";
-        public string Help => "Drives the last spawned bandit's vehicle to the point you are looking at.";
-        public string Syntax => "[stop]";
+        public string Help => "Drives the last spawned bandit's vehicle to the point you are looking at; "
+            + "'marker' routes over the roads to your map marker, 'wp' drives the recorded route.";
+        public string Syntax => "[marker|wp [noroads]|stop]";
         public List<string> Aliases => new List<string> { "bvgoto" };
         public List<string> Permissions => new List<string> { "bandit.spawn" };
 
@@ -61,7 +62,17 @@ namespace BanditPlugin.Commands
             if (command.Length > 0 && (command[0].ToLowerInvariant() == "wp"
                 || command[0].ToLowerInvariant() == "route"))
             {
-                DriveRoute(caller, bandit, command);
+                DriveRoute(caller, bandit, BanditConvoyRoute.Current.Count > 0
+                        ? BanditConvoyRoute.Current
+                        : BanditWaypointStore.Current,
+                    BanditConvoyRoute.Current.Count > 0 ? "/banditevent wp" : "/banditwp",
+                    command);
+                return;
+            }
+
+            if (command.Length > 0 && BanditPlacement.IsMarkerRequest(command[0]))
+            {
+                DriveToMarker(caller, bandit, command);
                 return;
             }
 
@@ -96,29 +107,48 @@ namespace BanditPlugin.Commands
         }
 
         /// <summary>
-        /// Sends the bandit round the recorded convoy route, on its own.
+        /// "/banditvgoto marker" - drives to the map marker the way a convoy would, over the road
+        /// graph, rather than straight at it.
+        ///
+        /// The distinction is the whole reason this exists. The plain form of this command aims at
+        /// whatever you are looking at and steers at it; between towns there is no navmesh, so that
+        /// is a straight line across the fields with obstacle dodging bolted on. This plans the same
+        /// road route a convoy plans and follows it the same way, which makes it the one-hop version
+        /// of a convoy and the quickest way to find out whether a stretch of road drives at all.
+        /// </summary>
+        private static void DriveToMarker(IRocketPlayer caller, BanditBotController bandit, string[] command)
+        {
+            Player player = ((UnturnedPlayer)caller).Player;
+
+            if (player.quests == null || !player.quests.isMarkerPlaced)
+            {
+                UnturnedChat.Say(caller, "No map marker placed.", Color.red);
+                return;
+            }
+
+            // A marker is a click on the map, so the height it carries is whatever the client sent
+            // rather than the ground under it, and the road snap compares heights.
+            Vector3 point = player.quests.markerPosition;
+            point.y = LevelGround.getHeight(point);
+
+            DriveRoute(caller, bandit, new[] { point }, "your map marker", command);
+        }
+
+        /// <summary>
+        /// Sends the bandit along a route on its own, over the roads.
         ///
         /// Deliberately the same route planner and the same driver a convoy uses - the point of this
         /// is to be a convoy with everything except the driving removed, so a line it takes badly
         /// here is a line a column would take badly too, and one it takes well narrows the problem
         /// to the column.
         /// </summary>
-        private static void DriveRoute(IRocketPlayer caller, BanditBotController bandit, string[] command)
+        /// <param name="route">The points to drive through, in order.</param>
+        /// <param name="source">Where they came from, so the reply says which list was used - there
+        /// are two, and picking the wrong one silently is how "wp does not work" happens.</param>
+        private static void DriveRoute(IRocketPlayer caller, BanditBotController bandit,
+            IReadOnlyList<Vector3> route, string source, string[] command)
         {
-            // Both waypoint lists, in that order. There are two of them - /banditevent wp records a
-            // convoy route, /banditwp records a patrol route - and which one somebody has filled in
-            // is not something worth being pedantic about when they have asked a vehicle to drive
-            // waypoints and there is exactly one list with anything in it.
-            IReadOnlyList<Vector3> route = BanditConvoyRoute.Current;
-            string source = "/banditevent wp";
-
-            if (route.Count < 1)
-            {
-                route = BanditWaypointStore.Current;
-                source = "/banditwp";
-            }
-
-            if (route.Count < 1)
+            if (route == null || route.Count < 1)
             {
                 UnturnedChat.Say(caller, "No waypoints on this map. /banditevent wp set records a "
                     + "convoy route where you stand, /banditwp records a patrol route.", Color.red);
@@ -143,7 +173,7 @@ namespace BanditPlugin.Commands
 
             BanditVehicleFootprint footprint = bandit.Driver.Footprint;
 
-            UnturnedChat.Say(caller, $"Driving {route.Count} waypoint(s) from {source} - {summary}. "
+            UnturnedChat.Say(caller, $"Driving {route.Count} point(s) from {source} - {summary}. "
                 + $"{footprint.HalfWidth * 2f:0.0}m wide by {footprint.HalfLength * 2f:0.0}m long.",
                 Color.green);
 

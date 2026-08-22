@@ -1235,7 +1235,8 @@ namespace BanditPlugin.FakePlayer
                 + (_navigator.AvoidanceDegrees != 0f ? $" avoid={_navigator.AvoidanceDegrees:0}deg" : string.Empty)
                 + (_navigator.IsBlocked ? " BLOCKED" : string.Empty)
                 + (_navigator.ObstacleAhead != null ? $" ahead={_navigator.ObstacleAhead}" : string.Empty)
-                + (_navigator.RefusedReason != null ? $" refused={_navigator.RefusedReason}" : string.Empty));
+                + (_navigator.RefusedReason != null ? $" refused={_navigator.RefusedReason}" : string.Empty)
+                + (_navigator.Overlapping != null ? $" inside={_navigator.Overlapping}" : string.Empty));
 
             // Only so /banditv status reports the speed it is really doing rather than nothing.
             _speed = Mathf.Abs(forwardVelocity);
