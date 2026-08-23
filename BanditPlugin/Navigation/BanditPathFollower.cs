@@ -126,22 +126,40 @@ namespace BanditPlugin.Navigation
         /// </summary>
         public float RemainingDistance(Vector3 position, Vector3 destination)
         {
-            if (!_hasPath || _corners.Count == 0 || _cornerIndex >= _corners.Count)
+            // On the last leg the destination is the honest answer, and the last corner is not. See
+            // SteerTarget: that corner is wherever the destination was when the route was asked
+            // for, and for a route follower's carrot that is up to a repath interval out of date.
+            if (!_hasPath || _corners.Count < 2 || _cornerIndex >= _corners.Count - 1)
             {
                 return FlatDistance(position, destination);
             }
 
             float total = FlatDistance(position, _corners[_cornerIndex]);
-            for (int i = _cornerIndex; i < _corners.Count - 1; i++)
+            for (int i = _cornerIndex; i < _corners.Count - 2; i++)
             {
                 total += FlatDistance(_corners[i], _corners[i + 1]);
             }
-            return total;
+            return total + FlatDistance(_corners[_corners.Count - 2], destination);
         }
 
         /// <summary>
-        /// The point to steer at: the next corner not yet reached, or the destination itself when
-        /// there is no route. Advances past any corners already behind us.
+        /// The point to steer at: the next corner not yet reached, the destination itself once the
+        /// last corner is the only one left, and the destination when there is no route at all.
+        /// Advances past any corners already behind us.
+        ///
+        /// Falling through to the destination on the final leg is not a nicety, it is the whole
+        /// difference between following a route and spinning on the spot. The last corner is
+        /// wherever the destination *was* when the route was asked for, and a route follower's
+        /// destination is a carrot that moves with the vehicle every tick - so a vehicle at road
+        /// speed reaches that corner within a second, then goes on steering at it for the rest of
+        /// the repath interval. Steering at a point beside your own nose means the bearing to it
+        /// swings through a hundred and eighty degrees, which the driver reads as "the target is
+        /// behind me" and answers with a three-point turn in the middle of an open road. That is
+        /// what the log shows over and over: left=0.5m, err=-176deg, TURN-FWD, on clear tarmac.
+        ///
+        /// Only the final leg is treated this way, so a route round a building still walks its
+        /// corners; by the time the last one is the only one left, the leg to it was a straight
+        /// clear line when it was planned and the carrot has moved a few metres along it since.
         /// </summary>
         public Vector3 SteerTarget(Vector3 position, Vector3 destination)
         {
@@ -155,7 +173,8 @@ namespace BanditPlugin.Navigation
             {
                 _cornerIndex++;
             }
-            return _corners[_cornerIndex];
+
+            return _cornerIndex >= _corners.Count - 1 ? destination : _corners[_cornerIndex];
         }
 
         /// <summary>

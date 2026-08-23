@@ -233,7 +233,13 @@ namespace BanditPlugin.FakePlayer
 
             Vector3 aim = SteerTarget(driver, position);
 
-            if (_issued != _target || !driver.HasDestination)
+            // The carrot is moved every tick, not once per route point. Held still between points
+            // it stops being a carrot: the vehicle drives at it, reaches it, and the bearing to a
+            // point beside the nose swings through a right angle - which on a bend is read as the
+            // target being ninety degrees off and answered with a three-point turn in the middle of
+            // a corner the vehicle was taking perfectly well. Moving it is deliberately not the same
+            // call as issuing it; see BanditVehicleDriver.TryMoveDestination.
+            if (!driver.TryMoveDestination(aim, CarrotArriveRadiusMetres))
             {
                 if (!driver.TrySetDestination(aim, CarrotArriveRadiusMetres, out string reason))
                 {
@@ -241,9 +247,13 @@ namespace BanditPlugin.FakePlayer
                     Finished = true;
                     return;
                 }
+            }
 
+            BanditRouteDebug.CurrentTarget = aim;
+
+            if (_issued != _target)
+            {
                 _issued = _target;
-                BanditRouteDebug.CurrentTarget = aim;
                 BanditNavLog.Write(driver, $"route: point {_target}/{_path.Count - 1}, "
                     + $"aiming ({aim.x:0}, {aim.z:0})");
             }

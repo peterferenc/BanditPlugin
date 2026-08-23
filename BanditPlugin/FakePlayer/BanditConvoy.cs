@@ -126,8 +126,36 @@ namespace BanditPlugin.FakePlayer
         /// lengths of clear road, not distances between origins, and they mean the same thing for a
         /// tank as for a hatchback.
         /// </summary>
-        private const float DesiredGapMetres = 14f;
+        private const float DesiredGapMetres = 10f;
         private const float MinimumGapMetres = 5f;
+
+        /// <summary>
+        /// How far the vehicle behind may drop back before this one eases off for it, and the gap at
+        /// which it is down to its slowest.
+        ///
+        /// A column only stays a column if the waiting is mutual. Followers were already braking for
+        /// what was in front of them and nothing at all was looking backwards, so every evasion,
+        /// three-point turn or slow squeeze past an obstruction was paid for entirely by the vehicle
+        /// that made it - the head of the column drove on at full speed and the tail was still
+        /// fighting an obstacle a quarter of a mile back. Taking the interval from behind as well
+        /// closes that: the leader lifts off, the gap comes back, and the leader gets going again.
+        ///
+        /// It works vehicle to vehicle rather than head to tail, so it propagates - the second waits
+        /// for the third, the first waits for the second - and a five-vehicle column is not forced to
+        /// bunch into one interval's worth of road.
+        /// </summary>
+        private const float TailGapMetres = 10f;
+        private const float TailStretchedGapMetres = 35f;
+
+        /// <summary>
+        /// The slowest a vehicle is held down to while waiting for the one behind it.
+        ///
+        /// Never zero, and that is the point of it: a column that stops to wait is a column parked on
+        /// a road, which is the one thing a convoy must not be. It keeps rolling, slowly enough that
+        /// the tail gains on it and fast enough that a vehicle which is never coming - burning,
+        /// wedged, or crewless - costs the rest a slow mile rather than the trip.
+        /// </summary>
+        private const float TailWaitMinimumScale = 0.4f;
 
         /// <summary>How far to either side still counts as being in front. Wide enough to cover a
         /// vehicle in the same lane through a bend, narrow enough to ignore oncoming traffic.</summary>
@@ -219,6 +247,13 @@ namespace BanditPlugin.FakePlayer
         public int PointCount => _path.Count;
 
         private readonly List<RoutePoint> _path;
+
+        /// <summary>How far along the route each point is, measured from the start. Fixed for the
+        /// life of the convoy, and the yardstick the column keeps its interval against: how far
+        /// apart two vehicles are *along the road* is not how far apart they are in a straight line,
+        /// and on a hairpin the two answers differ by the whole of the bend.</summary>
+        private readonly List<float> _alongRoute = new List<float>();
+
         private readonly List<Element> _elements = new List<Element>();
         private float _lastContactTime = float.MinValue;
         private float _rallyDeadline;
@@ -270,9 +305,9 @@ namespace BanditPlugin.FakePlayer
             /// <summary>Index into the route of the point this vehicle is currently driving at.</summary>
             public int Target;
 
-            /// <summary>The point the driver was last actually told about, so a destination is
-            /// re-issued when it changes and not every tick - re-issuing resets the navigator's
-            /// stuck tracking, and doing that constantly would mean it could never detect a stall.</summary>
+            /// <summary>The route point last written to the nav log, so the commentary says
+            /// something once per point rather than once per tick. The aim point itself is slid
+            /// along every tick - see TickElement.</summary>
             public int IssuedTarget = -1;
 
             public bool Finished;
@@ -307,9 +342,17 @@ namespace BanditPlugin.FakePlayer
             _path = path;
             UsesRoads = usesRoads;
 
-            foreach (RoutePoint point in path)
+            float along = 0f;
+            for (int i = 0; i < path.Count; i++)
             {
-                if (point.NodeIndex >= 0)
+                if (i > 0)
+                {
+                    along += HorizontalDistance(path[i - 1].Position, path[i].Position);
+                }
+
+                _alongRoute.Add(along);
+
+                if (path[i].NodeIndex >= 0)
                 {
                     RoadPointCount++;
                 }
@@ -1326,15 +1369,18 @@ namespace BanditPlugin.FakePlayer
                 target = SteerTarget(element, vehiclePosition);
             }
 
-            if (element.IssuedTarget != element.Target || !vehicleDriver.HasDestination)
+            // The carrot moves every tick, and only a trip that is not running is issued afresh.
+            // Holding it still between route points is what made a vehicle brake in the middle of a
+            // clear bend: the aim point stops being a carrot and becomes a place, the vehicle
+            // reaches it, and the bearing to a place beside its own nose swings through a right
+            // angle - which is the threshold for a three-point turn. See
+            // BanditVehicleDriver.TryMoveDestination for why moving it is not the same call as
+            // issuing it.
+            if (!vehicleDriver.TryMoveDestination(target, CarrotArriveRadiusMetres))
             {
-                BanditNavLog.Write(vehicleDriver, $"convoy {Id}: point {element.Target}/{_path.Count - 1}, "
-                    + $"aiming ({target.x:0}, {target.z:0})");
-
                 if (vehicleDriver.TrySetDestination(target, CarrotArriveRadiusMetres, out string reason))
                 {
-                    element.IssuedTarget = element.Target;
-                    BanditRouteDebug.CurrentTarget = target;
+                    element.IssuedTarget = -1;
                 }
                 else
                 {
@@ -1346,6 +1392,15 @@ namespace BanditPlugin.FakePlayer
                     element.Finished = true;
                     return;
                 }
+            }
+
+            BanditRouteDebug.CurrentTarget = target;
+
+            if (element.IssuedTarget != element.Target)
+            {
+                element.IssuedTarget = element.Target;
+                BanditNavLog.Write(vehicleDriver, $"convoy {Id}: point {element.Target}/{_path.Count - 1}, "
+                    + $"aiming ({target.x:0}, {target.z:0})");
             }
 
             float scale = ResolveSpeedScale(element, position, vehiclePosition);
@@ -1364,12 +1419,16 @@ namespace BanditPlugin.FakePlayer
 
         /// <summary>
         /// How fast this vehicle may go: the column's own pace for whatever it is doing, held down
-        /// further by the vehicle in front of it.
+        /// by the vehicle in front of it and again by the one behind it.
         ///
         /// Interval keeping is speed rather than steering on purpose. Everything in the column is
         /// driving the same route, so a follower that is too close does not need to go round the
         /// vehicle ahead - it needs to stop pushing into it, and a lorry that noses out to overtake
         /// on a bend is precisely the behaviour to avoid.
+        ///
+        /// Looking backwards is the other half of the same idea. Whoever had to go round the fallen
+        /// tree pays for it in time, and if nobody in front gives any of that time back the column
+        /// arrives strung out over half a mile. See <see cref="TailWaitScale"/>.
         /// </summary>
         private float ResolveSpeedScale(Element element, int position, Vector3 vehiclePosition)
         {
@@ -1397,6 +1456,13 @@ namespace BanditPlugin.FakePlayer
                     break;
             }
 
+            // Waiting for the vehicle behind. Only while cruising: under contact the column is
+            // already crawling, and while forming up the leapfrog decides who moves.
+            if (State == ConvoyState.Cruise)
+            {
+                pace *= TailWaitScale(element, position, vehiclePosition);
+            }
+
             float closest = ClosestGapAhead(position, vehiclePosition);
 
             if (closest >= DesiredGapMetres)
@@ -1410,6 +1476,100 @@ namespace BanditPlugin.FakePlayer
             }
 
             return pace * Mathf.InverseLerp(MinimumGapMetres, DesiredGapMetres, closest);
+        }
+
+        /// <summary>
+        /// How much this vehicle has to give away to the one behind it: one when the column is
+        /// closed up, falling to <see cref="TailWaitMinimumScale"/> when the next vehicle back has
+        /// been left a long way behind.
+        ///
+        /// "Behind" is by progress along the route rather than by position in the list or by where
+        /// the vehicles are in space. A column is not in spawn order for long - anything that gives
+        /// up and skips points, gets stuck, or is quicker away from a stop changes the order - and
+        /// two vehicles on opposite sides of a hairpin are thirty metres apart in a straight line
+        /// while being two hundred metres apart on the road they are both driving.
+        /// </summary>
+        private float TailWaitScale(Element element, int position, Vector3 vehiclePosition)
+        {
+            float self = RouteProgressMetres(element, vehiclePosition);
+            float nearestBehind = float.MinValue;
+            Element follower = null;
+
+            for (int i = 0; i < _elements.Count; i++)
+            {
+                if (i == position)
+                {
+                    continue;
+                }
+
+                Element other = _elements[i];
+                InteractableVehicle otherVehicle = other.Ride.Vehicle;
+
+                if (other.Finished || other.Arrived || otherVehicle == null
+                    || otherVehicle.isDead || otherVehicle.isExploded)
+                {
+                    continue; // not coming, so not something to hold the column for
+                }
+
+                float progress = RouteProgressMetres(other, otherVehicle.transform.position);
+                if (progress >= self || progress <= nearestBehind)
+                {
+                    continue;
+                }
+
+                nearestBehind = progress;
+                follower = other;
+            }
+
+            if (follower == null)
+            {
+                return 1f; // nothing behind - this is the tail
+            }
+
+            // Bumper to bumper, like every other interval in this class, so the number means the
+            // same thing for a column of tanks as for a column of hatchbacks.
+            float gap = self - nearestBehind - HalfLengthOf(element) - HalfLengthOf(follower);
+
+            if (gap <= TailGapMetres)
+            {
+                return 1f;
+            }
+
+            return Mathf.Lerp(1f, TailWaitMinimumScale,
+                Mathf.InverseLerp(TailGapMetres, TailStretchedGapMetres, gap));
+        }
+
+        /// <summary>
+        /// How far along the route a vehicle has got, in metres of road.
+        ///
+        /// The point it is driving at gives the coarse answer and the projection onto the leg it is
+        /// currently on gives the rest, so the figure moves smoothly rather than in eight-metre steps
+        /// - which matters, because the difference between two of these is what decides whether the
+        /// column is closed up or stretched out.
+        /// </summary>
+        private float RouteProgressMetres(Element element, Vector3 position)
+        {
+            int index = Mathf.Clamp(element.Target, 0, _path.Count - 1);
+            float progress = _alongRoute[index];
+
+            if (index >= _path.Count - 1)
+            {
+                return progress;
+            }
+
+            Vector3 leg = _path[index + 1].Position - _path[index].Position;
+            leg.y = 0f;
+
+            float length = leg.magnitude;
+            if (length < 0.01f)
+            {
+                return progress;
+            }
+
+            Vector3 offset = position - _path[index].Position;
+            offset.y = 0f;
+
+            return progress + Mathf.Clamp(Vector3.Dot(offset, leg / length), -length, length);
         }
 
         /// <summary>

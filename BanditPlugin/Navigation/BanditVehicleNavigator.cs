@@ -417,6 +417,38 @@ namespace BanditPlugin.Navigation
     /// as close as the vehicle can go and reports being stuck beats one that wedges itself in a
     /// doorway and keeps pushing.
     /// </summary>
+    /// <summary>
+    /// Why a direction was refused, as opposed to merely that it was.
+    ///
+    /// The distinction is not for the log's benefit, though the log badly needed it - "could not
+    /// get through; blocked by nothing it can name" was a real give-up message, on an open road,
+    /// from a tank that then sat there until the convoy unloaded it. It is because the four
+    /// refusals mean completely different things to a driver. Traffic clears and is queued behind.
+    /// A wall does not clear and is driven around. A slope steeper than the climb limit is a guess
+    /// made by sampling the ground every two metres, and at walking pace the honest way to settle
+    /// it is to try. A drop or deep water is none of those and is never driven into at any speed.
+    /// </summary>
+    public enum BanditTravelRefusal
+    {
+        /// <summary>Nothing in the way.</summary>
+        None,
+
+        /// <summary>Another vehicle. Traffic, not scenery - see <see cref="BanditVehicleNavigator.VehiclePatienceSeconds"/>.</summary>
+        Vehicle,
+
+        /// <summary>Something solid that is not a vehicle: a wall, a tree, a rock, a player build.</summary>
+        Obstacle,
+
+        /// <summary>Ground that rises faster than the vehicle can climb.</summary>
+        Slope,
+
+        /// <summary>No ground at all - a cliff lip, a bridge edge, the end of the world.</summary>
+        Edge,
+
+        /// <summary>Water deeper than a ford.</summary>
+        Water
+    }
+
     public sealed class BanditVehicleNavigator
     {
         public float RepathIntervalSeconds
@@ -623,6 +655,26 @@ namespace BanditPlugin.Navigation
         /// means a genuinely different way, narrow enough to leave the fan somewhere to go.</summary>
         private const float BannedArcDegrees = 50f;
 
+        /// <summary>
+        /// How long a vehicle in the way is waited for before it is treated as scenery and driven
+        /// around.
+        ///
+        /// This is the difference between a column and a race. The fan was steering round whatever
+        /// refused the wanted heading, and it does not care what that was, so a convoy vehicle
+        /// following a slower one deflected up to eighty degrees to get past it - which is an
+        /// overtake, on a road two lanes wide, initiated by every vehicle in the column at once. The
+        /// log has it plainly: "avoid=-80deg refused=vehicle 'Ural' at 2.5m" while the same vehicle
+        /// reports full speed. They ended up abreast, then out of their lane, then into each other
+        /// and into the barrier on the shoulder.
+        ///
+        /// Traffic clears, so the answer to traffic is to keep pointing where you were going and
+        /// let the speed limiter do the work: the distance probe is already measuring the clear road
+        /// along that heading and already braking to a distance it could stop in, which is following
+        /// a vehicle down a road. The patience is what keeps a burnt-out wreck from stopping the
+        /// column for good - past it, the wreck is scenery like anything else and gets driven round.
+        /// </summary>
+        public const float VehiclePatienceSeconds = 8f;
+
         private static readonly RaycastHit[] Hits = new RaycastHit[32];
 
         private readonly Player _self;
@@ -638,8 +690,15 @@ namespace BanditPlugin.Navigation
         /// it will travel in <see cref="LookaheadSeconds"/>.</summary>
         private float _lookaheadMetres = MinLookaheadMetres;
 
-        /// <summary>The last thing a sweep refused a heading for, for the diagnostics.</summary>
+        /// <summary>The last thing a sweep refused a heading for, for the diagnostics, and whether
+        /// it was another vehicle - which is traffic rather than scenery. See
+        /// <see cref="VehiclePatienceSeconds"/>.</summary>
         private string _lastBlocker;
+        private bool _lastBlockerIsVehicle;
+
+        /// <summary>When the patience for the vehicle blocking the wanted heading runs out. Zero
+        /// when nothing is blocking it.</summary>
+        private float _vehicleHoldUntil;
 
         /// <summary>Whatever the body is currently inside, if anything. Not a reason to refuse a
         /// heading - see IsHeadingClear - but very much worth saying in the log.</summary>
@@ -668,6 +727,34 @@ namespace BanditPlugin.Navigation
             IsBlocked = false;
             _path.Restart();
             _bannedUntil = 0f;
+        }
+
+        /// <summary>
+        /// Slides the destination along without starting a new trip.
+        ///
+        /// For route following, where the point handed over is a carrot a fixed distance up the
+        /// road rather than somewhere to be. That carrot has to move every single tick or it is not
+        /// a carrot at all: held still between route points it becomes a place the vehicle drives
+        /// *to*, and the bearing to a place three metres off the nose swings through a right angle
+        /// as the vehicle passes it. That swing is what the log reads as err jumping from 39 to 92
+        /// degrees on an empty bend, and 92 degrees is a three-point turn - so the vehicle stops in
+        /// the middle of a corner it was taking perfectly well and reverses.
+        ///
+        /// Deliberately not <see cref="SetDestination"/>: that one throws the route away, clears the
+        /// ban list and resets the arrival latches, all of which are correct for a new trip and all
+        /// of which would happen every tick here. The route is left alone - it is a route to a point
+        /// a few metres from the new one, and the follower repaths on its own timer anyway.
+        /// </summary>
+        public void MoveDestination(Vector3 destination, float arriveRadius)
+        {
+            if (!HasDestination)
+            {
+                SetDestination(destination, arriveRadius);
+                return;
+            }
+
+            Destination = destination;
+            ArriveRadius = Mathf.Max(2f, arriveRadius);
         }
 
         /// <summary>
@@ -962,8 +1049,11 @@ namespace BanditPlugin.Navigation
         private Vector3 ChooseClearHeading(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 desired)
         {
             bool banned = IsBanned(desired);
+            BanditTravelRefusal refusal = banned
+                ? BanditTravelRefusal.Obstacle
+                : HeadingRefusal(vehicle, footprint, desired, ignoreOverlap: false);
 
-            if (!banned && IsHeadingClear(vehicle, footprint, desired, ignoreOverlap: false))
+            if (refusal == BanditTravelRefusal.None)
             {
                 if (Time.time > _avoidSignExpiry)
                 {
@@ -973,12 +1063,36 @@ namespace BanditPlugin.Navigation
                 IsBlocked = false;
                 RefusedReason = null;
                 AvoidanceDegrees = 0f;
+                _vehicleHoldUntil = 0f;
                 return desired;
             }
 
             RefusedReason = banned
                 ? $"banned direction ({(_bannedUntil - Time.time):0.0}s left)"
                 : _lastBlocker ?? "no ground / too steep";
+
+            // Traffic is queued behind, not overtaken. Holding the wanted heading leaves the speed
+            // limiter to pace against the clear road it can see, which is following; fanning out
+            // around it is an overtake, and a column that overtakes itself is the pile-up in the
+            // log. Only for as long as the patience lasts - see VehiclePatienceSeconds.
+            if (refusal == BanditTravelRefusal.Vehicle)
+            {
+                if (_vehicleHoldUntil <= 0f)
+                {
+                    _vehicleHoldUntil = Time.time + VehiclePatienceSeconds;
+                }
+
+                if (Time.time < _vehicleHoldUntil)
+                {
+                    IsBlocked = false;
+                    AvoidanceDegrees = 0f;
+                    return desired;
+                }
+            }
+            else
+            {
+                _vehicleHoldUntil = 0f;
+            }
 
             // Keep turning the same way around an obstacle for a moment, or a vehicle sitting in
             // front of a wall picks left and right on alternate packets and drives straight into it.
@@ -1020,12 +1134,36 @@ namespace BanditPlugin.Navigation
         /// </param>
         public bool IsTravelClear(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading, bool ignoreOverlap = false)
         {
-            return vehicle != null
-                && heading.sqrMagnitude > 0.0001f
-                && IsHeadingClear(vehicle, footprint, heading.normalized, ignoreOverlap);
+            return WhyTravelRefused(vehicle, footprint, heading, ignoreOverlap) == BanditTravelRefusal.None;
+        }
+
+        /// <summary>
+        /// The same question as <see cref="IsTravelClear"/>, answered with what refused rather than
+        /// with a bare no.
+        ///
+        /// The driver needs the reason for the three-point turn, which is the one place where both
+        /// ways out can be refused at once and standing still is the only remaining option. What it
+        /// does about that depends entirely on which of the four refusals it is, and before this it
+        /// had no way to ask.
+        /// </summary>
+        public BanditTravelRefusal WhyTravelRefused(InteractableVehicle vehicle,
+            BanditVehicleFootprint footprint, Vector3 heading, bool ignoreOverlap = false)
+        {
+            if (vehicle == null || heading.sqrMagnitude < 0.0001f)
+            {
+                return BanditTravelRefusal.Obstacle;
+            }
+
+            return HeadingRefusal(vehicle, footprint, heading.normalized, ignoreOverlap);
         }
 
         private bool IsHeadingClear(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 heading, bool ignoreOverlap)
+        {
+            return HeadingRefusal(vehicle, footprint, heading, ignoreOverlap) == BanditTravelRefusal.None;
+        }
+
+        private BanditTravelRefusal HeadingRefusal(InteractableVehicle vehicle,
+            BanditVehicleFootprint footprint, Vector3 heading, bool ignoreOverlap)
         {
             Transform root = vehicle.transform;
             float lookahead = Mathf.Max(_lookaheadMetres, footprint.HalfLength * 2f);
@@ -1063,14 +1201,19 @@ namespace BanditPlugin.Navigation
                 }
 
                 _lastBlocker = $"{Describe(hit.transform)} at {hit.distance:0.0}m";
-                return false;
+                _lastBlockerIsVehicle = hit.transform.GetComponentInParent<InteractableVehicle>() != null;
+
+                return _lastBlockerIsVehicle
+                    ? BanditTravelRefusal.Vehicle
+                    : BanditTravelRefusal.Obstacle;
             }
 
             _lastBlocker = null;
+            _lastBlockerIsVehicle = false;
             Overlapping = _overlapping;
             _overlapping = null;
 
-            return IsGroundClimbable(vehicle, footprint, heading, lookahead, ignoreOverlap);
+            return GroundRefusal(vehicle, footprint, heading, lookahead, ignoreOverlap);
         }
 
         /// <summary>
@@ -1110,8 +1253,8 @@ namespace BanditPlugin.Navigation
         /// the obstacle sweep - at bumper height every upslope would read as a wall - so this is the
         /// only thing stopping a bandit from driving up the side of a mountain.
         /// </summary>
-        private static bool IsGroundClimbable(InteractableVehicle vehicle, BanditVehicleFootprint footprint,
-            Vector3 heading, float lookahead, bool wedged = false)
+        private static BanditTravelRefusal GroundRefusal(InteractableVehicle vehicle,
+            BanditVehicleFootprint footprint, Vector3 heading, float lookahead, bool wedged = false)
         {
             Transform root = vehicle.transform;
             Vector3 here = root.position;
@@ -1119,7 +1262,7 @@ namespace BanditPlugin.Navigation
 
             if (!VehicleTerrain.TrySample(here, root, out Vector3 previous, out Vector3 _))
             {
-                return false;
+                return BanditTravelRefusal.Edge;
             }
 
             // Walked in short steps rather than measured end to end, and that is the whole of it.
@@ -1140,7 +1283,7 @@ namespace BanditPlugin.Navigation
                 {
                     // No ground under this part of the step: a bridge edge, a cliff lip, or deep
                     // water. Not somewhere to drive.
-                    return false;
+                    return BanditTravelRefusal.Edge;
                 }
 
                 // Water is a surface the ground sample says nothing about. Every step below snaps
@@ -1150,7 +1293,7 @@ namespace BanditPlugin.Navigation
                 // is somewhere vehicles do drive; anything deeper is not ground.
                 if (WaterUtility.isPointUnderwater(ground + Vector3.up * MaxFordDepthMetres))
                 {
-                    return false;
+                    return BanditTravelRefusal.Water;
                 }
 
                 // The slope test is dropped for a vehicle that is trying to get itself unwedged.
@@ -1164,13 +1307,13 @@ namespace BanditPlugin.Navigation
                 if (!wedged && run >= 0.01f
                     && Mathf.Atan2(ground.y - previous.y, run) * Mathf.Rad2Deg > MaxClimbDegrees)
                 {
-                    return false;
+                    return BanditTravelRefusal.Slope;
                 }
 
                 previous = ground;
             }
 
-            return true;
+            return BanditTravelRefusal.None;
         }
     }
 }

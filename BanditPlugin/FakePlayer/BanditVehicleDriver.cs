@@ -163,6 +163,33 @@ namespace BanditPlugin.FakePlayer
         private const float TurnAroundEnterDegrees = 80f;
         private const float TurnAroundExitDegrees = 50f;
 
+        /// <summary>
+        /// The fastest a vehicle may be travelling and still decide to three-point turn.
+        ///
+        /// Nobody turns a lorry round at thirteen metres a second, and a vehicle that tries reads as
+        /// a handbrake stop in the middle of an open road. A large heading error at speed does not
+        /// mean "the target is behind me" anyway - it means the vehicle is running wide of a bend,
+        /// or the navigator has just deflected round something - and the answer to both is to slow
+        /// down and steer, which <see cref="CorneringSpeed"/> makes it do. If the error is still
+        /// there once it has slowed, the turn starts then, properly, from a crawl.
+        /// </summary>
+        private const float TurnAroundMaxMetresPerSecond = 3.5f;
+
+        /// <summary>
+        /// Heading error a vehicle may carry at full speed, and the speed band it is squeezed into
+        /// beyond that.
+        ///
+        /// Steering is a key press held for a packet, so how tight an arc the vehicle actually
+        /// describes is decided by how fast it is going. Nothing was tying the two together: the
+        /// speed limit came from what was in front and the steering came from the error, so a
+        /// vehicle could take a bend flat out, run wide of it, and only then discover the target was
+        /// ninety degrees off. Slowing in proportion to how far off line the nose is turns that into
+        /// what a driver does - lift for the corner, take it, get back on the throttle.
+        /// </summary>
+        private const float CorneringFreeDegrees = 35f;
+        private const float FastCorneringMetresPerSecond = 12f;
+        private const float SlowCorneringMetresPerSecond = 3f;
+
         /// <summary>How far ahead or behind a manoeuvre step checks for room before it commits to
         /// moving that way. One check before every movement, which is the whole discipline of a
         /// tight turn: never move in a direction you have not just proven is clear.</summary>
@@ -208,6 +235,12 @@ namespace BanditPlugin.FakePlayer
         private bool _turning;
         private bool _turningReverse;
         private float _turnBestError = 180f;
+
+        /// <summary>What each leg of the current three-point turn is refused by, for the log. The
+        /// one manoeuvre where both ways out can be shut at once is the one that most needs to say
+        /// which - "blocked by nothing it can name" was a real give-up message from a tank standing
+        /// on clear tarmac.</summary>
+        private string _turnRefusals;
         private float _reverseCooldownUntil;
 
         private const float ConsumableCheckIntervalSeconds = 1f;
@@ -640,6 +673,52 @@ namespace BanditPlugin.FakePlayer
             _lastProgressTime = Time.time;
 
             reason = null;
+            return true;
+        }
+
+        /// <summary>
+        /// Slides the current destination along to a new point, for a route follower whose "target"
+        /// is a carrot a fixed distance up the road.
+        ///
+        /// The carrot has to move every tick, and <see cref="TrySetDestination"/> cannot be what
+        /// moves it: that starts a fresh trip, which drops the route, refills the unstick budget and
+        /// re-takes the stall yardstick. Called every tick it would mean the vehicle could never be
+        /// found stuck; called only when the route index changes - which is what happened before -
+        /// the carrot sits still for eight metres of driving, and a vehicle that passes a stationary
+        /// point three metres off its nose sees the bearing to it swing through a right angle. On a
+        /// bend that reads as "the target is ninety degrees off", which is the threshold for a
+        /// three-point turn, so the vehicle stops mid-corner and reverses for no reason at all.
+        ///
+        /// Returns false when there is no trip to move, so the caller issues a real destination.
+        /// </summary>
+        public bool TryMoveDestination(Vector3 destination, float arriveRadius)
+        {
+            if (!_navigator.HasDestination || Vehicle == null)
+            {
+                return false;
+            }
+
+            // The stall detector measures "am I getting closer to where I was sent", and a
+            // destination that runs away up the road ahead of the vehicle breaks that measurement:
+            // the remaining distance holds steady at one lookahead however well the vehicle is
+            // driving, and after seven seconds of it the vehicle decides it is wedged and reverses
+            // out of an empty road. So the yardstick is moved by exactly as far as the carrot moved,
+            // and what is left over is the real progress again.
+            //
+            // Crediting the carrot's own movement rather than the change in remaining distance is
+            // what makes this honest in both cases: the carrot is placed a lookahead from the
+            // vehicle, so it advances precisely as much as the vehicle does, and a vehicle that is
+            // wedged moves it not at all and is found stuck exactly as before.
+            Vector3 moved = destination - _navigator.Destination;
+            moved.y = 0f;
+
+            _navigator.MoveDestination(destination, arriveRadius);
+
+            if (_bestRemaining < float.MaxValue)
+            {
+                _bestRemaining += moved.magnitude;
+            }
+
             return true;
         }
 
@@ -1223,7 +1302,8 @@ namespace BanditPlugin.FakePlayer
             // Enter a three-point turn when the target is well off the nose, leave it once the nose
             // has come most of the way round. In open ground the "turn" never needs its reverse leg
             // and is just a hard forward arc; in a tight space it alternates, which is the manoeuvre.
-            if (!_turning && absError > TurnAroundEnterDegrees)
+            if (!_turning && absError > TurnAroundEnterDegrees
+                && Mathf.Abs(forwardVelocity) < TurnAroundMaxMetresPerSecond)
             {
                 _turning = true;
                 _turningReverse = false;
@@ -1291,6 +1371,7 @@ namespace BanditPlugin.FakePlayer
                 + (brake ? " BRAKE" : string.Empty)
                 + (reverse ? " REV" : string.Empty)
                 + (_turning ? (_turningReverse ? " TURN-REV" : " TURN-FWD") : string.Empty)
+                + (_turning && _turnRefusals != null ? $" {_turnRefusals}" : string.Empty)
                 + $" err={headingError:0}deg"
                 + $" clear={(_navigator.ClearAheadMetres >= float.MaxValue * 0.5f ? "inf" : _navigator.ClearAheadMetres.ToString("0.0"))}m"
                 + $" left={_navigator.RemainingDistance:0.0}m"
@@ -1303,6 +1384,23 @@ namespace BanditPlugin.FakePlayer
             // Only so /banditv status reports the speed it is really doing rather than nothing.
             _speed = Mathf.Abs(forwardVelocity);
             _reversing = reverse;
+        }
+
+        /// <summary>
+        /// The fastest a vehicle may take a heading error this big.
+        ///
+        /// Unbounded while the nose is roughly on line, so a straight road is driven at road speed,
+        /// and falling to a crawl by the angle at which the driver would rather turn round than arc.
+        /// </summary>
+        private static float CorneringSpeed(float absError)
+        {
+            if (absError <= CorneringFreeDegrees)
+            {
+                return float.MaxValue;
+            }
+
+            return Mathf.Lerp(FastCorneringMetresPerSecond, SlowCorneringMetresPerSecond,
+                Mathf.InverseLerp(CorneringFreeDegrees, TurnAroundEnterDegrees, absError));
         }
 
         /// <summary>The fastest a vehicle may go and still pull up short of something this far
@@ -1461,6 +1559,7 @@ namespace BanditPlugin.FakePlayer
 
             float limit = CruiseSpeed(vehicle) * Mathf.Clamp01(SpeedScale);
             limit = Mathf.Min(limit, StoppableSpeed(_navigator.ClearAheadMetres));
+            limit = Mathf.Min(limit, CorneringSpeed(Mathf.Abs(headingError)));
 
             if (limit <= 0.01f)
             {
@@ -1515,8 +1614,15 @@ namespace BanditPlugin.FakePlayer
             // arc between them is fine. Treating the road as a hard rule there froze the turn with
             // clear tarmac all around it, which is the "refuses to move" in the log. So we prefer a
             // leg that is both clear and on-road, and fall back to one that is merely clear.
-            bool forwardClear = _navigator.IsTravelClear(vehicle, _footprint, nose, ignoreOverlap: false);
-            bool reverseClear = _navigator.IsTravelClear(vehicle, _footprint, -nose, ignoreOverlap: true);
+            BanditTravelRefusal forwardRefusal =
+                _navigator.WhyTravelRefused(vehicle, _footprint, nose, ignoreOverlap: false);
+            BanditTravelRefusal reverseRefusal =
+                _navigator.WhyTravelRefused(vehicle, _footprint, -nose, ignoreOverlap: true);
+
+            _turnRefusals = $"fwd={forwardRefusal} rev={reverseRefusal}";
+
+            bool forwardClear = forwardRefusal == BanditTravelRefusal.None;
+            bool reverseClear = reverseRefusal == BanditTravelRefusal.None;
             bool forwardOnRoad = forwardClear && IsOnRoad(vehicle.transform.position + nose * ManeuverProbeMetres);
             bool reverseOnRoad = reverseClear && IsOnRoad(vehicle.transform.position - nose * ManeuverProbeMetres);
 
@@ -1536,8 +1642,39 @@ namespace BanditPlugin.FakePlayer
                 _turningReverse = !_turningReverse;
             }
 
+            // Neither way out. A slope refusal is the one that may be argued with: it is a
+            // thirty-five degree cutoff decided by sampling the ground every two metres, and at a
+            // crawl the honest way to find out whether the vehicle gets up a verge is to put it at
+            // the verge. Anything else - something solid, a drop, deep water - is a real refusal and
+            // is never driven into.
+            //
+            // Without this the turn simply stood on the brake: steer 0, throttle 0, both legs shut,
+            // and nothing that happens next can reopen either of them, because what is in front of
+            // and behind a stationary vehicle does not change while it is stationary. The stall
+            // detector then fired three times against a vehicle that was being told not to move,
+            // banned a direction that was never the problem, and the convoy unloaded a tank on an
+            // open road. That is exactly the T-72 in the log.
+            if (!forwardClear && !reverseClear)
+            {
+                if (forwardRefusal == BanditTravelRefusal.Slope)
+                {
+                    _turningReverse = false;
+                }
+                else if (reverseRefusal == BanditTravelRefusal.Slope)
+                {
+                    _turningReverse = true;
+                }
+            }
+
             reverse = _turningReverse;
             bool legOpen = reverse ? reverseClear : forwardClear;
+
+            // The soft refusal above: this leg is shut only because of the climb test, and both are
+            // shut, so it is driven anyway rather than sat on.
+            if (!legOpen && (reverse ? reverseRefusal : forwardRefusal) == BanditTravelRefusal.Slope)
+            {
+                legOpen = true;
+            }
 
             // Wheels toward the target going forward; the opposite lock going backward, which is
             // what actually swings the nose the same way in reverse.
@@ -1548,8 +1685,9 @@ namespace BanditPlugin.FakePlayer
 
             if (!legOpen)
             {
-                // The chosen leg is blocked and so is the other, or we just flipped to a leg that is
-                // itself blocked. Hold, brake, and let the stall timer run.
+                // Both ways out are refused by something that is not going to be argued with. Hold,
+                // brake, and let the stall timer end the trip - it now has the two refusals to say
+                // so with.
                 steer = 0;
                 throttle = 0;
                 brake = true;
@@ -1736,7 +1874,8 @@ namespace BanditPlugin.FakePlayer
             if (_unstickAttempts >= MaxUnstickAttempts)
             {
                 BanditNavLog.Write(this, $"giving up - {_unstickAttempts} unstick attempt(s) and still "
-                    + $"{remaining:0.0}m out; blocked by {_navigator.ObstacleAhead ?? "nothing it can name"}");
+                    + $"{remaining:0.0}m out; blocked by {_navigator.ObstacleAhead ?? "nothing it can name"}"
+                    + (_turning && _turnRefusals != null ? $"; mid-turn, {_turnRefusals}" : string.Empty));
                 _navigator.GiveUp();
                 return;
             }
@@ -1748,7 +1887,8 @@ namespace BanditPlugin.FakePlayer
 
             BanditNavLog.Write(this, $"stalled at {remaining:0.0}m out - backing up "
                 + $"({_unstickAttempts}/{MaxUnstickAttempts}); ahead: "
-                + $"{_navigator.ObstacleAhead ?? "clear"}, refused: {_navigator.RefusedReason ?? "nothing"}");
+                + $"{_navigator.ObstacleAhead ?? "clear"}, refused: {_navigator.RefusedReason ?? "nothing"}"
+                + (_turning && _turnRefusals != null ? $", mid-turn {_turnRefusals}" : string.Empty));
 
             // The route's own direction is not banned for traffic. Whatever is in front is going the
             // same way and will move; forbidding a fifty-degree arc around the road for it is how a
