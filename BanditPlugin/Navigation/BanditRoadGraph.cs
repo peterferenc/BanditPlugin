@@ -1178,14 +1178,37 @@ namespace BanditPlugin.Navigation
         /// convoy drives to the first node with the navigator it already has, and off the last one
         /// the same way.
         ///
-        /// Returns false when either end is further than <paramref name="snapDistance"/> from any
-        /// road, or when no route exists between them - two towns on separate islands, most often.
-        /// Both are ordinary answers rather than failures, and the caller drives direct instead.
+        /// Returns false unless the roads go the whole way. Callers that would rather have most of
+        /// a road route than none of it want <see cref="TryRouteToward"/>.
         /// </summary>
         public static bool TryRoute(Vector3 from, Vector3 to, float snapDistance, List<int> into, out string reason)
         {
+            return TryRouteToward(from, to, snapDistance, into, out bool complete, out reason) && complete;
+        }
+
+        /// <summary>
+        /// Routes over the road network as far toward a point as the roads actually go, appending
+        /// the nodes to <paramref name="into"/>. <paramref name="complete"/> says whether they got
+        /// all the way; when they did not, the route ends at the reachable road node nearest the
+        /// destination and the caller drives the rest direct.
+        ///
+        /// The whole-or-nothing version was throwing away most of a good answer. A destination in a
+        /// field, on the far side of a bridge the graph does not join up, or on an island, made the
+        /// entire leg direct - so a column with a marker seven hundred metres away drove at it in a
+        /// straight line from the moment it formed up, across country, into the sea. There was a
+        /// perfectly good road going most of the way and nothing was using it. Roads for as far as
+        /// they go and cross country for the last stretch is what a driver would do, and it is what
+        /// the caller wanted from the beginning: the nearest it can get on roads, then straight.
+        ///
+        /// Failing outright is reserved for the case where the roads cannot help at all - no roads
+        /// on the map, or none within reach of where the column is standing.
+        /// </summary>
+        public static bool TryRouteToward(Vector3 from, Vector3 to, float snapDistance, List<int> into,
+            out bool complete, out string reason)
+        {
             EnsureBuilt();
             into.Clear();
+            complete = false;
 
             if (Nodes.Count < 2)
             {
@@ -1199,35 +1222,51 @@ namespace BanditPlugin.Navigation
                 return false;
             }
 
-            if (!TryGetNearest(to, snapDistance, out int goal, out float goalDistance))
-            {
-                reason = $"no road within {snapDistance:0}m of the destination";
-                return false;
-            }
+            bool haveGoal = TryGetNearest(to, snapDistance, out int goal, out float goalDistance);
 
-            if (start == goal)
+            if (haveGoal && start == goal)
             {
                 into.Add(start);
+                complete = true;
                 reason = null;
                 return true;
             }
 
-            if (!Search(start, goal, into))
+            if (Search(start, haveGoal ? goal : -1, to, into, out int reached))
             {
-                reason = "no road route between those points";
-                return false;
+                complete = haveGoal && reached == goal;
+                reason = complete
+                    ? null
+                    : haveGoal
+                        ? "no road route the whole way - taking the roads as far as they go"
+                        : $"no road within {snapDistance:0}m of the destination - taking the roads as "
+                            + "far as they go";
+                return true;
             }
 
-            reason = null;
-            return true;
+            reason = "no road route between those points";
+            return false;
         }
 
         /// <summary>
         /// Plain A* over the node graph, with distance for the heuristic and distance times the
         /// road's chart penalty for the cost, so a route prefers a highway to a track of the same
         /// length without ever refusing the track.
+        ///
+        /// And when it cannot get there, toward the reachable node that ends up nearest
+        /// <paramref name="targetPosition"/>.
+        ///
+        /// <paramref name="goal"/> may be -1, meaning there is no road node at the destination at
+        /// all and every road is a partial answer. Either way the search expands the whole reachable
+        /// component before giving up, which is what makes "as near as the roads go" a fact rather
+        /// than a guess: the closest node to the destination that this column can actually drive to.
+        /// The cost is one full sweep of one road component, once, when the route is planned.
+        ///
+        /// <paramref name="reached"/> reports which node the returned route ends on, so the caller
+        /// can tell a complete route from a partial one.
         /// </summary>
-        private static bool Search(int start, int goal, List<int> into)
+        private static bool Search(int start, int goal, Vector3 targetPosition, List<int> into,
+            out int reached)
         {
             _queryStamp++;
 
@@ -1235,9 +1274,12 @@ namespace BanditPlugin.Navigation
             _gScore[start] = 0f;
             _cameFrom[start] = -1;
             _stamp[start] = _queryStamp;
-            open.Push(start, Heuristic(start, goal));
+            Vector3 goalPosition = goal >= 0 ? Nodes[goal].Position : targetPosition;
 
-            Vector3 goalPosition = Nodes[goal].Position;
+            open.Push(start, Vector3.Distance(Nodes[start].Position, goalPosition));
+
+            int best = start;
+            float bestDistance = FlatDistance(Nodes[start].Position, targetPosition);
 
             while (open.Count > 0)
             {
@@ -1245,7 +1287,15 @@ namespace BanditPlugin.Navigation
                 if (current == goal)
                 {
                     Reconstruct(goal, into);
+                    reached = goal;
                     return true;
+                }
+
+                float toTarget = FlatDistance(Nodes[current].Position, targetPosition);
+                if (toTarget < bestDistance)
+                {
+                    bestDistance = toTarget;
+                    best = current;
                 }
 
                 RoadNode node = Nodes[current];
@@ -1270,12 +1320,25 @@ namespace BanditPlugin.Navigation
                 }
             }
 
-            return false;
+            // Nowhere left to expand and the goal was never reached. The roads still got somewhere,
+            // and the nearest somewhere they got is worth far more than nothing - see
+            // TryRouteToward. Only a start node that is its own island returns false.
+            reached = best;
+
+            if (best == start)
+            {
+                return false;
+            }
+
+            Reconstruct(best, into);
+            return true;
         }
 
-        private static float Heuristic(int node, int goal)
+        private static float FlatDistance(Vector3 a, Vector3 b)
         {
-            return Vector3.Distance(Nodes[node].Position, Nodes[goal].Position);
+            a.y = 0f;
+            b.y = 0f;
+            return Vector3.Distance(a, b);
         }
 
         private static void Reconstruct(int goal, List<int> into)

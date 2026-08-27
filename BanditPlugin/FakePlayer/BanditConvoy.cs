@@ -234,6 +234,12 @@ namespace BanditPlugin.FakePlayer
         /// <summary>How far from a road either end of a leg may be before it is driven direct.</summary>
         public const float RoadSnapDistanceMetres = 80f;
 
+        /// <summary>How far apart the points on a cross-country leg are laid. The road graph's own
+        /// sample spacing, so a leg that leaves the road and one that follows it feel the same to
+        /// everything downstream - the steer carrot, the interval keeping and the progress
+        /// count.</summary>
+        private const float DirectPointSpacingMetres = 8f;
+
         public int Id { get; }
         public ConvoyState State { get; private set; } = ConvoyState.Cruise;
 
@@ -581,10 +587,13 @@ namespace BanditPlugin.FakePlayer
 
             foreach (Vector3 waypoint in waypoints)
             {
-                bool routed = false;
+                bool complete = false;
                 string reason = null;
 
-                if (useRoads && BanditRoadGraph.TryRoute(cursor, waypoint, RoadSnapDistanceMetres, nodes, out reason))
+                int before = path.Count;
+
+                if (useRoads && BanditRoadGraph.TryRouteToward(cursor, waypoint, RoadSnapDistanceMetres,
+                        nodes, out complete, out reason))
                 {
                     foreach (int node in nodes)
                     {
@@ -609,32 +618,122 @@ namespace BanditPlugin.FakePlayer
                         });
                     }
 
-                    routed = true;
                     roadLegs++;
-                }
-                else if (useRoads)
-                {
-                    Logger.Log($"[Bandit] Convoy leg to ({waypoint.x:0}, {waypoint.z:0}) is off-road: {reason}.");
+
+                    // The cross-country hop below starts from where the roads actually left off,
+                    // not from where the last waypoint was.
+                    if (path.Count > before)
+                    {
+                        cursor = path[path.Count - 1].Position;
+                    }
                 }
 
-                if (!routed)
+                if (useRoads && reason != null)
+                {
+                    Logger.Log($"[Bandit] Convoy leg to ({waypoint.x:0}, {waypoint.z:0}): {reason}.");
+                }
+
+                if (!complete)
                 {
                     directLegs++;
                 }
 
-                path.Add(new RoutePoint
-                {
-                    Position = waypoint,
-                    NodeIndex = -1,
-                    Kind = BanditRouteDebug.MarkerKind.Waypoint
-                });
-
-                cursor = waypoint;
+                cursor = AddDirectLeg(path, cursor, waypoint);
             }
 
             List<RoutePoint> rounded = RoundCorners(path);
             RecordForDebug(rounded);
             return rounded;
+        }
+
+        /// <summary>
+        /// The cross-country hop from wherever the roads left the column to the waypoint, laid out
+        /// as points rather than as one long jump, and stopped at the water's edge if it reaches
+        /// one. Returns where the leg actually ends, which is the waypoint unless it was cut short.
+        ///
+        /// Two separate things were wrong with drawing this as a single point. A route point is what
+        /// everything downstream measures against - the steer carrot slides between them, the column
+        /// keeps its interval by how far along them each vehicle is, and passing one is what advances
+        /// a vehicle's progress - so a seven-hundred-metre leg with nothing in the middle of it is a
+        /// column with no shape, driving at a point over the horizon and reporting no progress the
+        /// whole way. And nothing was looking at what the line crossed: the straight line from the
+        /// road to a marker across a bay is drawn through the bay, and the vehicles found that out
+        /// one at a time by driving into it.
+        ///
+        /// So it is walked in the same eight-metre steps the road graph samples at, each step is
+        /// asked the same question the driver asks - is there ground here, and is it above water -
+        /// and the leg ends at the last step that could answer yes.
+        /// </summary>
+        private static Vector3 AddDirectLeg(List<RoutePoint> path, Vector3 from, Vector3 to)
+        {
+            Vector3 flat = to - from;
+            flat.y = 0f;
+
+            float length = flat.magnitude;
+            if (length < DirectPointSpacingMetres)
+            {
+                // Near enough to be one step. Still tested, so a waypoint dropped in the sea is not
+                // driven at - and tested from the height of the ground the leg starts on, because a
+                // waypoint's own y is whatever a click on the map carried.
+                Vector3 near = to;
+                near.y = from.y;
+
+                if (!BanditVehicleNavigator.IsGroundDrivable(near, out Vector3 spot))
+                {
+                    return from;
+                }
+
+                // A waypoint that lands on the road node the route already ends at is not a point,
+                // it is the same point twice, and a vehicle handed it brakes for nothing.
+                if (path.Count > 0
+                    && (path[path.Count - 1].Position - spot).sqrMagnitude < 4f)
+                {
+                    return path[path.Count - 1].Position;
+                }
+
+                path.Add(new RoutePoint
+                {
+                    Position = spot,
+                    NodeIndex = -1,
+                    Kind = BanditRouteDebug.MarkerKind.Waypoint
+                });
+
+                return spot;
+            }
+
+            Vector3 step = flat / length;
+            int steps = Mathf.CeilToInt(length / DirectPointSpacingMetres);
+            Vector3 last = from;
+
+            for (int i = 1; i <= steps; i++)
+            {
+                Vector3 point = from + step * (length * i / steps);
+
+                // Sampled from the height of the ground we last stood on rather than from the
+                // waypoint's own y, which for a point off the map marker means nothing at all.
+                point.y = last.y;
+
+                if (!BanditVehicleNavigator.IsGroundDrivable(point, out Vector3 ground))
+                {
+                    Logger.Log($"[Bandit] Convoy leg to ({to.x:0}, {to.z:0}) stops "
+                        + $"{HorizontalDistance(last, to):0}m short - no drivable ground beyond "
+                        + $"({point.x:0}, {point.z:0}).");
+                    return last;
+                }
+
+                path.Add(new RoutePoint
+                {
+                    Position = ground,
+                    NodeIndex = -1,
+                    Kind = i == steps
+                        ? BanditRouteDebug.MarkerKind.Waypoint
+                        : BanditRouteDebug.MarkerKind.CornerArc
+                });
+
+                last = ground;
+            }
+
+            return last;
         }
 
         /// <summary>Keeps the finished plan where "/banditnavlog route" can draw it.</summary>

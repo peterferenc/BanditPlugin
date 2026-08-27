@@ -597,7 +597,7 @@ namespace BanditPlugin.Navigation
 
         /// <summary>How much water a vehicle may drive through. Deeper than this is not ground,
         /// whatever the ground sample under it says.</summary>
-        private const float MaxFordDepthMetres = 1f;
+        public const float MaxFordDepthMetres = 1f;
 
         /// <summary>
         /// How far apart the ground is sampled along a step being tested.
@@ -715,6 +715,28 @@ namespace BanditPlugin.Navigation
             // weaves along a route a bandit walks straight down.
             _path = new BanditPathFollower(self) { NavmeshSnapDistance = 8f, CornerArriveRadius = 4f };
             _lastPosition = self != null ? self.transform.position : Vector3.zero;
+        }
+
+        /// <summary>
+        /// Whether a point has ground under it that a vehicle could stand on, as opposed to a drop
+        /// or water deeper than a ford.
+        ///
+        /// Public because the route planner has to ask the same question the driver asks, and get
+        /// the same answer. It was not asking it at all: a leg was drawn as a straight line to
+        /// wherever the waypoint was, and nothing looked at what that line crossed - so a column was
+        /// routed into the sea, and then spent four minutes at the water's edge being told by this
+        /// very test that the way ahead was not ground: stalling, reversing, and giving up three
+        /// times. A route nobody can drive is better refused when it is drawn than discovered one
+        /// vehicle at a time.
+        /// </summary>
+        public static bool IsGroundDrivable(Vector3 point, out Vector3 ground)
+        {
+            if (!VehicleTerrain.TrySample(point, null, out ground, out Vector3 _))
+            {
+                return false;
+            }
+
+            return !WaterUtility.isPointUnderwater(ground + Vector3.up * MaxFordDepthMetres);
         }
 
         public void SetDestination(Vector3 destination, float arriveRadius)
@@ -1069,7 +1091,7 @@ namespace BanditPlugin.Navigation
 
             RefusedReason = banned
                 ? $"banned direction ({(_bannedUntil - Time.time):0.0}s left)"
-                : _lastBlocker ?? "no ground / too steep";
+                : _lastBlocker ?? refusal.ToString();
 
             // Traffic is queued behind, not overtaken. Holding the wanted heading leaves the speed
             // limiter to pace against the clear road it can see, which is following; fanning out
