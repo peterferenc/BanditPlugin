@@ -16,6 +16,7 @@ the server and are already loaded by the game, so nothing extra is deployed.
 
 1. Copy `bin/Release/BanditPlugin.dll` into the server's `Rocket/Plugins/` folder.
 2. Start once to generate `BanditPlugin.configuration.xml`.
-3. Grant `bandit.spawn` to a group in `Rocket/Permissions.config.xml`.
+3. Grant `bandit.spawn` - and `bandit.team` if you want `/banditteam` - to a group in
+   `Rocket/Permissions.config.xml`.
 
 Developed against Unturned 3.26.3.8 with RocketModFix 4.23.1.

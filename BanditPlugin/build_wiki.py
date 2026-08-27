@@ -43,6 +43,9 @@ TURRET_PAGE = ("Turrets", "Turrets", [])
 CROSSREFS = [
     (r'See "Why not zombies\?" below\.', 'See [Why not zombies?](Why-Not-Zombies).'),
     (r'See the range limitation below\.', 'See [Known limitations](Known-Limitations).'),
+    (r'See "Teams" below\.', 'See [Teams](Teams).'),
+    (r'since teams exist', 'since [teams](Teams) exist'),
+    (r'\(https://github\.com/peterferenc/BanditPlugin/wiki/([A-Za-z-]+)\)', r'(\1)'),
 ]
 
 
