@@ -67,15 +67,37 @@ jobs:
           curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
             | tar zxf - -C "$RUNNER_TEMP/steamcmd"
 
+      # Retried because SteamCMD fails its first app_update with "Missing configuration"
+      # often enough to redden a build for no reason - it self-updates, restarts, and the app
+      # info cache is not always populated by the time app_update runs. A second attempt picks
+      # up the cache the first one warmed.
       - name: Download the Unturned dedicated server
         if: steps.cache-unturned.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/steamcmd/steamcmd.sh" \
-            +force_install_dir "$RUNNER_TEMP/unturned" \
-            +login anonymous \
-            +app_update "${UNTURNED_APPID}" \
-            +quit
+          installed=0
+          for attempt in 1 2 3; do
+            if "$RUNNER_TEMP/steamcmd/steamcmd.sh" \
+                +force_install_dir "$RUNNER_TEMP/unturned" \
+                +login anonymous \
+                +app_update "${UNTURNED_APPID}" \
+                +quit; then
+              installed=1
+              break
+            fi
+            echo "::warning::SteamCMD attempt ${attempt} failed; retrying in 30s"
+            sleep 30
+          done
+          if [ "${installed}" != "1" ]; then
+            echo "::error::SteamCMD failed to install app ${UNTURNED_APPID} after 3 attempts."
+            exit 1
+          fi
+          # SteamCMD can exit 0 on a partial install, and the next thing to notice would be a
+          # compiler error about a missing type rather than about a missing download.
+          if [ ! -f "$RUNNER_TEMP/unturned/Unturned_Headless_Data/Managed/Assembly-CSharp.dll" ]; then
+            echo "::error::SteamCMD reported success but Assembly-CSharp.dll is not there."
+            exit 1
+          fi
           # Keep only what the compiler needs; the rest is maps and bundles.
           mkdir -p refs
           cp -r "$RUNNER_TEMP/unturned/Unturned_Headless_Data/Managed" refs/Managed
@@ -154,7 +176,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" dist/BanditPlugin.dll \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --verify-tag
+          # Idempotent: re-running a tag (after a retag, or a rerun of a failed job) should
+          # update the release rather than fail because it already exists.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} exists - replacing its asset."
+            gh release upload "${GITHUB_REF_NAME}" dist/BanditPlugin.dll --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/BanditPlugin.dll \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
