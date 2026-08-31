@@ -1,0 +1,160 @@
+name: Build
+
+# The plugin compiles against Unturned's and RocketMod's own assemblies, and neither can be
+# redistributed - so they are not in this repository. CI fetches them the same way a server
+# admin would: the dedicated server from Steam (anonymous login), RocketMod from its release.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight build pointless.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  # "Unturned Dedicated Server" - a Tool, downloadable with an anonymous Steam login.
+  UNTURNED_APPID: "1110390"
+  # Pinned rather than "latest": the plugin reflects into private members, so the assemblies it
+  # builds against are part of what makes a build reproducible. Bump deliberately.
+  ROCKETMOD_VERSION: "4.23.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # The cache key has to change when Unturned does, or a build would keep compiling against
+      # assemblies the live game has moved on from. The public branch's build id is exactly that
+      # signal. If the lookup fails the key falls back to a literal, which simply misses and
+      # re-downloads rather than silently reusing stale references.
+      - name: Resolve the Unturned build id
+        id: unturned
+        run: |
+          set -euo pipefail
+          buildid=$(curl -sf --max-time 30 "https://api.steamcmd.net/v1/info/${UNTURNED_APPID}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["'"${UNTURNED_APPID}"'"]["depots"]["branches"]["public"]["buildid"])' \
+            2>/dev/null || echo "unknown")
+          echo "Unturned public build id: ${buildid}"
+          echo "buildid=${buildid}" >> "$GITHUB_OUTPUT"
+
+      # Only the Managed folder is cached - 33 MB of assemblies out of a 2.2 GB download.
+      - name: Cache Unturned managed assemblies
+        id: cache-unturned
+        uses: actions/cache@v4
+        with:
+          path: refs/Managed
+          key: unturned-managed-${{ steps.unturned.outputs.buildid }}
+
+      - name: Install SteamCMD
+        if: steps.cache-unturned.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # SteamCMD is a 32-bit binary even on x86_64.
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lib32gcc-s1
+          mkdir -p "$RUNNER_TEMP/steamcmd"
+          curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" \
+            | tar zxf - -C "$RUNNER_TEMP/steamcmd"
+
+      - name: Download the Unturned dedicated server
+        if: steps.cache-unturned.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/steamcmd/steamcmd.sh" \
+            +force_install_dir "$RUNNER_TEMP/unturned" \
+            +login anonymous \
+            +app_update "${UNTURNED_APPID}" \
+            +quit
+          # Keep only what the compiler needs; the rest is maps and bundles.
+          mkdir -p refs
+          cp -r "$RUNNER_TEMP/unturned/Unturned_Headless_Data/Managed" refs/Managed
+          rm -rf "$RUNNER_TEMP/unturned"
+          echo "Kept $(du -sh refs/Managed | cut -f1) of managed assemblies."
+
+      # Small enough that caching it would cost more than fetching it.
+      - name: Download RocketMod
+        run: |
+          set -euo pipefail
+          curl -sfL --retry 3 \
+            -o "$RUNNER_TEMP/rocketmod.zip" \
+            "https://github.com/RocketModFix/RocketModFix/releases/download/${ROCKETMOD_VERSION}/Rocket.Unturned.Module.zip"
+          mkdir -p refs/rocketmod
+          unzip -o -q "$RUNNER_TEMP/rocketmod.zip" -d refs/rocketmod
+
+      # The same file a developer copies from Directory.Build.props.example, written to point at
+      # what was just fetched. It is gitignored, so this never dirties the tree.
+      - name: Point the build at the references
+        run: |
+          set -euo pipefail
+          cat > BanditPlugin/Directory.Build.props <<EOF
+          <Project>
+            <PropertyGroup>
+              <UnturnedManagedPath>${GITHUB_WORKSPACE}/refs/Managed</UnturnedManagedPath>
+              <RocketModPath>${GITHUB_WORKSPACE}/refs/rocketmod/Rocket.Unturned</RocketModPath>
+            </PropertyGroup>
+          </Project>
+          EOF
+
+      # Warnings are errors here but not locally: a warning that reaches master is one nobody
+      # reads, and this project currently builds clean.
+      - name: Build
+        run: dotnet build BanditPlugin/BanditPlugin.csproj -c Release --warnaserror
+
+      - name: Upload the plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: BanditPlugin-${{ github.sha }}
+          path: BanditPlugin/bin/Release/BanditPlugin.dll
+          if-no-files-found: error
+
+  # Publishing is a separate job so that a broken build can never produce a release, and so the
+  # DLL that gets attached is byte-for-byte the one the build job already compiled and uploaded.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: BanditPlugin-${{ github.sha }}
+          path: dist
+
+      # A tag that disagrees with the assembly version produces a release whose DLL reports a
+      # different number than the release it is attached to - which is exactly the thing nobody
+      # notices until they are trying to work out which build a server is running.
+      - name: Check the tag matches the assembly version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          csproj=$(grep -oP '(?<=<Version>)[^<]+' BanditPlugin/BanditPlugin.csproj)
+          echo "tag: ${tag}   csproj: ${csproj}"
+          if [ "${tag}" != "${csproj}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match <Version>${csproj}</Version>. Bump the csproj and retag."
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/BanditPlugin.dll \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

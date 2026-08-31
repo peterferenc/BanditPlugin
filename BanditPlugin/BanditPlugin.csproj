@@ -7,7 +7,14 @@
     <AssemblyName>BanditPlugin</AssemblyName>
     <RootNamespace>BanditPlugin</RootNamespace>
     <LangVersion>latest</LangVersion>
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <!-- Generated rather than hand-written: there is no AssemblyInfo.cs, so without this the
+         DLL ships with no version at all, and a server admin holding one has no way to tell
+         which build it is. The tagged release workflow checks its tag against this number. -->
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Version>1.0.0</Version>
+    <Product>BanditPlugin</Product>
+    <Authors>peterferenc</Authors>
+    <Description>AI bandit bots for Unturned - they shoot, take cover, drive and run convoys.</Description>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <Nullable>disable</Nullable>
   </PropertyGroup>

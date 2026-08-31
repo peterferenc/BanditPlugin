@@ -8,6 +8,9 @@ obj/
 # Machine-specific reference paths; copy Directory.Build.props.example instead
 Directory.Build.props
 
+# Assemblies CI fetches from Steam and RocketMod's release; never committed
+refs/
+
 # Editor / OS
 .vs/
 .idea/
