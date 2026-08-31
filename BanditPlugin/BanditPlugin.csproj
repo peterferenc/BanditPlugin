@@ -83,4 +83,16 @@
     </Reference>
   </ItemGroup>
 
+  <!-- Used to stop bandits counting against the server's player slots - see BanditSlotPatches.
+       Pinned to 2.2.2 rather than taking the newest: uEssentials ships its own 0Harmony.dll and,
+       if it is installed, whichever copy loads first wins for the whole AppDomain. Matching the
+       version it bundles means it does not matter which one that is.
+
+       This one DOES copy to the output folder (no Private=false): 0Harmony.dll has to be deployed
+       into Rocket/Libraries/ alongside the plugin, which is where RocketMod resolves shared
+       assemblies from. -->
+  <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.2.2" />
+  </ItemGroup>
+
 </Project>

@@ -133,11 +133,16 @@ jobs:
       - name: Build
         run: dotnet build BanditPlugin/BanditPlugin.csproj -c Release --warnaserror
 
+      # 0Harmony.dll ships too: it is what stops bandits counting against the player slots, and
+      # it has to be installed into Rocket/Libraries/. A release with only BanditPlugin.dll would
+      # load but queue real players forever on a server full of bandits.
       - name: Upload the plugin
         uses: actions/upload-artifact@v4
         with:
           name: BanditPlugin-${{ github.sha }}
-          path: BanditPlugin/bin/Release/BanditPlugin.dll
+          path: |
+            BanditPlugin/bin/Release/BanditPlugin.dll
+            BanditPlugin/bin/Release/0Harmony.dll
           if-no-files-found: error
 
   # Publishing is a separate job so that a broken build can never produce a release, and so the
@@ -179,10 +184,10 @@ jobs:
           # Idempotent: re-running a tag (after a retag, or a rerun of a failed job) should
           # update the release rather than fail because it already exists.
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "Release ${GITHUB_REF_NAME} exists - replacing its asset."
-            gh release upload "${GITHUB_REF_NAME}" dist/BanditPlugin.dll --clobber
+            echo "Release ${GITHUB_REF_NAME} exists - replacing its assets."
+            gh release upload "${GITHUB_REF_NAME}" dist/BanditPlugin.dll dist/0Harmony.dll --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" dist/BanditPlugin.dll \
+            gh release create "${GITHUB_REF_NAME}" dist/BanditPlugin.dll dist/0Harmony.dll \
               --title "${GITHUB_REF_NAME}" \
               --generate-notes \
               --verify-tag

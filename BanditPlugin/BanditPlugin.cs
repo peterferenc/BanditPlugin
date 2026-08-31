@@ -23,6 +23,10 @@ namespace BanditPlugin
 
             Perf = gameObject.AddComponent<BanditPerfMonitor>();
 
+            // Before anything can be spawned, so there is never a window where a bandit is
+            // connected and still counting against the server's capacity.
+            BanditSlotPatches.Apply();
+
             // Create the group behind every team up front, so "/banditteam join red" works before
             // any bandit has been spawned onto red. Lookups create one on demand as well - this is
             // only so a team exists as soon as the server does.
@@ -121,6 +125,10 @@ namespace BanditPlugin
                 Destroy(Perf);
                 Perf = null;
             }
+
+            // Harmony patches outlive the assembly they were declared in, so a reload without this
+            // leaves the game calling into a plugin that no longer exists.
+            BanditSlotPatches.Remove();
 
             Instance = null;
         }

@@ -3,9 +3,11 @@
 A plugin I made for Unturned. It spawns AI enemies ("bandits") - they can shoot, take cover,
 drive vehicles, man turrets, patrol, run convoys and much more.
 
-Bandits are **fake players**, not zombies: they occupy a player slot, appear as real player
-characters, carry real weapons and are driven by the same input packets a client sends. That is
-what lets them do everything a player can. See
+Bandits are **fake players**, not zombies: they appear as real player characters, carry real
+weapons and are driven by the same input packets a client sends. That is what lets them do
+everything a player can. They do not consume player slots - a server full of bandits still lets
+real players in - though they are visible in the in-game player list, which is drawn client-side
+and cannot be changed from a server plugin. See
 [Why not zombies?](https://github.com/peterferenc/BanditPlugin/wiki/Why-Not-Zombies).
 
 Built as a RocketMod plugin, developed against Unturned 3.26.3.8 with RocketModFix 4.23.1.
@@ -67,9 +69,14 @@ $EDITOR BanditPlugin/Directory.Build.props   # UnturnedManagedPath, RocketModPat
 # 2. Build
 dotnet build BanditPlugin/BanditPlugin.csproj -c Release
 
-# 3. Install
+# 3. Install - both files, they go in different folders
 cp BanditPlugin/bin/Release/BanditPlugin.dll <server>/Rocket/Plugins/
+cp BanditPlugin/bin/Release/0Harmony.dll     <server>/Rocket/Libraries/
 ```
+
+`0Harmony.dll` is what keeps bandits from counting against the server's player slots. Without it
+the plugin still loads and everything else works, but a server with more bandits than
+`Max_Players` turns real players away as full - it logs an error saying so.
 
 Start the server once to generate `BanditPlugin.configuration.xml`, then grant `bandit.spawn`
 (and `bandit.team`) to a group in `Rocket/Permissions.config.xml`.
@@ -150,3 +157,10 @@ support (`// todo: simulate useable`), so the equipping and firing here is origi
 ## License
 
 [MIT](LICENSE).
+
+## Disclaimer
+
+This plugin does not modify or increase player count for servers. It is not intended for
+"botting" or "server boosting". The plugin adheres to the
+[Steam Online Conduct](https://store.steampowered.com/online_conduct/) and the
+[Unturned Server Hosting Rules](https://docs.smartlydressedgames.com/en/stable/servers/server-hosting-rules.html).
