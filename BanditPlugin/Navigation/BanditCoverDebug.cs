@@ -88,7 +88,7 @@ namespace BanditPlugin.Navigation
 
         /// <summary>
         /// Removes every marker from every client. Safe to call when nothing is drawn, and used
-        /// both by the auto-clear timer and by "/banditcover clear".
+        /// both by the auto-clear timer and by "/bandit debug clear".
         /// </summary>
         public static void Clear()
         {
@@ -202,6 +202,8 @@ namespace BanditPlugin.Navigation
                 case BanditCoverOutcome.NoStandingRoom: return EffectYellow;
                 case BanditCoverOutcome.NoGround: return EffectOrange;
                 case BanditCoverOutcome.TooCloseToThreat: return EffectPurple;
+                case BanditCoverOutcome.TowardThreat: return EffectPurple;
+                case BanditCoverOutcome.ExposedSoon: return EffectOrange;
                 default: return EffectRed;
             }
         }
@@ -215,6 +217,7 @@ namespace BanditPlugin.Navigation
         /// <summary>Legend to print alongside, so the colours mean something without the source.</summary>
         public const string Legend =
             "green = chosen, blue = viable, red = still visible, yellow = no room, " +
-            "orange = no ground, purple = too close to you";
+            "orange = no ground or seen from where you are heading, purple = too close to you or past you, " +
+            "red also = a cover slot on your side of its object";
     }
 }

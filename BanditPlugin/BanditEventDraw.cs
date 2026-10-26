@@ -47,7 +47,7 @@ namespace BanditPlugin
     /// Spends an event's budget on squads, vehicles and men.
     ///
     /// Three rules do all the work here, and they are worth stating plainly because between them
-    /// they are what makes "/banditevent 200" and "/banditevent 900" different in kind rather than
+    /// they are what makes "/bandit event spawn 200" and "/bandit event spawn 900" different in kind rather than
     /// only in size:
     ///
     ///   Cost says what is affordable. Every kit carries one, a squad's is the sum of its members'
@@ -221,7 +221,7 @@ namespace BanditPlugin
         /// <summary>
         /// An event that drew nothing at all still puts one bandit down.
         ///
-        /// "/banditevent 5" against a rifleman costing 10 buys nothing, and a command that
+        /// "/bandit event spawn 5" against a rifleman costing 10 buys nothing, and a command that
         /// cheerfully reports having spawned an empty event is a command that looks broken. One man
         /// is both the honest minimum and the obvious reading of a very small number.
         ///

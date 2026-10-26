@@ -75,7 +75,7 @@ looking afterwards.
 
 ## Patrol
 
-`/banditwp add` records waypoints at your feet into `Waypoints/<map>.txt` (plain `x y z` lines,
+`/bandit route patrol add` records waypoints at your feet into `Waypoints/<map>.txt` (plain `x y z` lines,
 hand-editable). With no recorded route, patrol falls back to the map's `LocationDevkitNode`s - the
 named places official maps mark in the editor. Bandits start at whichever waypoint is nearest,
 loiter on arrival, and break off to fight anything they see on the way, resuming afterwards.

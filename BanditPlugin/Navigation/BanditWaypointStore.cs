@@ -13,7 +13,7 @@ namespace BanditPlugin.Navigation
     /// Rocket/Plugins/BanditPlugin/Waypoints/&lt;map&gt;.txt.
     ///
     /// Text rather than XML/JSON because the file is meant to be hand-editable next to the
-    /// in-game /banditwp commands, and a waypoint is three numbers.
+    /// in-game /bandit route patrol commands, and a waypoint is three numbers.
     ///
     /// When a map has no file, the route falls back to the map's own LocationNodes - the named
     /// places the level editor marks on official maps - so patrol does something sensible with
@@ -129,6 +129,21 @@ namespace BanditPlugin.Navigation
             }
 
             Waypoints.RemoveAt(nearestIndex);
+            Save();
+            return true;
+        }
+
+        /// <summary>Removes by the one-based number the list printed, like BanditConvoyRoute.RemoveAt.</summary>
+        public static bool RemoveAt(int oneBasedIndex)
+        {
+            EnsureLoaded();
+
+            if (oneBasedIndex < 1 || oneBasedIndex > Waypoints.Count)
+            {
+                return false;
+            }
+
+            Waypoints.RemoveAt(oneBasedIndex - 1);
             Save();
             return true;
         }

@@ -1,7 +1,7 @@
 # Convoys
 
-`/banditevent convoy 300` buys three hundred points of crewed vehicles, forms them up on the first
-waypoint of `/banditevent wp`, and drives them through the rest. No foot squads are drawn: a squad
+`/bandit convoy spawn 300` buys three hundred points of crewed vehicles, forms them up on the first
+waypoint of `/bandit route convoy`, and drives them through the rest. No foot squads are drawn: a squad
 spawned beside the road would be left behind by the first leg. At the last waypoint they stop and
 stay.
 
@@ -75,13 +75,13 @@ over a warehouse roof is not a road.
 On PEI that bridges eleven gaps and refuses five, four of them across water and one up a cliff, and
 takes the network from fourteen pieces to three. The route the convoy could not plan at all comes
 out as 1501m along the network - of which 170m is open ground - against the 846m straight line it
-used to drive instead. `/banditroads` reports both halves: how many gaps the map needed to be
+used to drive instead. `/bandit debug roads` reports both halves: how many gaps the map needed to be
 routable, and how much of a given route crosses them.
 
 Road classification comes free: the same width-and-surface test the game uses to draw the map chart
 sorts roads into highway, road, street and path, and each costs a little more per metre than the
 last. So a convoy prefers the motorway to the farm track running beside it without anything being
-hand-tagged, and still takes the track when it saves a kilometre. `/banditroads route` prints the
+hand-tagged, and still takes the track when it saves a kilometre. `/bandit debug roads route` prints the
 mix.
 
 Roads are on layer 19 (`ENVIRONMENT`), which in the whole of `Assembly-CSharp` **nothing else uses** -
@@ -92,7 +92,7 @@ that layer, so road decking is a surface a vehicle rests on rather than a hole i
 ## The column drives itself with the driver it already had
 
 Nothing about movement is reimplemented. Each vehicle is driven by the same `BanditVehicleDriver`
-that `/banditvgoto` uses and is simply handed the next route point as a destination - so the width
+that `/bandit drive` uses and is simply handed the next route point as a destination - so the width
 sweep, the reverse-out-of-trouble logic, the ride-height calibration and both server validation
 clamps keep working, and a convoy is exactly as good at getting round a fallen tree as a single
 vehicle is.
@@ -135,7 +135,7 @@ right.
 
 ## The column builds itself one vehicle at a time
 
-Nothing is on the ground when `/banditevent convoy` returns. The vehicles are handed to the convoy
+Nothing is on the ground when `/bandit convoy spawn` returns. The vehicles are handed to the convoy
 as factories and spawned from its own tick, leapfrogging:
 
 1. Put the head of the column on the start line and wait for its crew to climb in.
@@ -198,12 +198,12 @@ bridging covers the rest, so town and country are one graph.
 Sewers and docks are deliberately left out - Germany alone has sixty-odd sewer tiles that would
 otherwise wire a phantom road network under the streets, and a vehicle does not drive either.
 
-`/banditroads show` colours a junction (three or more links) red, so a town lights up as a lattice
+`/bandit debug roads show` colours a junction (three or more links) red, so a town lights up as a lattice
 of red crossroads joined by blue straights - which is the quickest confirmation the town was read.
 
 ## Roads are objects, and objects are obstacles
 
-The single worst driving bug on this map, and it took `/banditnavlog` to see it. Roads in Unturned
+The single worst driving bug on this map, and it took `/bandit debug navlog` to see it. Roads in Unturned
 are level *objects*, on the same layers as buildings: the road mesh is `Segment_n` on Environment,
 and the surface pieces are `Road_Line_n`, `Road_Tee_n`, `Road_Line_Cap_n` on Large. The clearance
 sweep looks for buildings on Large - so it was finding the road it was driving along. One convoy's

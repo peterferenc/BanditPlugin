@@ -9,13 +9,16 @@ using static BanditPlugin.Commands.BanditCommand;
 namespace BanditPlugin.Commands
 {
     /// <summary>
-    /// "/banditteam" - which side of the fight you are on.
+    /// "/bandit team" - which side of the fight you are on.
     ///
-    ///   /banditteam                what team you are on
-    ///   /banditteam list           every team, and how many are on it
-    ///   /banditteam join red       put yourself on a team
-    ///   /banditteam leave          off every team
-    ///   /banditteam Bob red        put someone else on a team
+    ///   /bandit team                  what team you are on
+    ///   /bandit team list             every team, and how many are on it
+    ///   /bandit team join red         put yourself on a team
+    ///   /bandit team leave            off every team
+    ///   /bandit team set Bob red      put someone else on a team
+    ///
+    /// "/bandit team red ..." with an order after it is not this command: it is an order to every
+    /// bandit on that team. The subcommand words above are what tell the two apart.
     ///
     /// A team is a real in-game group, so joining one is not a plugin bookkeeping entry: your name
     /// goes green for your teammates, you appear on their map, and on a server left at the vanilla
@@ -26,16 +29,15 @@ namespace BanditPlugin.Commands
     /// Which is what makes this a server command rather than a bandit one. Two players can join
     /// "red" and "blue" and fight each other with no bot on the map at all.
     /// </summary>
-    public class CommandBanditTeam : IRocketCommand
+    public static class BanditTeamCommand
     {
-        public AllowedCaller AllowedCaller => AllowedCaller.Both;
-        public string Name => "banditteam";
-        public string Help => "Shows, joins or leaves a team - the side bandits and players fight on.";
-        public string Syntax => "[list|join <team>|leave|<player> <team>]";
-        public List<string> Aliases => new List<string> { "team", "teams" };
-        public List<string> Permissions => new List<string> { "bandit.team" };
+        /// <summary>The words that make "/bandit team ..." this command rather than a target.</summary>
+        public static bool IsSubcommand(string word)
+        {
+            return Is(word, "list") || Is(word, "join") || Is(word, "leave") || Is(word, "set");
+        }
 
-        public void Execute(IRocketPlayer caller, string[] command)
+        public static void Execute(IRocketPlayer caller, string[] command)
         {
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
@@ -47,8 +49,7 @@ namespace BanditPlugin.Commands
 
             string first = command[0];
 
-            if (first.Equals("list", System.StringComparison.OrdinalIgnoreCase)
-                || first.Equals("teams", System.StringComparison.OrdinalIgnoreCase))
+            if (Is(first, "list"))
             {
                 ReplyTeams(caller, config);
                 return;
@@ -78,7 +79,7 @@ namespace BanditPlugin.Commands
                 if (!(caller is UnturnedPlayer joiner))
                 {
                     Reply(caller, "Joining a team is something a player does - run it in game, or "
-                        + "use /banditteam <player> <team>.", Color.red);
+                        + "use /bandit team set <player> <team>.", Color.red);
                     return;
                 }
 
@@ -86,19 +87,16 @@ namespace BanditPlugin.Commands
                 return;
             }
 
-            // "/banditteam <player> <team>" - the two-word form is what tells it apart from the
-            // subcommands above, all of which are one word or start with a keyword.
-            if (command.Length >= 2)
+            if (Is(first, "set") && command.Length >= 3)
             {
-                UnturnedPlayer target = UnturnedPlayer.FromName(first);
+                UnturnedPlayer target = UnturnedPlayer.FromName(command[1]);
                 if (target == null)
                 {
-                    Reply(caller, $"No player called '{first}' is on the server. "
-                        + "Did you mean /banditteam join <team>?", Color.red);
+                    Reply(caller, $"No player called '{command[1]}' is on the server.", Color.red);
                     return;
                 }
 
-                JoinTeam(caller, target.Player, target.CharacterName, command[1], config);
+                JoinTeam(caller, target.Player, target.CharacterName, command[2], config);
                 return;
             }
 
@@ -142,13 +140,13 @@ namespace BanditPlugin.Commands
         {
             if (!(caller is UnturnedPlayer callerPlayer))
             {
-                Reply(caller, "The console is on no team. Use /banditteam list.", Color.white);
+                Reply(caller, "The console is on no team. Use /bandit team list.", Color.white);
                 return;
             }
 
             string team = BanditTeams.Describe(callerPlayer.Player);
             Reply(caller, team == "none"
-                ? "You are on no team - every bandit treats you as a target. /banditteam join <team>."
+                ? "You are on no team - every bandit treats you as a target. /bandit team join <team>."
                 : $"You are on {team}.", Color.white);
         }
 
@@ -203,8 +201,8 @@ namespace BanditPlugin.Commands
 
         private static void ReplyUsage(IRocketPlayer caller, BanditConfiguration config)
         {
-            Reply(caller, "Usage: /banditteam  |  /banditteam list  |  /banditteam join <team>  |  "
-                + "/banditteam leave  |  /banditteam <player> <team>. "
+            Reply(caller, "Usage: /bandit team  |  team list  |  team join <team>  |  "
+                + "team leave  |  team set <player> <team>. "
                 + $"Teams: {string.Join(", ", BanditTeams.Names(config).ToArray())}.", Color.yellow);
         }
     }

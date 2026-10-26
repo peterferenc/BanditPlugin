@@ -39,6 +39,10 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public BanditProfile Profile { get; set; }
 
+        /// <summary>This bandit's number, shown after its name and used to give it orders by
+        /// number. Set by FakePlayerSpawner.</summary>
+        public int Id { get; set; }
+
         /// <summary>
         /// The squad this bandit belongs to, or null for one spawned on its own. Set by
         /// BanditSquad.Add. A lone bandit behaves exactly as it did before squads existed - every
@@ -46,7 +50,7 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public BanditSquad Squad { get; set; }
 
-        /// <summary>This bandit's class, for the squad's contact reports and /banditstatus.</summary>
+        /// <summary>This bandit's class, for the squad's contact reports and /bandit debug status.</summary>
         public string KitName => Profile != null ? Profile.KitName : "default";
 
         /// <summary>
@@ -87,7 +91,7 @@ namespace BanditPlugin.FakePlayer
         /// Weapons tight: the bot still acquires and tracks targets, and still takes cover from
         /// them, but never pulls the trigger or shoulders the rifle. Set at spawn from
         /// BanditConfiguration.HoldFireByDefault - on by default, so a fresh bandit is harmless
-        /// until told otherwise - and toggled afterwards by /bandit shoot start|stop.
+        /// until told otherwise - and toggled afterwards by /bandit shoot on|off.
         /// Dropping aim-down-sights matters as well as the trigger - vanilla
         /// PlayerStance refuses to sprint while aiming, so a bot told to hold fire can actually
         /// run somewhere.
@@ -98,7 +102,7 @@ namespace BanditPlugin.FakePlayer
         /// The brain asking for the rifle to come down this tick, currently only while sprinting to
         /// cover. Separate from HoldFire because that is a standing order you give a bandit, and
         /// this is a momentary consequence of what it is doing - clearing itself the moment it stops
-        /// running - so folding the two together would make /bandit shoot start look like it had
+        /// running - so folding the two together would make /bandit shoot on look like it had
         /// been silently undone.
         /// </summary>
         private bool WeaponDown => Brain != null && Brain.WantsWeaponDown;
@@ -111,7 +115,7 @@ namespace BanditPlugin.FakePlayer
         public bool IsGesturing => _gesturePhase != GesturePhase.None;
 
         /// <summary>True while the bot is holding the trigger down through a burst, for
-        /// /banditstatus - the only way to see from in-game that burst fire is really engaging.</summary>
+        /// /bandit debug status - the only way to see from in-game that burst fire is really engaging.</summary>
         public bool IsBursting => _burstTarget > 0;
 
         public float TurnSpeedDegreesPerSecond = 180f;
@@ -271,6 +275,13 @@ namespace BanditPlugin.FakePlayer
         private static readonly FieldInfo UseableGunAmmoField =
             typeof(UseableGun).GetField("ammo", BindingFlags.NonPublic | BindingFlags.Instance);
 
+        // Set after a shot from a pump or bolt action, and only cleared - the pump worked - while
+        // the player is NOT aiming down the sights: UseableGun's tick checks "!isAiming" before it
+        // rechambers, exactly as a person lowers the gun to work the action. A bandit holding its
+        // aim on the target therefore never rechambers, and a shotgun fires once and never again.
+        private static readonly FieldInfo UseableGunNeedsRechamberField =
+            typeof(UseableGun).GetField("needsRechamber", BindingFlags.NonPublic | BindingFlags.Instance);
+
         // The server does NOT raycast bullets itself. UseableGun.ballistics() applies damage from
         // hit reports the owning client sends (PlayerInput.sendRaycast(info, ERaycastInfoUsage.Gun));
         // with no client to send them, "if (!player.input.hasInputs()) break" discards every bullet,
@@ -338,7 +349,7 @@ namespace BanditPlugin.FakePlayer
         private bool IsSuppressing =>
             SuppressiveFire && _hasSuppressionPoint && Time.time - _lastSightingTime < SuppressionSeconds;
 
-        /// <summary>True while firing at a place rather than a person, for /banditstatus.</summary>
+        /// <summary>True while firing at a place rather than a person, for /bandit debug status.</summary>
         public bool IsSuppressingFire => IsSuppressing && _aimIntent == AimIntent.Suppression;
 
         private GesturePhase _gesturePhase;
@@ -601,7 +612,7 @@ namespace BanditPlugin.FakePlayer
 
                 if (!seated)
                 {
-                    // Thrown out by a death, a wreck or someone else's /banditv exit, rather than by
+                    // Thrown out by a death, a wreck or someone else's /bandit seat exit, rather than by
                     // the order that put it there. Standing orders that only mean anything from a
                     // seat go with the seat.
                     Driver.TrackNearestPlayer = false;
@@ -711,7 +722,7 @@ namespace BanditPlugin.FakePlayer
         ///
         /// A real player's corpse goes away when they press respawn. A bot has no client to press
         /// anything, so a killed bandit lies there indefinitely, still holding a player slot and
-        /// still counted by /banditclear - which is why killing one never cleared it. Returns true
+        /// still counted by /bandit clear all - which is why killing one never cleared it. Returns true
         /// while dead, so the caller stops building input packets for a corpse.
         /// </summary>
         private bool HandleDeath()
@@ -738,7 +749,7 @@ namespace BanditPlugin.FakePlayer
             float despawnDelay = BanditPlugin.Instance.Configuration.Instance.DespawnSecondsAfterDeath;
             if (despawnDelay < 0f)
             {
-                return true; // configured to leave the body for /banditclear
+                return true; // configured to leave the body for /bandit clear all
             }
 
             if (_diedAtTime <= 0f)
@@ -880,7 +891,7 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         private void ResolveAimPoint()
         {
-            // A gesture aimed at somebody outranks the combat target: the whole point of /banditwave
+            // A gesture aimed at somebody outranks the combat target: the whole point of /bandit wave
             // is that the bandit turns and waves at *you*, even if someone else is closer.
             if (IsGesturing && _gestureLookAt != null && _gestureLookAt.life != null && !_gestureLookAt.life.isDead)
             {
@@ -1209,7 +1220,9 @@ namespace BanditPlugin.FakePlayer
         private EAttackInputFlags DecideAttackInput()
         {
             // Before anything reads it, and in both modes, so the baseline never goes stale.
-            _burstRoundsFired += ObserveRoundsFired();
+            int fired = ObserveRoundsFired();
+            _burstRoundsFired += fired;
+            RoundsFired += fired;
 
             return BurstFire ? DecideBurstAttackInput() : DecideSingleShotAttackInput();
         }
@@ -1399,7 +1412,7 @@ namespace BanditPlugin.FakePlayer
             Vector3 origin = EyePosition;
             Vector3 direction = Quaternion.Euler(_currentPitch - 90f, _currentYaw, 0f) * Vector3.forward;
 
-            RaycastInfo info = DamageTool.raycast(new Ray(origin, direction), FireRange, RayMasks.DAMAGE_CLIENT, Self);
+            RaycastInfo info = RaycastPastSelf(origin, direction, FireRange);
             return IsBreakableCover(info, _aimPoint);
         }
 
@@ -1652,6 +1665,18 @@ namespace BanditPlugin.FakePlayer
         /// trigger produces. A reading that went up is a reload or an InfiniteAmmo top-up rather
         /// than negative shots, so it only re-baselines.
         /// </summary>
+        /// <summary>Every round this bandit has fired since it spawned, read off its own magazine.
+        /// For status and tests - "fired sixty rounds and hit nothing" and "never fired" are
+        /// different bugs.</summary>
+        public int RoundsFired { get; private set; }
+
+        /// <summary>Hit reports attached to fired rounds, how many of them were on a player, and
+        /// what the last one that was not hit instead - for tests, to tell "the bandit's own
+        /// raycast never reached anybody" from "the server threw the report away".</summary>
+        public int HitReportsSent { get; private set; }
+        public int HitReportsOnPlayers { get; private set; }
+        public string LastNonPlayerHit { get; private set; } = "none";
+
         private int ObserveRoundsFired()
         {
             byte[] state = Self.equipment != null ? Self.equipment.state : null;
@@ -1713,7 +1738,8 @@ namespace BanditPlugin.FakePlayer
         {
             bool wantsToAim = !HoldFire && !WeaponDown && !IsGesturing && IsGunReady()
                 && (_aimIntent == AimIntent.Target || _aimIntent == AimIntent.Suppression)
-                && IsTargetInRange();
+                && IsTargetInRange()
+                && !GunNeedsRechamber();
 
             if (wantsToAim && !_aimingActive)
             {
@@ -1728,6 +1754,17 @@ namespace BanditPlugin.FakePlayer
             }
 
             return EAttackInputFlags.None;
+        }
+
+        /// <summary>
+        /// Whether the gun in hand is waiting to be pumped or bolted, which vanilla only does while
+        /// the sights are down. See UseableGunNeedsRechamberField.
+        /// </summary>
+        private bool GunNeedsRechamber()
+        {
+            UseableGun gun = Self.equipment != null ? Self.equipment.useable as UseableGun : null;
+            return gun != null && UseableGunNeedsRechamberField != null
+                && (bool)UseableGunNeedsRechamberField.GetValue(gun);
         }
 
         /// <summary>
@@ -1805,6 +1842,12 @@ namespace BanditPlugin.FakePlayer
         /// The same visibility test against a bare position, for suppressive fire - which is aimed
         /// at a place that may well have nobody standing in it.
         /// </summary>
+        /// <summary>
+        /// Whether this bandit's eye has a clear line to a point - the same test it decides to
+        /// shoot by. For tests that want to know which parts of a body show, not only the head.
+        /// </summary>
+        public bool CanSeePoint(Vector3 point) => HasLineOfSightToPoint(point);
+
         private bool HasLineOfSightToPoint(Vector3 aimPoint)
         {
             return !RequireLineOfSight || HasLineOfSightFrom(EyePosition, aimPoint);
@@ -1977,7 +2020,7 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public bool IsReloading { get; private set; }
 
-        /// <summary>How much of that reload is left, for /banditstatus.</summary>
+        /// <summary>How much of that reload is left, for /bandit debug status.</summary>
         public float ReloadSecondsRemaining => Mathf.Max(0f, _reloadReadyTime - Time.time);
 
         private float _reloadReadyTime;
@@ -2182,7 +2225,7 @@ namespace BanditPlugin.FakePlayer
                 : BanditLoadoutApplier.PrimarySlotPage;
         }
 
-        /// <summary>What is actually in the bot's hands right now, for /banditstatus - the only way
+        /// <summary>What is actually in the bot's hands right now, for /bandit debug status - the only way
         /// to see from in-game whether a loadout applied and whether the sidearm swap is firing.</summary>
         public string EquippedWeaponName
         {
@@ -2255,10 +2298,20 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            RaycastInfo raycastInfo = DamageTool.raycast(new Ray(origin, direction), range, RayMasks.DAMAGE_CLIENT, Self);
+            RaycastInfo raycastInfo = RaycastPastSelf(origin, direction, range);
             if (Self.input.isRaycastInvalid(raycastInfo))
             {
                 return; // genuine miss - hit nothing at all
+            }
+
+            HitReportsSent += count;
+            if (raycastInfo.player != null)
+            {
+                HitReportsOnPlayers += count;
+            }
+            else if (raycastInfo.transform != null)
+            {
+                LastNonPlayerHit = $"{raycastInfo.transform.name} at {raycastInfo.distance:0.0}m";
             }
 
             packet.serversideInputs = new Queue<InputInfo>();
@@ -2276,6 +2329,40 @@ namespace BanditPlugin.FakePlayer
             {
                 PlayerInputInputsField.SetValue(Self.input, previousInputs);
             }
+        }
+
+        /// <summary>
+        /// The bullet's raycast, minus the bandit's own body.
+        ///
+        /// DamageTool.raycast is told who is firing, but that only stops it reporting the shooter
+        /// as the *player* hit - its hitbox colliders are still there to be hit. Standing, the eye
+        /// (1.75m) is clear of them. Crouched it is 1.2m, right on the surface of the bandit's own
+        /// skull, and prone it is among its shoulders - so every shot from either stance stopped
+        /// at 0.0m on the bandit's own head, reported a hit on nothing, and did no damage at all.
+        /// That is why a machinegunner, which crouches on contact, never hit anybody. Anything of
+        /// the shooter's own is stepped past and the ray continued from just beyond it.
+        /// </summary>
+        private RaycastInfo RaycastPastSelf(Vector3 origin, Vector3 direction, float range)
+        {
+            RaycastInfo info = DamageTool.raycast(new Ray(origin, direction), range, RayMasks.DAMAGE_CLIENT, Self);
+
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                if (info.transform == null || !info.transform.IsChildOf(Self.transform))
+                {
+                    return info;
+                }
+
+                float travelled = Vector3.Distance(origin, info.point) + 0.02f;
+                Vector3 resume = origin + direction * travelled;
+                RaycastInfo next = DamageTool.raycast(new Ray(resume, direction), range - travelled,
+                    RayMasks.DAMAGE_CLIENT, Self);
+                origin = resume;
+                range -= travelled;
+                info = next;
+            }
+
+            return info;
         }
 
         private void EnqueueInputPacket(EAttackInputFlags primaryAttack, EAttackInputFlags secondaryAttack)

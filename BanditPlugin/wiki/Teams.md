@@ -5,7 +5,7 @@ vanilla makes when players form one between themselves. `BanditTeams` derives a 
 team's name (FNV-1a, pushed into `0x40000000`-`0x7FFFFFFF` so it can never collide with the IDs
 vanilla hands out to player-made groups, which count up from 1) and creates it through
 `GroupManager.getOrAddGroup`. Bandits are put on one at spawn with
-`PlayerQuests.ServerAssignToGroup`, players with `/banditteam join`.
+`PlayerQuests.ServerAssignToGroup`, players with `/bandit team join`.
 
 Deriving the ID from the name rather than generating one is what makes a team durable: the same
 name is the same group after a restart, and a player's group is saved with their character

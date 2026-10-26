@@ -33,6 +33,13 @@ namespace BanditPlugin.FakePlayer
 
         public BanditState State { get; private set; } = BanditState.Idle;
 
+        /// <summary>
+        /// Why an Engage is moving the bandit: true when it is a squad member hunting for an angle
+        /// after a dry spell, false when its kit closes to fighting range. Only meaningful while
+        /// State is Engage. For status lines and tests - the two look identical from outside.
+        /// </summary>
+        public bool HuntingAngle { get; private set; }
+
         /// <summary>World-space unit vector on the XZ plane, or zero to stand still.</summary>
         public Vector3 MoveDirection { get; private set; }
 
@@ -75,7 +82,7 @@ namespace BanditPlugin.FakePlayer
 
         /// <summary>
         /// Whether this bandit looks for cover at all. Off at spawn by default, so a fresh bandit
-        /// stands where you put it; /bandit cover start turns it on. Per-bandit rather than a
+        /// stands where you put it; /bandit cover on turns it on. Per-bandit rather than a
         /// config-wide switch because it is a standing order you give in the field.
         /// </summary>
         public bool CoverEnabled { get; private set; }
@@ -96,7 +103,14 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public BanditStance StanceOrder { get; private set; } = BanditStance.Free;
 
-        /// <summary>Whether the bandit is lying down on orders. Kept for /banditprone and status.</summary>
+        /// <summary>
+        /// Whether this bandit may run when it travels - a goto or a patrol leg. AllowSprint in the
+        /// configuration decides for everyone; this turns it off for one bandit, so a test can have
+        /// a target walk rather than run.
+        /// </summary>
+        public bool TravelSprintEnabled { get; set; } = true;
+
+        /// <summary>Whether the bandit is lying down on orders. Kept for /bandit stance prone and status.</summary>
         public bool ProneEnabled => StanceOrder == BanditStance.Prone;
 
         public BanditNavigator Navigator { get; }
@@ -167,12 +181,39 @@ namespace BanditPlugin.FakePlayer
         private float _nextCoverSearchTime;
         private float _nextCoverValidationTime;
 
+        /// <summary>Where the threat was when the current cover was chosen or last confirmed.
+        /// See ReleaseCoverIfStale.</summary>
+        private Vector3 _coverThreatEye;
+        private float _coverChosenTime = float.MinValue;
+
+        /// <summary>
+        /// The enemy this bandit last saw, and how fast and which way they are moving - kept up
+        /// while it can see them and, with CoverTracksThreat, while it hides from them. See
+        /// TrackThreat and PredictedThreatEye.
+        /// </summary>
+        private Player _threatPlayer;
+        private Vector3 _threatVelocity;
+        private Vector3 _threatSample;
+        private float _threatSampleTime = float.MinValue;
+        private float _nextAnticipateTime;
+
+        /// <summary>
+        /// How often the spot a bandit holds is checked, in seconds. Four times a second, where it
+        /// used to be once: the check is a dozen rays, and a second was long enough for an enemy
+        /// walking round the cover to see the bandit sitting in it. Mafia III re-scores the spot
+        /// it holds at 5Hz.
+        /// </summary>
+        private const float CoverValidationSeconds = 0.25f;
+
+        /// <summary>How often a bandit whose cover is about to stop working looks for the next one.</summary>
+        private const float AnticipateSeconds = 1f;
+
         private float _proneSettleTime;
 
         /// <summary>
         /// Prone because the squad is in contact, as opposed to because someone ordered it. Kept
         /// apart from ProneEnabled so that contact ending stands the bandit up without wiping out
-        /// a /banditprone a person gave it.
+        /// a /bandit stance prone a person gave it.
         /// </summary>
         private BanditStance _contactStance;
 
@@ -180,6 +221,44 @@ namespace BanditPlugin.FakePlayer
         private bool _stanceKeepsLineOfSight;
 
         private float _repositionUntil;
+
+        /// <summary>
+        /// How far from the threat this bandit fights the current contact from - set when the
+        /// contact starts. See the contact bookkeeping in Tick, and CoverMaxAdvance.
+        /// </summary>
+        private float _holdDistance = float.MaxValue;
+
+        /// <summary>How close counts as having reached a cover spot. See TryTakeCoverFrom.</summary>
+        private const float CoverArriveRadius = 0.5f;
+
+        /// <summary>
+        /// For a spot with no margin - behind a pole, a trunk - which only hides a bandit standing
+        /// right on it; and for the short step out to a peek and back.
+        ///
+        /// Not tighter than this. The brain steers once per input packet, every 80ms, and a walking
+        /// bandit covers about 0.35m in that time - so a radius below that can be stepped straight
+        /// over without the bandit ever being inside it, and it turns round, overshoots again, and
+        /// hunts about its own spot. 0.25 had bandits pacing up to two metres either side of cover.
+        /// </summary>
+        private const float TightCoverArriveRadius = 0.4f;
+
+        /// <summary>
+        /// Where the current push for an angle is going when the threat is already within range:
+        /// a step to one side, not a walk at the gun. Null when the push is closing to firing range
+        /// instead. See MaybeReposition.
+        /// </summary>
+        private Vector3? _flankPoint;
+
+        /// <summary>Which side the next sidestep goes to - alternated, so a bandit that has to
+        /// look for an angle twice tries both sides of whatever is in the way.</summary>
+        private float _flankSide = 1f;
+
+        /// <summary>How far a sidestep for an angle goes.</summary>
+        private const float FlankStepMetres = 10f;
+
+        /// <summary>A push to get into range stops this far inside the kit's firing range, so it
+        /// arrives with a margin rather than on the very edge.</summary>
+        private const float InRangeFraction = 0.9f;
         private float _nextRepositionTime;
 
         /// <summary>
@@ -226,14 +305,14 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// "/bandit cover start|stop".
+        /// "/bandit cover on|off".
         ///
         /// Starting clears the search cooldown so the bot looks on the very next tick instead of
         /// waiting out CoverSearchIntervalSeconds - the command should visibly do something.
         ///
         /// Stopping means "stop where you are and stay there", so it drops the cover spot *and*
         /// every other standing order. Dropping only the cover spot would leave a bandit that had
-        /// been walking to cover carrying on to whatever patrol or /banditgoto it had before, which
+        /// been walking to cover carrying on to whatever patrol or /bandit goto it had before, which
         /// is the opposite of holding position.
         /// </summary>
         public void SetCoverEnabled(bool enabled)
@@ -246,7 +325,7 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            DropCover();
+            DropCover("cover switched off");
             _peeking = false;
             _coverBreached = false;
             _coverPhaseUntil = 0f;
@@ -254,7 +333,7 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// "/bandit peek start|stop". Only has any visible effect while the bandit is in cover -
+        /// "/bandit peek on|off". Only has any visible effect while the bandit is in cover -
         /// peeking is a thing you do from behind something.
         /// </summary>
         public void SetPeekEnabled(bool enabled)
@@ -263,7 +342,7 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// "/banditprone". Purely a stance: it deliberately leaves patrol, cover and any /banditgoto
+        /// "/bandit stance prone". Purely a stance: it deliberately leaves patrol, cover and any /bandit goto
         /// order alone, so a bandit told to lie down crawls its route rather than stopping. What it
         /// cannot do is beat vanilla's own rules - a bot in shallow water is forced upright by
         /// PlayerStance regardless of what we send.
@@ -348,7 +427,7 @@ namespace BanditPlugin.FakePlayer
         /// Get out of the way, now, in this world direction.
         ///
         /// Ordered by a squadmate driving a vehicle whose path runs over this bandit. It outranks
-        /// everything - cover, patrol, the fight it is in, a /banditgoto, even MovementEnabled being
+        /// everything - cover, patrol, the fight it is in, a /bandit goto, even MovementEnabled being
         /// off - because everything else it could be doing is survivable and being run over by its
         /// own side is not. A bandit lying prone in cover stands up and sprints out of the lane, and
         /// goes back to what it was doing a second later.
@@ -409,7 +488,7 @@ namespace BanditPlugin.FakePlayer
             {
                 // Still honour the stance. MovementEnabled off means "don't walk anywhere", and a
                 // bandit lying still is exactly as stationary as one standing still - so refusing
-                // /banditprone here would read as the command being broken.
+                // /bandit stance prone here would read as the command being broken.
                 State = BanditState.Idle;
                 ApplyProneOrder();
                 return;
@@ -419,7 +498,10 @@ namespace BanditPlugin.FakePlayer
             {
                 _lastKnownTargetPosition = target.transform.position;
                 _lastSawTargetTime = Time.time;
+                _threatPlayer = target;
             }
+
+            TrackThreat(target);
 
             // Where the threat is, from whatever source knows - this bandit's own eyes, its squad's
             // shared contact, or the direction the last bullet came from. Working it out once here
@@ -434,6 +516,13 @@ namespace BanditPlugin.FakePlayer
                 if (hasThreat)
                 {
                     _contactSinceTime = Time.time;
+
+                    // The distance this fight is held at: where the bandit was when it started,
+                    // or its own firing range if it started further out than it can shoot. Cover
+                    // moves are measured against this rather than against wherever the bandit
+                    // happens to be, so a run of short moves cannot add up to a charge.
+                    _holdDistance = Mathf.Min(FlatDistance(_self.transform.position, threatEye),
+                        _controller.FireRange * InRangeFraction);
                 }
             }
 
@@ -452,12 +541,12 @@ namespace BanditPlugin.FakePlayer
                 // acquires players it has line of sight to, and ducking breaks that line by
                 // design. Releasing immediately would make the bot stand up and walk off
                 // mid-firefight.
-                DropCover();
+                DropCover("lost the threat");
             }
 
             // The machinegunner's posture, and the reason its kit turns cover off: it answers
             // contact by lying down where it is rather than going to look for a rock. Held as a
-            // separate flag from the /banditprone standing order so that dropping out of contact
+            // separate flag from the /bandit stance prone standing order so that dropping out of contact
             // stands it back up without countermanding an order a person gave it.
             //
             // Only when it can still see out from down there. Prone drops the aim transform to
@@ -553,7 +642,7 @@ namespace BanditPlugin.FakePlayer
         /// <summary>
         /// Combat's only say in where the feet go. Everything else the bot does while fighting -
         /// aiming, firing, tracking - happens in the controller and leaves movement alone, so a
-        /// patrol or a /banditgoto keeps running through a firefight rather than being suspended
+        /// patrol or a /bandit goto keeps running through a firefight rather than being suspended
         /// by it.
         /// </summary>
         private void MaybeTakeCover(Vector3 threatEye, Player visibleTarget)
@@ -575,15 +664,30 @@ namespace BanditPlugin.FakePlayer
             // exactly the state a rifleman is in when the machinegunner has just been shot at from
             // a direction the rifleman has a wall in front of. Waiting to be shot at personally
             // before moving is how a squad gets taken apart one at a time.
-            if (!IsExposedTo(visibleTarget) && !SquadInContact)
+            // Straight after giving up a spot the search runs regardless: the spot was dropped
+            // because something changed, and waiting to be shot at before finding another is how
+            // a bandit ends up standing beside its old cover with none.
+            bool justDropped = Time.time - LastCoverDropTime < 2f;
+            if (!IsExposedTo(visibleTarget) && !SquadInContact && !justDropped)
             {
                 return;
             }
 
             _nextCoverSearchTime = Time.time + _config.CoverSearchIntervalSeconds;
 
-            TryTakeCoverFrom(threatEye, out _);
+            // An empty search straight after a drop is retried within the half second, not the
+            // usual few. The threat that spoiled the spot is usually still moving round it, and
+            // the shadow it casts settles a step or two later: a bandit made to wait out the full
+            // interval stood in the open beside the wall for three seconds, looking at the
+            // spot that would have hidden it. Only while just dropped, so one with no cover in an
+            // open field does not search on every other tick.
+            if (!TryTakeCoverFrom(threatEye, out _) && justDropped)
+            {
+                _nextCoverSearchTime = Time.time + JustDroppedRetrySeconds;
+            }
         }
+
+        private const float JustDroppedRetrySeconds = 0.5f;
 
         /// <summary>
         /// Where the threat is, in priority order: someone this bandit can see, then whatever its
@@ -617,6 +721,18 @@ namespace BanditPlugin.FakePlayer
             if (_lastThreatPoint.HasValue && Time.time - _lastDamagedTime < DamageMemorySeconds)
             {
                 threatEye = _lastThreatPoint.Value + Vector3.up * VisibilityEyeHeight;
+                return true;
+            }
+
+            // In cover, the enemy it is hiding from is still out there - not seeing them is what
+            // cover is for. Without this a lone bandit forgot the threat a few seconds after it
+            // ducked, dropped the cover it had just reached, and stood up into the enemy it had
+            // been hiding from. Remembered from the last sighting or from choosing the spot,
+            // whichever is later, so a peek that sees them keeps the fight going indefinitely and
+            // one that never does gives up after CoverThreatMemorySeconds.
+            if (_hasCover && Time.time - Mathf.Max(_lastSawTargetTime, _coverChosenTime) < _config.CoverThreatMemorySeconds)
+            {
+                threatEye = IsTrackingUnseenThreat ? EyeOf(_threatPlayer) : _coverThreatEye;
                 return true;
             }
 
@@ -723,7 +839,7 @@ namespace BanditPlugin.FakePlayer
 
         /// <summary>
         /// Runs a cover search and, if it finds somewhere, commits the bot to walking there.
-        /// Public so /banditcover can trigger one on demand and report what the search saw.
+        /// Public so /bandit debug cover can trigger one on demand and report what the search saw.
         /// </summary>
         public bool TryTakeCoverFrom(Vector3 threatEye, out BanditCoverSearchStats stats)
         {
@@ -731,7 +847,7 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <inheritdoc cref="TryTakeCoverFrom(Vector3,out BanditCoverSearchStats)"/>
-        /// <param name="reports">Per-candidate verdicts for /banditcover to draw; null for live bots.</param>
+        /// <param name="reports">Per-candidate verdicts for /bandit debug cover to draw; null for live bots.</param>
         public bool TryTakeCoverFrom(Vector3 threatEye, out BanditCoverSearchStats stats,
             List<BanditCoverCandidateReport> reports)
         {
@@ -756,7 +872,16 @@ namespace BanditPlugin.FakePlayer
                 // The squad's own separation, so a sniper pair spreads along a ridge while a rifle
                 // section stays behind one wall. Falls back to the global for a lone bandit, which
                 // has no claims to steer around anyway.
-                squad != null ? squad.CoverSeparation : _config.SquadCoverSeparation);
+                squad != null ? squad.CoverSeparation : _config.SquadCoverSeparation,
+                // Cover is somewhere to fight from, not a way forward - except for a kit whose
+                // fighting is closing in.
+                // Measured from the fixed hold distance, not from where the bandit is now: "no
+                // more than 8m closer than I am" is still a ratchet, 8m a search. Negative when the
+                // bandit is already past it, which leaves only spots that give ground back.
+                _profile.AdvanceOnTarget
+                    ? float.PositiveInfinity
+                    : FlatDistance(_self.transform.position, threatEye) - _holdDistance + _config.CoverMaxAdvance,
+                PredictedThreatEye(threatEye));
 
             if (!found)
             {
@@ -764,6 +889,14 @@ namespace BanditPlugin.FakePlayer
             }
 
             _coverSpot = spot;
+            _coverThreatEye = threatEye;
+            _coverChosenTime = Time.time;
+
+            // Cover ends any push for an angle that was under way - otherwise the push, which
+            // outranks cover, runs out its clock first and leaves the navigator pointed at the
+            // enemy for TickCover to carry on walking to.
+            _repositionUntil = 0f;
+            _flankPoint = null;
             _hasCover = true;
             _coverBreached = false;
             _peeking = false;
@@ -773,7 +906,12 @@ namespace BanditPlugin.FakePlayer
             // in which a squadmate searching would otherwise pick the same spot.
             squad?.ClaimCover(_controller, spot.Position);
 
-            Navigator.SetDestination(spot.Position);
+            // Tight, because the spot was tested as hidden at that exact point and the navigator's
+            // default 2m arrival leaves a bandit standing in the open beside a post or a tree trunk
+            // that only hides somebody right behind it. Not as tight as the 0.35 of a peek step,
+            // though: a spot tucked into the hollow of a sandbag arc is one the body cannot quite
+            // reach, and a bandit that stops 0.4m short never counts as arrived.
+            Navigator.SetDestination(spot.Position, spot.HasMargin ? CoverArriveRadius : TightCoverArriveRadius);
             return true;
         }
 
@@ -782,14 +920,27 @@ namespace BanditPlugin.FakePlayer
         /// drops cover goes through here - a claim left behind would keep a squadmate away from a
         /// piece of cover nobody is using.
         /// </summary>
-        private void DropCover()
+        private void DropCover(string reason)
         {
+            if (_hasCover)
+            {
+                LastCoverDrop = reason;
+                LastCoverDropTime = Time.time;
+            }
+
             _hasCover = false;
             _controller.Squad?.ReleaseCover(_controller);
         }
 
-        /// <summary>The most recent cover spot the bot committed to, for /banditcover to report.</summary>
+        /// <summary>The most recent cover spot the bot committed to, for /bandit debug cover to report.</summary>
         public BanditCoverSpot CurrentCover => _coverSpot;
+
+        /// <summary>Why this bandit last gave up a cover spot, and when - for status and tests.</summary>
+        public string LastCoverDrop { get; private set; } = "never";
+        public float LastCoverDropTime { get; private set; } = float.MinValue;
+
+        /// <summary>Whether it is in the "show yourself and shoot" half of the cover cycle.</summary>
+        public bool IsPeeking => _hasCover && _peeking;
         public bool HasCover => _hasCover;
 
         /// <summary>
@@ -803,10 +954,10 @@ namespace BanditPlugin.FakePlayer
             // and hold it, having satisfied a rule that was never meant to outrank its own class.
             // The same branch carries a bandit that has given up on its position and is moving to
             // find an angle - see MaybeReposition.
-            if (TryGetAdvanceDestination(out Vector3 advanceTo))
+            if (TryGetAdvanceDestination(out Vector3 advanceTo, out Vector3 threat, out float stopWithin))
             {
                 State = BanditState.Engage;
-                TickAdvance(deltaTime, advanceTo);
+                TickAdvance(deltaTime, advanceTo, threat, stopWithin);
                 return;
             }
 
@@ -854,11 +1005,12 @@ namespace BanditPlugin.FakePlayer
         /// ever advance on somebody it was personally looking at, and the squad still knows where
         /// you went.
         /// </summary>
-        private bool TryGetAdvanceDestination(out Vector3 destination)
+        private bool TryGetAdvanceDestination(out Vector3 destination, out Vector3 threat, out float stopWithin)
         {
             destination = Vector3.zero;
+            stopWithin = 0f;
 
-            if (!TryResolveThreatPosition(out Vector3 threat))
+            if (!TryResolveThreatPosition(out threat))
             {
                 return false;
             }
@@ -879,7 +1031,27 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
+            HuntingAngle = !closingIn;
+
+            if (closingIn)
+            {
+                destination = threat;
+                stopWithin = _profile.PreferredEngagementRange;
+                return true;
+            }
+
+            // Hunting an angle. Already in range, it steps aside to see past whatever is in the
+            // way; out of range, it closes - but only to its own firing range, not on to the
+            // preferred distance a kit that closes in would stop at.
+            if (_flankPoint.HasValue)
+            {
+                destination = _flankPoint.Value;
+                stopWithin = 0f;
+                return true;
+            }
+
             destination = threat;
+            stopWithin = _controller.FireRange * InRangeFraction;
             return true;
         }
 
@@ -900,6 +1072,15 @@ namespace BanditPlugin.FakePlayer
         private void MaybeReposition(bool hasThreat)
         {
             if (!hasThreat || !SquadInContact || PrefersToHide)
+            {
+                return;
+            }
+
+            // Never from cover. A bandit in cover is out of sight on purpose for half of every
+            // peek cycle, and treating that as "this position gives me nothing" was what dragged
+            // whole squads out of good cover and forward. Whether the cover still works is decided
+            // by what the enemy does - see ReleaseCoverIfStale - not by a clock.
+            if (_hasCover)
             {
                 return;
             }
@@ -937,36 +1118,63 @@ namespace BanditPlugin.FakePlayer
             _nextRepositionTime = Time.time + RepositionMoveSeconds + idleSeconds;
             _repositionUntil = Time.time + RepositionMoveSeconds;
 
+            // Which way the push goes is decided once, here, so it does not swing about as the
+            // threat moves. In range there is nothing to gain by getting closer - the shot is
+            // blocked, not too long - so it goes sideways.
+            _flankPoint = null;
+            if (TryResolveThreatPosition(out Vector3 threatNow)
+                && FlatDistance(_self.transform.position, threatNow) <= _controller.FireRange * InRangeFraction)
+            {
+                Vector3 toThreat = threatNow - _self.transform.position;
+                toThreat.y = 0f;
+                Vector3 side = Vector3.Cross(Vector3.up, toThreat.normalized) * _flankSide;
+                _flankPoint = _self.transform.position + side * FlankStepMetres;
+                _flankSide = -_flankSide;
+            }
+
             if (_hasCover)
             {
                 // The claim goes with the spot, so the search that follows - and every squadmate's
                 // - is free to consider it again from the new angle.
-                DropCover();
+                DropCover("repositioning");
                 _nextCoverSearchTime = Time.time;
             }
         }
 
         /// <summary>
-        /// Walks toward a place the enemy is believed to be, stopping at this class's preferred
-        /// fighting range. Takes a position rather than a player, because the thing being walked at
-        /// is usually a report from a squadmate rather than somebody in view.
+        /// Walks to <paramref name="destination"/> - the enemy's reported position, or a sidestep
+        /// beside the bandit - stopping once it is within <paramref name="stopWithin"/> of the
+        /// threat. Takes positions rather than a player, because the thing being walked at is
+        /// usually a report from a squadmate rather than somebody in view.
         /// </summary>
-        private void TickAdvance(float deltaTime, Vector3 threatPosition)
+        private void TickAdvance(float deltaTime, Vector3 destination, Vector3 threatPosition, float stopWithin)
         {
-            if (FlatDistance(_self.transform.position, threatPosition) <= _profile.PreferredEngagementRange)
+            if (FlatDistance(_self.transform.position, threatPosition) <= stopWithin)
             {
                 Navigator.Stop();
                 return;
             }
 
+            // A sidestep is finished when it gets there; whatever comes next is decided afresh.
+            if (Navigator.ConsumeArrived() || Navigator.ConsumeGaveUp())
+            {
+                if (_flankPoint.HasValue)
+                {
+                    _flankPoint = null;
+                    _repositionUntil = Time.time;
+                    Navigator.Stop();
+                    return;
+                }
+            }
+
             // Re-issuing a destination resets the navigator's path and stuck tracking, so it only
-            // happens when the threat has actually moved somewhere else.
+            // happens when the destination has actually moved somewhere else.
             if (!Navigator.HasDestination
                 || (Time.time >= _nextAdvanceRepathTime
-                    && FlatDistance(Navigator.Destination, threatPosition) > 3f))
+                    && FlatDistance(Navigator.Destination, destination) > 3f))
             {
                 _nextAdvanceRepathTime = Time.time + 1f;
-                Navigator.SetDestination(threatPosition);
+                Navigator.SetDestination(destination);
             }
 
             Navigator.Tick(deltaTime);
@@ -978,7 +1186,7 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Walks a /banditgoto order to completion, in or out of combat. Arriving or getting
+        /// Walks a /bandit goto order to completion, in or out of combat. Arriving or getting
         /// wedged clears the order, which drops the bot back into whatever it was doing before.
         /// </summary>
         private void TickCommandedMove(float deltaTime)
@@ -1002,10 +1210,22 @@ namespace BanditPlugin.FakePlayer
 
         private void TickCover(float deltaTime)
         {
+            // TickCover walks wherever the navigator is already going, so it has to be going to
+            // the cover. Anything else - an advance, a goto, a patrol leg - was set by another
+            // branch before this one took over, and following it is how a bandit "taking cover"
+            // walked 97m straight at the enemy.
+            if (Navigator.HasDestination
+                && FlatDistance(Navigator.Destination, _coverSpot.Position) > 0.5f
+                && FlatDistance(Navigator.Destination, _coverSpot.PeekPosition) > 0.5f)
+            {
+                Navigator.SetDestination(_peeking && _coverSpot.CanPeek ? _coverSpot.PeekPosition : _coverSpot.Position,
+                    _coverSpot.HasMargin ? CoverArriveRadius : TightCoverArriveRadius);
+            }
+
             if (Navigator.ConsumeGaveUp())
             {
                 // Couldn't get there - forget this spot and let the next search pick another.
-                DropCover();
+                DropCover("could not reach the spot");
                 return;
             }
 
@@ -1022,7 +1242,7 @@ namespace BanditPlugin.FakePlayer
             }
 
             // Turning peeking off mid-peek pulls the bot straight back in rather than letting the
-            // current peek phase run out, so "/bandit peek stop" reads as immediate instead of
+            // current peek phase run out, so "/bandit peek off" reads as immediate instead of
             // leaving it stood in the open for the rest of CoverPeekSeconds.
             if (!PeekEnabled && _peeking)
             {
@@ -1030,7 +1250,7 @@ namespace BanditPlugin.FakePlayer
                 _coverPhaseUntil = 0f;
                 if (!_coverSpot.RequiresCrouch && _coverSpot.CanPeek)
                 {
-                    Navigator.SetDestination(_coverSpot.Position, 0.35f);
+                    Navigator.SetDestination(_coverSpot.Position, TightCoverArriveRadius);
                 }
             }
 
@@ -1071,7 +1291,7 @@ namespace BanditPlugin.FakePlayer
                     // it done before the bot moved.
                     if (!_coverSpot.RequiresCrouch && _coverSpot.CanPeek)
                     {
-                        Navigator.SetDestination(_peeking ? _coverSpot.PeekPosition : _coverSpot.Position, 0.35f);
+                        Navigator.SetDestination(_peeking ? _coverSpot.PeekPosition : _coverSpot.Position, TightCoverArriveRadius);
                     }
                 }
             }
@@ -1133,11 +1353,11 @@ namespace BanditPlugin.FakePlayer
                 // has just abandoned while walking onto the one it moved to.
                 _controller.Squad?.ClaimCover(_controller, deeper.Position);
 
-                Navigator.SetDestination(deeper.Position, 0.35f);
+                Navigator.SetDestination(deeper.Position, TightCoverArriveRadius);
                 return;
             }
 
-            DropCover();
+            DropCover("hit in cover, nowhere deeper");
             _nextCoverSearchTime = Time.time; // search again immediately rather than in three seconds
         }
 
@@ -1170,10 +1390,17 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Drops the current cover spot once it stops being cover - the shooter has moved, or the
-        /// bot has been pushed off the spot.
+        /// Keeps the current cover for exactly as long as it still works, and no longer.
         ///
-        /// Two things here are easy to get wrong and were:
+        /// Terrain does not move, so once a spot has been chosen against where the enemy is, the
+        /// only things that can spoil it are the enemy moving and a vehicle moving. Every second
+        /// the spot is checked to still hide the bandit - cheap, and the one check that notices a
+        /// vehicle that was the cover driving away. Beyond that nothing is re-decided until the
+        /// enemy has actually moved: then the question is whether the bandit can still fight from
+        /// here, and only if it cannot does it go looking for somewhere else - once, against where
+        /// the enemy is now. A bandit whose enemy stands still stays in the same cover all fight.
+        ///
+        /// Two things in the hiding check are easy to get wrong and were:
         ///
         /// The stance has to match what the bot is actually doing. This used to always test the
         /// crouching silhouette, which is what let a bandit in "hard cover" stand in full view
@@ -1202,7 +1429,7 @@ namespace BanditPlugin.FakePlayer
                 return;
             }
 
-            _nextCoverValidationTime = Time.time + 1f;
+            _nextCoverValidationTime = Time.time + CoverValidationSeconds;
 
             bool crouching = _coverSpot.RequiresCrouch;
             Vector3 checkPosition = Navigator.HasDestination
@@ -1211,8 +1438,75 @@ namespace BanditPlugin.FakePlayer
 
             if (!BanditCoverFinder.IsCoveredFrom(checkPosition, threatEye, crouching))
             {
-                DropCover();
+                // Two different things fail this check, and only one of them is the spot's fault.
+                // If the spot itself still hides, the bandit has simply ended up beside it - short
+                // of it on arrival, or back from a peek a few tenths wide - and the answer is to
+                // step back onto it, not to throw away cover that works.
+                //
+                // Already as close as a step can put it is different: inside the arrival radius the
+                // step is over before it starts, and the bandit would sit in sight of the enemy
+                // beside a spot that only hides someone standing exactly on it. So it looks for
+                // somewhere with more room - once a second, not on every check - and keeps the spot
+                // if there is nothing better. Dropping it instead left a bandit back from a peek,
+                // hidden where it stood, with no cover and so no reason to peek again.
+                if (checkPosition != _coverSpot.Position
+                    && BanditCoverFinder.IsCoveredFrom(_coverSpot.Position, threatEye, crouching))
+                {
+                    if (FlatDistance(checkPosition, _coverSpot.Position) <= TightCoverArriveRadius
+                        && Time.time >= _nextAnticipateTime)
+                    {
+                        _nextAnticipateTime = Time.time + AnticipateSeconds;
+                        if (TryTakeCoverFrom(threatEye, out _))
+                        {
+                            return;
+                        }
+                    }
+
+                    Navigator.SetDestination(_coverSpot.Position, TightCoverArriveRadius);
+                    return;
+                }
+
+                // Somewhere else, now - and the spot is only let go once there is somewhere to go
+                // instead. A bandit that dropped it first stood in the open beside its old cover
+                // for however long the next search took.
+                if (TryTakeCoverFrom(threatEye, out _))
+                {
+                    return;
+                }
+
+                DropCover("the spot no longer hides it");
+                _nextCoverSearchTime = Time.time;
+                return;
             }
+
+            // Hidden now, but not from where the enemy is heading: move before they get there, not
+            // after. The search holds candidates - and where the bandit stands - to the same
+            // prediction, so it only moves for a spot that will still hide it, and stays put when
+            // there is none.
+            Vector3? predicted = PredictedThreatEye(threatEye);
+            if (predicted.HasValue && Time.time >= _nextAnticipateTime
+                && !BanditCoverFinder.IsCoveredFrom(_coverSpot.Position, predicted.Value, crouching))
+            {
+                _nextAnticipateTime = Time.time + AnticipateSeconds;
+                TryTakeCoverFrom(threatEye, out _);
+                return;
+            }
+
+            if (FlatDistance(threatEye, _coverThreatEye) < _config.CoverThreatShiftMetres)
+            {
+                return; // the enemy has not moved; nothing about this spot can have changed
+            }
+
+            if (PeekEnabled && !BanditCoverFinder.CanFireFrom(_coverSpot, threatEye))
+            {
+                // Still hidden, but no longer a fighting position: the enemy has moved to where
+                // this spot has no angle on them. Find one that does, against where they are now.
+                DropCover("no angle after the enemy moved");
+                _nextCoverSearchTime = Time.time;
+                return;
+            }
+
+            _coverThreatEye = threatEye;
         }
 
         /// <summary>
@@ -1225,6 +1519,71 @@ namespace BanditPlugin.FakePlayer
             return TryResolveThreatEye(_controller.CurrentTarget, out Vector3 threatEye)
                 ? threatEye
                 : _lastKnownTargetPosition + Vector3.up * VisibilityEyeHeight;
+        }
+
+        /// <summary>
+        /// Whether this bandit is following an enemy it cannot see - hiding from them, within the
+        /// cover memory, with CoverTracksThreat on. See BanditConfiguration.CoverTracksThreat.
+        /// </summary>
+        private bool IsTrackingUnseenThreat =>
+            _config.CoverTracksThreat
+            && _hasCover
+            && _threatPlayer != null
+            && _threatPlayer.life != null
+            && !_threatPlayer.life.isDead
+            && Time.time - Mathf.Max(_lastSawTargetTime, _coverChosenTime) < _config.CoverThreatMemorySeconds;
+
+        /// <summary>
+        /// Keeps the enemy's velocity up to date: sampled every tenth of a second and smoothed, so
+        /// a single jittery packet does not swing the prediction about. Only while the bandit can
+        /// see them, or is tracking them from cover; otherwise it has no business knowing.
+        /// </summary>
+        private void TrackThreat(Player visibleTarget)
+        {
+            Player tracked = visibleTarget != null ? visibleTarget : IsTrackingUnseenThreat ? _threatPlayer : null;
+            if (tracked == null || tracked.life == null || tracked.life.isDead)
+            {
+                _threatVelocity = Vector3.zero;
+                _threatSampleTime = float.MinValue;
+                return;
+            }
+
+            Vector3 position = tracked.transform.position;
+            float elapsed = Time.time - _threatSampleTime;
+            if (elapsed > 1f)
+            {
+                _threatSample = position; // first sample, or a stale one: start again
+                _threatSampleTime = Time.time;
+                _threatVelocity = Vector3.zero;
+                return;
+            }
+
+            if (elapsed < 0.1f)
+            {
+                return;
+            }
+
+            Vector3 velocity = (position - _threatSample) / elapsed;
+            velocity.y = 0f;
+            _threatVelocity = Vector3.Lerp(_threatVelocity, velocity, 0.5f);
+            _threatSample = position;
+            _threatSampleTime = Time.time;
+        }
+
+        /// <summary>
+        /// Where the enemy's eye will be in CoverPredictSeconds if they keep going the way they
+        /// are, or null if they are standing still. Killzone kept its cover tables pessimistic for
+        /// the same reason - "a limited ability to anticipate threat movement" - and Quake 3's bots
+        /// aim where an enemy will reappear rather than where it vanished.
+        /// </summary>
+        private Vector3? PredictedThreatEye(Vector3 threatEye)
+        {
+            if (_config.CoverPredictSeconds <= 0f || _threatVelocity.sqrMagnitude < 0.25f)
+            {
+                return null;
+            }
+
+            return threatEye + Vector3.ClampMagnitude(_threatVelocity * _config.CoverPredictSeconds, _config.CoverPredictMaxMetres);
         }
 
         /// <summary>
@@ -1352,7 +1711,7 @@ namespace BanditPlugin.FakePlayer
             if (MoveDirection.sqrMagnitude > 0.0001f)
             {
                 DesiredFacing = Mathf.Atan2(MoveDirection.x, MoveDirection.z) * Mathf.Rad2Deg;
-                WantsSprint = _config.AllowSprint && State != BanditState.Investigate;
+                WantsSprint = _config.AllowSprint && TravelSprintEnabled && State != BanditState.Investigate;
             }
             else
             {

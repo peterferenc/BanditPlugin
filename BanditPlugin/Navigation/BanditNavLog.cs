@@ -15,7 +15,7 @@ namespace BanditPlugin.Navigation
     /// seconds ago by a stall detector, and a speed limit derived from a distance probe. Any one of
     /// those can be the answer and none of them leaves a trace. So they all leave one now.
     ///
-    /// Off by default and switched on per session with "/banditnavlog on", because at a line per
+    /// Off by default and switched on per session with "/bandit debug navlog on", because at a line per
     /// vehicle per half second it is a development tool rather than something to run a server with.
     /// Rate limiting is per bandit rather than global, so one vehicle cannot crowd the others out of
     /// the log at the moment they all go wrong together.

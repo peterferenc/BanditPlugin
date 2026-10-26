@@ -189,7 +189,7 @@ namespace BanditPlugin.Navigation
             public readonly List<int> Links = new List<int>();
         }
 
-        /// <summary>One crossing of a gap in the road network, kept so /banditroads can report what
+        /// <summary>One crossing of a gap in the road network, kept so /bandit debug roads can report what
         /// the router had to invent to make the map connected.</summary>
         public struct GapCandidate
         {
@@ -213,7 +213,7 @@ namespace BanditPlugin.Navigation
         }
 
         /// <summary>Whether these two nodes are joined by a bridged gap rather than by road. What
-        /// /banditroads uses to say how much of a route is not actually on tarmac.</summary>
+        /// /bandit debug roads uses to say how much of a route is not actually on tarmac.</summary>
         public static bool IsBridgedGap(int a, int b)
         {
             foreach (GapCandidate gap in Gaps)

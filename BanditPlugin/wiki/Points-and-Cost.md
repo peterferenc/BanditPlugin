@@ -1,6 +1,6 @@
 # Points and cost
 
-`/banditevent 200` does not mean "difficulty 200". It means **200 points to spend**. Everything
+`/bandit event spawn 200` does not mean "difficulty 200". It means **200 points to spend**. Everything
 that can be spawned carries a price, the draw buys whole squads and crewed vehicles until nothing
 else is affordable, and the change is spent on individual men who join the last squad.
 
@@ -34,13 +34,13 @@ adding a marksman to a squad type makes that type dearer with nothing else to ed
 armoured truck priced at 40 carrying two riflemen and a breacher at 10/10/14 costs 74 to put on
 the ground, and adding a seat to the crew re-prices it automatically.
 
-Run **`/banditevent check`** to see what the configuration can actually draw and what everything
+Run **`/bandit info event`** to see what the configuration can actually draw and what everything
 costs, and what is wrong with anything unpriceable.
 
 ## Having the plugin suggest prices
 
-`/banditcost` prices every kit and vehicle from the game's own asset data and prints the working,
-so a surprising number can be argued with. `/banditcost apply` writes the suggestions into the
+`/bandit debug cost` prices every kit and vehicle from the game's own asset data and prints the working,
+so a surprising number can be argued with. `/bandit debug cost apply` writes the suggestions into the
 configuration.
 
 It is a **suggestion**, not an answer - see the two things it cannot see, below.

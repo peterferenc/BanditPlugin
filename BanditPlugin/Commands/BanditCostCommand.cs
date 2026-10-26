@@ -8,13 +8,13 @@ using static BanditPlugin.Commands.BanditCommand;
 namespace BanditPlugin.Commands
 {
     /// <summary>
-    /// "/banditcost" - works out what everything ought to cost, from the guns' own numbers.
+    /// "/bandit debug cost" - works out what everything ought to cost, from the guns' own numbers.
     ///
-    ///   /banditcost           what the model suggests, beside what the configuration says
-    ///   /banditcost apply     write the suggestions into the configuration
+    ///   /bandit debug cost           what the model suggests, beside what the configuration says
+    ///   /bandit debug cost apply     write the suggestions into the configuration
     ///
     /// A suggester rather than an automatic pricer, and the distinction is the whole design. Prices
-    /// computed live would be worse in three separate ways: "/banditevent 400 seed:9" would stop
+    /// computed live would be worse in three separate ways: "/bandit event spawn 400 seed:9" would stop
     /// reproducing the moment a workshop item updated underneath it, there would be no single number
     /// left to nudge when an event felt wrong, and the model would silently overrule your judgement
     /// on the things it cannot see. Suggesting, then writing an ordinary editable number, keeps all
@@ -25,14 +25,8 @@ namespace BanditPlugin.Commands
     /// tactically wrong - the gun's job is to pin people down, and suppression appears in no asset
     /// field anywhere. That is a good reason to read the column, not to write it back unexamined.
     /// </summary>
-    public class CommandBanditCost : IRocketCommand
+    public static class BanditCostCommand
     {
-        public AllowedCaller AllowedCaller => AllowedCaller.Both;
-        public string Name => "banditcost";
-        public string Help => "Suggests point costs for every kit and vehicle from the game's own asset data.";
-        public string Syntax => "[apply]";
-        public List<string> Aliases => new List<string> { "bcost", "costs" };
-        public List<string> Permissions => new List<string> { "bandit.spawn" };
 
         /// <summary>
         /// How far a suggestion has to be from the current price before it is worth pointing at.
@@ -40,7 +34,7 @@ namespace BanditPlugin.Commands
         /// </summary>
         private const float NotableRatio = 1.5f;
 
-        public void Execute(IRocketPlayer caller, string[] command)
+        public static void Execute(IRocketPlayer caller, string[] command)
         {
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
@@ -63,7 +57,7 @@ namespace BanditPlugin.Commands
 
             if (!apply)
             {
-                Reply(caller, "Nothing written. /banditcost apply writes the model column into the "
+                Reply(caller, "Nothing written. /bandit debug cost apply writes the model column into the "
                     + "configuration - read it first, especially any suppression class.", Color.grey);
                 return;
             }
@@ -71,7 +65,7 @@ namespace BanditPlugin.Commands
             Apply(caller, config, kits, vehicles);
         }
 
-        private void ReportKits(IRocketPlayer caller, List<BanditCostEstimate> kits)
+        private static void ReportKits(IRocketPlayer caller, List<BanditCostEstimate> kits)
         {
             Reply(caller, "Kits:", Color.white);
 
@@ -88,7 +82,7 @@ namespace BanditPlugin.Commands
             }
         }
 
-        private void ReportVehicles(IRocketPlayer caller, List<BanditCostEstimate> vehicles)
+        private static void ReportVehicles(IRocketPlayer caller, List<BanditCostEstimate> vehicles)
         {
             Reply(caller, "Vehicles (platform only - crew is priced as kits on top):", Color.white);
 
@@ -136,7 +130,7 @@ namespace BanditPlugin.Commands
         /// touched - a kit whose gun did not resolve keeps whatever it had, since overwriting it
         /// with a zero would quietly remove it from every event.
         /// </summary>
-        private void Apply(IRocketPlayer caller, BanditConfiguration config,
+        private static void Apply(IRocketPlayer caller, BanditConfiguration config,
             List<BanditCostEstimate> kits, List<BanditCostEstimate> vehicles)
         {
             int changed = 0;
@@ -174,7 +168,7 @@ namespace BanditPlugin.Commands
             BanditPlugin.Instance.Configuration.Save();
 
             Reply(caller, $"Wrote {changed} price(s) into the configuration. Squad costs follow their "
-                + "members automatically, so they have moved too - /banditevent check shows the new "
+                + "members automatically, so they have moved too - /bandit info event shows the new "
                 + "table, and any MinEventCost floors are unchanged and may now need revisiting.", Color.green);
         }
 

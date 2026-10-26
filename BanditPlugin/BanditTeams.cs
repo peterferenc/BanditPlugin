@@ -124,7 +124,7 @@ namespace BanditPlugin
             return Find(config, config?.DefaultTeam);
         }
 
-        /// <summary>Every configured team name, for usage lines and "/banditteam list".</summary>
+        /// <summary>Every configured team name, for usage lines and "/bandit team list".</summary>
         public static List<string> Names(BanditConfiguration config)
         {
             List<string> names = new List<string>();
@@ -211,6 +211,12 @@ namespace BanditPlugin
                 return false;
             }
 
+            // Somebody watching rather than fighting is on nobody's side. See BanditObservers.
+            if (!otherIsBandit && BanditObservers.IsObserver(other))
+            {
+                return false;
+            }
+
             CSteamID mine = self.quests.groupID;
             CSteamID theirs = other.quests.groupID;
 
@@ -252,7 +258,7 @@ namespace BanditPlugin
         /// Pulls a "team:&lt;name&gt;" (or "team=&lt;name&gt;") argument out of a command's words and
         /// hands back what is left.
         ///
-        /// Keyed rather than positional on purpose: "/squadspawn" and "/bandit" both already read
+        /// Keyed rather than positional on purpose: "/bandit squad spawn" and "/bandit spawn" both already read
         /// their arguments by position, and a bare team name in among them could not be told from a
         /// kit, a squad type or a distance. This form can sit anywhere and be recognised.
         /// </summary>

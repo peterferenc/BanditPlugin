@@ -6,14 +6,14 @@ using Logger = Rocket.Core.Logging.Logger;
 namespace BanditPlugin.FakePlayer
 {
     /// <summary>
-    /// One "/banditevent": everything it put on the ground, and the one behaviour that needs
+    /// One "/bandit event spawn": everything it put on the ground, and the one behaviour that needs
     /// watching afterwards.
     ///
     /// Squads look after themselves once spawned - that is what <see cref="BanditSquad"/> is for -
     /// so this exists for the two things a squad cannot answer.
     ///
     /// The first is cleanup. A spawned vehicle is a real networked vehicle: it survives every bot
-    /// being kicked, and without something remembering that this event created it, "/banditclear"
+    /// being kicked, and without something remembering that this event created it, "/bandit clear all"
     /// leaves a field of abandoned trucks behind. Bots are cleaned up by walking Provider.clients;
     /// vehicles have no such handle, so the list here is the only record.
     ///
@@ -29,7 +29,7 @@ namespace BanditPlugin.FakePlayer
 
         private static int _nextId = 1;
 
-        /// <summary>Shown in the reply and by /banditstatus, so two events can be told apart.</summary>
+        /// <summary>Shown in the reply and by /bandit debug status, so two events can be told apart.</summary>
         public int Id { get; }
 
         /// <summary>What was typed, and what the draw actually managed to spend.</summary>
@@ -54,6 +54,14 @@ namespace BanditPlugin.FakePlayer
         /// </summary>
         public sealed class Ride
         {
+            private static int _nextId = 1;
+
+            /// <summary>The vehicle's number, for "/bandit vehicle 3 ..." and /bandit list.</summary>
+            public int Id { get; } = _nextId++;
+
+            /// <summary>The event this vehicle belongs to.</summary>
+            public BanditEvent Event;
+
             public InteractableVehicle Vehicle;
             public string TypeName = string.Empty;
 
@@ -150,13 +158,77 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Forgets every event. Called by "/banditclear", which also kicks the bots and destroys the
+        /// Forgets every event. Called by "/bandit clear all", which also kicks the bots and destroys the
         /// vehicles - the latter through BanditVehicleSpawner, which owns every vehicle this plugin
         /// put down rather than only the ones an event did.
         /// </summary>
         public static void ClearAll()
         {
             All.Clear();
+        }
+
+        /// <summary>
+        /// Removes this one event: its men despawned, its vehicles destroyed, and the event itself
+        /// off the director's list. Returns how many of each went.
+        /// </summary>
+        public void Clear(out int men, out int vehicles)
+        {
+            men = 0;
+            vehicles = 0;
+
+            foreach (Ride ride in Rides)
+            {
+                ride.Finished = true;
+                if (ride.Vehicle != null && !ride.Vehicle.isExploded)
+                {
+                    VehicleManager.askVehicleDestroy(ride.Vehicle);
+                    vehicles++;
+                }
+            }
+
+            foreach (BanditSquad squad in Squads)
+            {
+                // Copied: despawning a member is what prunes it from the live list.
+                foreach (BanditBotController member in squad.Members.ToArray())
+                {
+                    men += FakePlayerSpawner.Despawn(member) ? 1 : 0;
+                }
+
+                BanditSquad.All.Remove(squad);
+            }
+
+            All.Remove(this);
+        }
+
+        /// <summary>The ride with this number, in any running event, or null.</summary>
+        public static Ride FindRide(int id)
+        {
+            foreach (BanditEvent banditEvent in All)
+            {
+                foreach (Ride ride in banditEvent.Rides)
+                {
+                    if (ride.Id == id)
+                    {
+                        return ride;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Everyone who belongs to this ride, wherever they are now - in it, or out fighting.</summary>
+        public static List<BanditBotController> CrewOf(Ride ride)
+        {
+            List<BanditBotController> crew = new List<BanditBotController>();
+            if (ride.Driver != null)
+            {
+                crew.Add(ride.Driver);
+            }
+
+            crew.AddRange(ride.Gunners);
+            crew.AddRange(ride.Riders);
+            return crew;
         }
 
         /// <summary>

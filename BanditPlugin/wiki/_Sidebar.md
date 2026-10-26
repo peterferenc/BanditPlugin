@@ -8,6 +8,7 @@
 - [Configuration](Configuration)
 - [Points & cost](Points-and-Cost)
 - [Build & install](Build-and-Install)
+- [Testing](Testing)
 
 **How it works**
 

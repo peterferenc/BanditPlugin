@@ -27,10 +27,10 @@ namespace BanditPlugin.FakePlayer
 
         private static int _nextId = 1;
 
-        /// <summary>Shown by /banditstatus, so two squads on the ground can be told apart.</summary>
+        /// <summary>Shown by /bandit debug status, so two squads on the ground can be told apart.</summary>
         public int Id { get; }
 
-        /// <summary>Which squad type put this one down - "sniper", "rifle" - for /banditstatus.</summary>
+        /// <summary>Which squad type put this one down - "sniper", "rifle" - for /bandit debug status.</summary>
         public string TypeName { get; }
 
         /// <summary>
@@ -74,7 +74,7 @@ namespace BanditPlugin.FakePlayer
 
         public float LastContactTime { get; private set; } = float.MinValue;
 
-        /// <summary>Which member reported it, purely so /banditstatus can say who is spotting.</summary>
+        /// <summary>Which member reported it, purely so /bandit debug status can say who is spotting.</summary>
         public string ContactSpotter { get; private set; } = string.Empty;
 
         private BanditSquad(BanditSquadProfile profile)
@@ -99,7 +99,7 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Forgets every squad. Called by /banditclear, which kicks the bots themselves - without
+        /// Forgets every squad. Called by /bandit clear all, which kicks the bots themselves - without
         /// this the squad objects would linger holding references to players that no longer exist.
         /// </summary>
         public static void ClearAll()

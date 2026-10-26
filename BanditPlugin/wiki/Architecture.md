@@ -22,7 +22,7 @@ and, for movement:
 
   **Combat does not steer the feet.** Taking cover is the single tactical override; everything
   else a bandit does while fighting - aiming, firing, tracking - happens in the controller and
-  leaves movement alone. So a patrol or a `/banditgoto` keeps running through a firefight instead
+  leaves movement alone. So a patrol or a `/bandit goto` keeps running through a firefight instead
   of being suspended by it. Closing on a target and investigating a last known position are both
   opt-in config, off by default, because each one makes the bot abandon what it was told to do.
 - **`BanditNavigator`** - turns "go here" into a direction, via A* where there is a navmesh and

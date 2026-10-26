@@ -27,7 +27,7 @@ namespace BanditPlugin.FakePlayer
         private const float DropHeight = 1.5f;
 
         /// <summary>
-        /// Every vehicle this plugin has put on the ground, so "/banditclear" can take them away
+        /// Every vehicle this plugin has put on the ground, so "/bandit clear all" can take them away
         /// again.
         ///
         /// A spawned vehicle is a real one and outlives its crew completely: kicking every bot on
@@ -173,7 +173,7 @@ namespace BanditPlugin.FakePlayer
         }
 
         /// <summary>
-        /// Destroys every vehicle this plugin spawned, whether an event put it there or "/banditv"
+        /// Destroys every vehicle this plugin spawned, whether an event put it there or "/bandit vehicle spawn"
         /// did.
         ///
         /// Vanilla's askVehicleDestroy is used rather than anything of ours: it removes the
@@ -214,7 +214,7 @@ namespace BanditPlugin.FakePlayer
         /// Only used to tell people things: a crew configured into seat 2 of something whose turret
         /// is on seat 1 produces a passenger who sits quietly through the whole fight, and there is
         /// no way to work that out from in game except by trying every seat yourself. The asset
-        /// knows, so "/banditevent check" and the vehicle spawn reply say so.
+        /// knows, so "/bandit info event" and the vehicle spawn reply say so.
         /// </summary>
         public static string DescribeTurretSeats(VehicleAsset asset)
         {

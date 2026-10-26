@@ -27,7 +27,7 @@ namespace BanditPlugin
         public List<BanditKit> Kits = new List<BanditKit>();
 
         /// <summary>
-        /// Which kit a plain "/bandit" spawns. Blank falls back to <see cref="Loadout"/> and the
+        /// Which kit a plain "/bandit spawn" spawns. Blank falls back to <see cref="Loadout"/> and the
         /// global figures below, which is what every bandit used before kits existed.
         /// </summary>
         public string DefaultKit = "rifleman";
@@ -56,10 +56,10 @@ namespace BanditPlugin
 
         /// <summary>
         /// Spawn bandits holding fire, so a new one tracks you, takes cover and walks its route
-        /// without ever pulling the trigger until /bandit shoot start gives it weapons free.
+        /// without ever pulling the trigger until /bandit shoot on gives it weapons free.
         ///
         /// Fire control is per-bandit and applied to whoever is alive when the command runs, so a
-        /// bandit spawned after a /bandit shoot start begins held again - set this false to make
+        /// bandit spawned after a /bandit shoot on begins held again - set this false to make
         /// weapons free the standing default instead. Same for CoverByDefault and PeekByDefault.
         /// </summary>
         public bool HoldFireByDefault = true;
@@ -250,7 +250,7 @@ namespace BanditPlugin
         /// <summary>
         /// Seconds a killed bandit lies there before being removed. A bot has no client to press
         /// respawn, so without this its corpse holds a player slot forever. Negative disables the
-        /// cleanup and leaves the body until /banditclear.
+        /// cleanup and leaves the body until /bandit clear all.
         /// </summary>
         public float DespawnSecondsAfterDeath = 5f;
 
@@ -283,7 +283,7 @@ namespace BanditPlugin
 
         /// <summary>
         /// Spawn bandits already peeking - alternating hiding with stepping out to shoot - once
-        /// they are in cover. Off by default; /bandit peek start turns it on. With it off a bandit
+        /// they are in cover. Off by default; /bandit peek on turns it on. With it off a bandit
         /// that takes cover goes down and stays down.
         /// </summary>
         public bool PeekByDefault = false;
@@ -307,7 +307,7 @@ namespace BanditPlugin
         public int CoverRingSamples = 20;
 
         /// <summary>
-        /// Most candidate markers "/banditcover" will draw. Each marker is a paintball impact
+        /// Most candidate markers "/bandit debug cover" will draw. Each marker is a paintball impact
         /// effect, and each of those spawns eight decals that vanilla never expires - so this is
         /// really a budget of maxMarkers x 8 objects on your client until they are cleared. The
         /// search itself is unaffected; only the drawing is capped, and the reported tallies always
@@ -316,8 +316,8 @@ namespace BanditPlugin
         public int CoverDebugMaxMarkers = 48;
 
         /// <summary>
-        /// How long "/banditcover" markers stay before clearing themselves. 0 leaves them until the
-        /// next search or "/banditcover clear".
+        /// How long "/bandit debug cover" markers stay before clearing themselves. 0 leaves them until the
+        /// next search or "/bandit debug clear".
         /// </summary>
         public float CoverDebugSeconds = 20f;
 
@@ -328,6 +328,55 @@ namespace BanditPlugin
         /// close-range fight.
         /// </summary>
         public float CoverMinimumThreatDistance = 3f;
+
+        /// <summary>
+        /// The most cover may bring a bandit closer to the threat than the distance it took up the
+        /// fight at - where it was when contact started, or its own firing range if it started
+        /// further out than that. Measured against that fixed distance rather than the bandit's
+        /// current one, because a cover search looks all round the bandit, in open ground the
+        /// nearest thing to hide behind is often forward, and a run of short moves forward is a
+        /// charge: a rifleman that started 130m out used to end the fight at arm's length without
+        /// ever being told to advance. Kits with AdvanceOnTarget are exempt: closing in is their job.
+        /// </summary>
+        public float CoverMaxAdvance = 8f;
+
+        /// <summary>
+        /// How far the threat has to move before a bandit in cover asks whether that cover still
+        /// works, in metres. Terrain does not change, so a spot that hid the bandit and gave it a
+        /// shot keeps doing both for as long as the enemy stays put - there is nothing to decide
+        /// until they move. Vehicles are the exception, and are caught by the once-a-second check
+        /// that the spot still hides the bandit at all.
+        /// </summary>
+        public float CoverThreatShiftMetres = 4f;
+
+        /// <summary>
+        /// How long a bandit in cover keeps hiding from an enemy it can no longer see, in seconds,
+        /// from its last sighting or from choosing the cover. Not seeing the enemy is what cover is
+        /// for, so it is not a reason to leave it - but an enemy nobody has seen for this long is
+        /// taken to have gone. Peeking refreshes it.
+        /// </summary>
+        public float CoverThreatMemorySeconds = 20f;
+
+        /// <summary>
+        /// Whether a bandit hiding from an enemy keeps track of where that enemy really is while
+        /// it cannot see them - for CoverThreatMemorySeconds after it last did - and of which way
+        /// they are walking. Deliberate knowledge it has no eyes for, the way a soldier behind a
+        /// wall hears someone walking round it. It is only used to choose and keep cover: aiming
+        /// and firing still need a line of sight. Off, a bandit only notices its cover has stopped
+        /// working once the enemy has walked round far enough to see it.
+        /// </summary>
+        public bool CoverTracksThreat = true;
+
+        /// <summary>
+        /// How far ahead a bandit looks at a moving enemy when choosing and keeping cover, in
+        /// seconds. A spot has to hide it from where the enemy will be by then as well as from
+        /// where they are, so it moves round its cover ahead of someone walking round it rather
+        /// than after they can already see it. Capped at CoverPredictMaxMetres. 0 turns it off.
+        /// </summary>
+        public float CoverPredictSeconds = 1.5f;
+
+        /// <summary>The furthest ahead of a moving enemy CoverPredictSeconds may look, in metres.</summary>
+        public float CoverPredictMaxMetres = 6f;
 
         /// <summary>
         /// Sprint to cover while this much of the route is still ahead, and walk the rest.
@@ -351,8 +400,8 @@ namespace BanditPlugin
         public float CoverPeekSeconds = 2f;
 
         /// <summary>
-        /// The kinds of squad "/squadspawn" can put on the ground: "/squadspawn sniper",
-        /// "/squadspawn rifle". Each names the kits it is built from and carries its own spacing,
+        /// The kinds of squad "/bandit squad spawn" can put on the ground: "/bandit squad spawn sniper",
+        /// "/bandit squad spawn rifle". Each names the kits it is built from and carries its own spacing,
         /// spawn distance and group behaviour, resolved once at spawn, so two squads of different
         /// types can be fighting at once under one configuration. See <see cref="BanditSquadType"/>.
         ///
@@ -364,7 +413,7 @@ namespace BanditPlugin
         public List<BanditSquadType> Squads = new List<BanditSquadType>();
 
         /// <summary>
-        /// Which type a plain "/squadspawn" puts down. An unknown name here leaves the bare command
+        /// Which type a plain "/bandit squad spawn" puts down. An unknown name here leaves the bare command
         /// reporting the types it does know rather than guessing at one.
         /// </summary>
         public string DefaultSquad = "basic";
@@ -377,7 +426,7 @@ namespace BanditPlugin
         public float SquadSpacing = 5f;
 
         /// <summary>
-        /// How far down your sightline "/squadspawn" puts a squad whose type does not name its own
+        /// How far down your sightline "/bandit squad spawn" puts a squad whose type does not name its own
         /// distance.
         ///
         /// Deliberately well past every kit's TargetAcquireRange, so a squad spawns unaware and you
@@ -448,7 +497,7 @@ namespace BanditPlugin
         public float FriendlyFireClearanceRadius = 0.9f;
 
         /// <summary>
-        /// The sides bandits and players can be on: "/squadspawn rifle team:red", "/banditteam join
+        /// The sides bandits and players can be on: "/bandit squad spawn rifle team:red", "/bandit team join
         /// red". A team is a real in-game group, so joining one is visible in game and the server's
         /// own Gameplay.Friendly_Fire setting decides whether teammates can hurt each other. See
         /// <see cref="BanditTeam"/>.
@@ -480,7 +529,7 @@ namespace BanditPlugin
         public bool HostileToUngrouped = true;
 
         /// <summary>
-        /// The vehicles "/banditevent" can draw, and that "/banditv &lt;name&gt;" can spawn by name.
+        /// The vehicles "/bandit event spawn" can draw, and that "/bandit vehicle spawn &lt;name&gt;" can spawn by name.
         /// See <see cref="BanditVehicleType"/>.
         ///
         /// Starts EMPTY for the same XmlSerializer reason as <see cref="Kits"/>; BanditPlugin.Load
@@ -554,9 +603,9 @@ namespace BanditPlugin
         public int EventMaxBandits = 24;
 
         /// <summary>
-        /// How far in front of a bandit "/banditv &lt;vehicle&gt;" puts the vehicle it spawns. Far
-        /// enough to clear the man standing there, close enough that he is inside the driver-seat
-        /// search radius.
+        /// How far down your sightline "/bandit vehicle spawn &lt;vehicle&gt;" puts the vehicle when you
+        /// do not name a distance. Never less than 15m, the floor every spawn distance has, so the
+        /// crew spawning beside it does not land on top of you.
         /// </summary>
         public float VehicleSpawnDistance = 6f;
 
@@ -572,7 +621,7 @@ namespace BanditPlugin
         public float VehicleSeatRetrySeconds = 6f;
 
         /// <summary>
-        /// The kit "/banditcost" scales every other price against, and the number of points it is
+        /// The kit "/bandit debug cost" scales every other price against, and the number of points it is
         /// worth. Blank uses <see cref="DefaultKit"/>.
         ///
         /// The model's raw output is an abstract quantity nobody has intuition for, so the whole
@@ -615,7 +664,7 @@ namespace BanditPlugin
         /// <summary>
         /// When a map has no recorded waypoints, patrol between its LocationNodes - the named
         /// places official maps mark in the level editor. Those are town centres rather than
-        /// verified walkable points, so a route recorded with /banditwp is always better.
+        /// verified walkable points, so a route recorded with /bandit route patrol is always better.
         /// </summary>
         public bool PatrolUseLocationNodesWhenNoWaypoints = true;
 
@@ -640,7 +689,7 @@ namespace BanditPlugin
             return null;
         }
 
-        /// <summary>Every kit name, for the usage line and "/bandit kits".</summary>
+        /// <summary>Every kit name, for the usage line and "/bandit info kits".</summary>
         public List<string> KitNames()
         {
             List<string> names = new List<string>();
@@ -682,7 +731,7 @@ namespace BanditPlugin
             return null;
         }
 
-        /// <summary>Every squad type name, for the usage line and "/squadspawn squads".</summary>
+        /// <summary>Every squad type name, for the usage line and "/bandit info squads".</summary>
         public List<string> SquadNames()
         {
             List<string> names = new List<string>();
@@ -724,7 +773,7 @@ namespace BanditPlugin
             return null;
         }
 
-        /// <summary>Every vehicle type name, for the usage lines and "/banditevent check".</summary>
+        /// <summary>Every vehicle type name, for the usage lines and "/bandit info event".</summary>
         public List<string> VehicleNames()
         {
             List<string> names = new List<string>();
@@ -753,7 +802,7 @@ namespace BanditPlugin
         /// be bought an unlimited number of times, and the loop that does the buying would never
         /// end. Cheap to guard against and unrecoverable not to, since the file is hand-edited and
         /// "0" is an obvious thing to type into a price you have not thought about yet. Reported by
-        /// "/banditevent check".
+        /// "/bandit info event".
         /// </summary>
         public static float CostOf(BanditKit kit)
         {
@@ -865,6 +914,12 @@ namespace BanditPlugin
             CoverDebugMaxMarkers = 48;
             CoverDebugSeconds = 20f;
             CoverMinimumThreatDistance = 3f;
+            CoverMaxAdvance = 8f;
+            CoverThreatShiftMetres = 4f;
+            CoverThreatMemorySeconds = 20f;
+            CoverTracksThreat = true;
+            CoverPredictSeconds = 1.5f;
+            CoverPredictMaxMetres = 6f;
             SprintToCoverMinPathDistance = 5f;
             CoverHideSeconds = 2.5f;
             CoverPeekSeconds = 2f;

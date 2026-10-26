@@ -7,9 +7,9 @@ namespace BanditPlugin.FakePlayer
     /// <summary>
     /// Puts one squad on the ground in formation, switched on.
     ///
-    /// Lifted out of "/squadspawn" when "/banditevent" needed to do the same thing several times
+    /// Lifted out of "/bandit squad spawn" when "/bandit event spawn" needed to do the same thing several times
     /// over. Everything the two commands share is here - the formation, the team prefix on the
-    /// name, the weapons-free flag - so an event's squads are the same squads /squadspawn produces
+    /// name, the weapons-free flag - so an event's squads are the same squads /bandit squad spawn produces
     /// rather than a second implementation that drifts.
     /// </summary>
     public static class BanditSquadSpawner

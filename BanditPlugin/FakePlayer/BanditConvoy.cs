@@ -10,7 +10,7 @@ namespace BanditPlugin.FakePlayer
     /// A column of crewed vehicles driving a route, fighting what it meets on the way, and picking
     /// its infantry back up afterwards.
     ///
-    /// The difference between this and the vehicles a plain "/banditevent" spawns is what they are
+    /// The difference between this and the vehicles a plain "/bandit event spawn" spawns is what they are
     /// *for*. Those are an ambush: they sit until the event sees somebody, drive at them, and empty
     /// out on top of them - the destination is the enemy. A convoy has somewhere to be, and the
     /// enemy is an interruption. So the route comes first and everything else is an interruption of
@@ -22,7 +22,7 @@ namespace BanditPlugin.FakePlayer
     ///     Arrived   at the last waypoint. They stop, and they stay.
     ///
     /// Movement itself is not reimplemented here. Each vehicle still drives with the same
-    /// <see cref="BanditVehicleDriver"/> a "/banditvgoto" uses, and is simply handed the next point
+    /// <see cref="BanditVehicleDriver"/> a "/bandit drive" uses, and is simply handed the next point
     /// on the route as its destination - so the width sweep, the reverse-out-of-trouble logic, the
     /// ride-height calibration and both server validation clamps all keep working, and a convoy is
     /// exactly as good at getting round a fallen tree as a single vehicle is. What this adds on top
@@ -379,7 +379,7 @@ namespace BanditPlugin.FakePlayer
         ///
         /// The last one rather than all of them, because the reason to reach for this is that the
         /// convoy you just spawned is doing something you did not want to watch any longer, and
-        /// there may well be another one running that you do. /banditclear is still the big hammer.
+        /// there may well be another one running that you do. /bandit clear all is still the big hammer.
         /// </summary>
         public static bool ClearLast(out string summary)
         {
@@ -389,8 +389,22 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            BanditConvoy convoy = All[All.Count - 1];
-            All.RemoveAt(All.Count - 1);
+            Clear(All[All.Count - 1], out summary);
+            return true;
+        }
+
+        /// <summary>
+        /// Removes one convoy: its vehicles destroyed, its men despawned, and the column and its
+        /// event taken off their directors' lists so nothing keeps steering it.
+        /// </summary>
+        public static void Clear(BanditConvoy convoy, out string summary)
+        {
+            All.Remove(convoy);
+            BanditEvent.All.Remove(convoy.Event);
+            foreach (BanditSquad squad in convoy.Event.Squads)
+            {
+                BanditSquad.All.Remove(squad);
+            }
 
             int vehicles = 0;
             int men = 0;
@@ -432,7 +446,6 @@ namespace BanditPlugin.FakePlayer
             convoy.State = ConvoyState.Arrived;
 
             summary = $"convoy {convoy.Id}: {vehicles} vehicle(s) and {men} bandit(s) removed";
-            return true;
         }
 
         /// <summary>Despawns one bandit, if it is still there to despawn.</summary>
@@ -449,7 +462,7 @@ namespace BanditPlugin.FakePlayer
                 return false;
             }
 
-            FakePlayerSpawner.DespawnBot(steamPlayer);
+            FakePlayerSpawner.DespawnBot(steamPlayer, "bandit despawned");
             return true;
         }
 
@@ -736,7 +749,7 @@ namespace BanditPlugin.FakePlayer
             return last;
         }
 
-        /// <summary>Keeps the finished plan where "/banditnavlog route" can draw it.</summary>
+        /// <summary>Keeps the finished plan where "/bandit debug navlog route" can draw it.</summary>
         private static void RecordForDebug(List<RoutePoint> path)
         {
             List<BanditRouteDebug.Marker> markers = new List<BanditRouteDebug.Marker>(path.Count);
@@ -821,7 +834,7 @@ namespace BanditPlugin.FakePlayer
                         + t * t * end;
 
                     // The arc belongs to the road it is turning on, so it keeps the corner's node
-                    // index - only /banditroads and the "how much of this route is on tarmac" count
+                    // index - only /bandit debug roads and the "how much of this route is on tarmac" count
                     // read that.
                     rounded.Add(new RoutePoint
                     {
@@ -836,7 +849,7 @@ namespace BanditPlugin.FakePlayer
             return rounded;
         }
 
-        /// <summary>What the convoy is doing, for the command that spawned it and for /banditstatus.</summary>
+        /// <summary>What the convoy is doing, for the command that spawned it and for /bandit debug status.</summary>
         public string Describe()
         {
             int running = 0;
@@ -1451,7 +1464,7 @@ namespace BanditPlugin.FakePlayer
                 {
                     Logger.Log($"[Bandit] Convoy {Id}: {ride.TypeName} could not get through at route "
                         + $"point {element.Target}/{_path.Count - 1}, ({vehiclePosition.x:0}, "
-                        + $"{vehiclePosition.z:0}) - unloading where it stands. Turn on /banditnavlog "
+                        + $"{vehiclePosition.z:0}) - unloading where it stands. Turn on /bandit debug navlog "
                         + "to find out why.");
                     DismountElement(element);
                     vehicleDriver.StopDriving();

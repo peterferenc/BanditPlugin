@@ -16,7 +16,8 @@ Built as a RocketMod plugin, developed against Unturned 3.26.3.8 with RocketModF
 
 **Combat**
 
-- Spawn bandits one at a time (`/bandit`) or as a whole squad (`/squadspawn`).
+- Spawn bandits one at a time (`/bandit spawn`) or as a whole squad (`/bandit squad spawn`), and
+  give orders to one bandit, a squad, an event or a whole team by number.
 - They acquire and shoot players and other bandits with real weapons - rifles, machineguns,
   marksman rifles, shotguns - with configurable accuracy that holds steady with range.
 - They take cover automatically: cover is scored against the threat and their preferred
@@ -32,8 +33,8 @@ Built as a RocketMod plugin, developed against Unturned 3.26.3.8 with RocketModF
 - Squad types (`basic`, `rifle`, `sniper` by default) name the kits they are built from, their
   spacing, spawn distance and group behaviour.
 - Automatic cost calculation: every kit and vehicle is priced relative to a rifleman, so
-  `/banditevent <points>` buys a whole fight - squads and crewed vehicles - against a budget.
-  `/banditcost` prices everything from the game's own asset data. See
+  `/bandit event spawn <points>` buys a whole fight - squads and crewed vehicles - against a budget.
+  `/bandit debug cost` prices everything from the game's own asset data. See
   [Points and cost](https://github.com/peterferenc/BanditPlugin/wiki/Points-and-Cost).
 
 **Teams**
@@ -55,7 +56,7 @@ Built as a RocketMod plugin, developed against Unturned 3.26.3.8 with RocketModF
 **Movement**
 
 - Pathfinding through the map's own A* graph inside Nav volumes, direct steering outside them.
-- Patrol routes recorded per map (`/banditwp`), with a fallback to the map's location nodes.
+- Patrol routes recorded per map (`/bandit route patrol`), with a fallback to the map's location nodes.
 - Convoys: a column of crewed vehicles that drives a route, holds spacing, stops on contact,
   dismounts, fights, remounts and carries on.
 
@@ -84,19 +85,20 @@ Start the server once to generate `BanditPlugin.configuration.xml`, then grant `
 Then, in game:
 
 ```
-/bandit                  spawns one where you are looking - it holds fire until told
-/bandit shoot start      weapons free, for every bandit on the map
-/bandit cover start      and they start using cover
-/squadspawn rifle        spawns a squad, already fighting
-/banditevent 200         spawns a whole fight bought for 200 points
-/banditstatus            reports what every bandit is currently doing
-/banditclear             removes them all
+/bandit spawn                spawns one where you are looking - it holds fire until told
+/bandit shoot on             weapons free - orders go to the last thing spawned
+/bandit cover on             and it starts using cover
+/bandit squad spawn rifle    spawns a squad, already fighting
+/bandit event spawn 200      spawns a whole fight bought for 200 points
+/bandit list                 everything on the map, by number
+/bandit squad 2 goto marker  orders by number: squad 2 to your map marker
+/bandit clear all            removes them all
 ```
 
-A bandit from `/bandit` does nothing until ordered, so you can switch on one behaviour at a time
+A bandit from `/bandit spawn` does nothing until ordered, so you can switch on one behaviour at a time
 and watch it. A squad, an event or a convoy comes out fighting.
 
-Use `/banditclear` before disconnecting - bots occupy player slots, and their presence affects
+Use `/bandit clear all` before disconnecting - bots occupy player slots, and their presence affects
 the client-side exit timer.
 
 ## Documentation
@@ -108,6 +110,7 @@ every command, every configuration key, and how each subsystem actually works:
 - [Configuration](https://github.com/peterferenc/BanditPlugin/wiki/Configuration)
 - [Points & cost](https://github.com/peterferenc/BanditPlugin/wiki/Points-and-Cost)
 - [Build & install](https://github.com/peterferenc/BanditPlugin/wiki/Build-and-Install)
+- [Testing](https://github.com/peterferenc/BanditPlugin/wiki/Testing) - end-to-end tests, in game or unattended
 - [Architecture](https://github.com/peterferenc/BanditPlugin/wiki/Architecture)
 - [Movement, cover & patrol](https://github.com/peterferenc/BanditPlugin/wiki/Movement-Cover-and-Patrol)
 - [Vehicles](https://github.com/peterferenc/BanditPlugin/wiki/Vehicles) ·
@@ -129,8 +132,9 @@ The wiki pages live in [BanditPlugin/wiki/](BanditPlugin/wiki/) and are pushed w
 | [BanditPlugin/FakePlayer/](BanditPlugin/FakePlayer/) | Spawning the fake players, the bot brain and controller, squads, convoys, vehicles. |
 | [BanditPlugin/Navigation/](BanditPlugin/Navigation/) | A* pathing, cover finding, road graph, waypoints. |
 | [BanditPlugin/Commands/](BanditPlugin/Commands/) | Every chat command. |
+| [BanditPlugin/Testing/](BanditPlugin/Testing/) | The end-to-end test runner and its tests. |
 | [BanditPlugin/wiki/](BanditPlugin/wiki/) | Wiki pages, published to the GitHub wiki. |
-| [tools/](tools/) | Performance sampling script and captured measurements. |
+| [tools/](tools/) | The unattended test run, the performance sampling script and captured measurements. |
 
 ## Known limitations
 

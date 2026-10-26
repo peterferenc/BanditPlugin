@@ -50,7 +50,11 @@ namespace BanditPlugin.FakePlayer
         private const ulong FakeSteamIdBase = 0x1100001000000001UL;
         private static ulong _nextFakeSteamId = FakeSteamIdBase;
 
-        /// <summary>SteamIDs of every bot this plugin has spawned, so /banditclear can remove them.
+        /// <summary>The next bandit's number. Never reused, so an old number cannot quietly come to
+        /// mean a different bandit.</summary>
+        private static int _nextBanditId = 1;
+
+        /// <summary>SteamIDs of every bot this plugin has spawned, so /bandit clear all can remove them.
         /// Tracked as raw ulongs rather than SteamPlayer references to avoid SteamPlayerID's
         /// null-unsafe operator== (see RemoveAllBots).</summary>
         public static readonly System.Collections.Generic.HashSet<ulong> SpawnedBotSteamIds =
@@ -93,6 +97,11 @@ namespace BanditPlugin.FakePlayer
                 return null;
             }
 
+            // The number goes in the name because the name is the one label readable through a
+            // scope, and it is what "/bandit 7 goto" is typed against.
+            int banditId = _nextBanditId++;
+            displayName = $"{displayName} #{banditId}";
+
             CSteamID fakeSteamId = new CSteamID(_nextFakeSteamId++);
             SteamPlayerID playerID = new SteamPlayerID(
                 fakeSteamId,
@@ -125,7 +134,7 @@ namespace BanditPlugin.FakePlayer
             //
             // (Killing a bot instead of clearing it hides the problem rather than avoiding it:
             // PlayerInventory.save() deletes Inventory.dat outright when the player is dead and both
-            // Lose_Weapons/Lose_Clothes are on, so only bots removed alive - /banditclear, or a
+            // Lose_Weapons/Lose_Clothes are on, so only bots removed alive - /bandit clear all, or a
             // server shutdown - accumulate.)
             //
             // Deleting here beats deleting on despawn: it runs ahead of every load path, so a bot
@@ -238,6 +247,7 @@ namespace BanditPlugin.FakePlayer
 
             BanditBotController controller = steamPlayer.player.gameObject.AddComponent<BanditBotController>();
             controller.Self = steamPlayer.player;
+            controller.Id = banditId;
             controller.SteamPlayerToKeepAlive = steamPlayer;
             controller.Profile = profile;
             controller.TurnSpeedDegreesPerSecond = config.TurnSpeedDegreesPerSecond;
@@ -321,7 +331,7 @@ namespace BanditPlugin.FakePlayer
         /// Removes one bot - used when a killed bandit's despawn timer runs out. Same kick path as
         /// RemoveAllBots, but also drops the SteamID so the bot stops being counted as live.
         /// </summary>
-        public static void DespawnBot(SteamPlayer steamPlayer)
+        public static void DespawnBot(SteamPlayer steamPlayer, string reason = "bandit killed")
         {
             if (steamPlayer == null || ReferenceEquals(steamPlayer.playerID, null))
             {
@@ -336,7 +346,23 @@ namespace BanditPlugin.FakePlayer
 
             LeaveTeam(steamPlayer);
             AnnounceDisconnected(steamPlayer.playerID.steamID);
-            Provider.kick(steamPlayer.playerID.steamID, "bandit killed");
+            Provider.kick(steamPlayer.playerID.steamID, reason);
+        }
+
+        /// <summary>
+        /// Removes one bandit by its controller - what "/bandit clear" does to anything smaller
+        /// than the whole field. Stops any route drive first, for the same reason RemoveAllBots does.
+        /// </summary>
+        public static bool Despawn(BanditBotController bandit)
+        {
+            if (bandit == null || bandit.Self == null || bandit.SteamPlayerToKeepAlive == null)
+            {
+                return false;
+            }
+
+            BanditRouteDrive.Stop(bandit);
+            DespawnBot(bandit.SteamPlayerToKeepAlive, "bandit despawned");
+            return true;
         }
 
         /// <summary>

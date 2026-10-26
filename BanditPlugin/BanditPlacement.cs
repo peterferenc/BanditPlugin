@@ -9,7 +9,7 @@ namespace BanditPlugin
     /// Where a spawn command puts things: down the caller's sightline at some distance, or at their
     /// map marker.
     ///
-    /// Lifted out of "/squadspawn" so "/banditevent" can take the same words and mean the same
+    /// Lifted out of "/bandit squad spawn" so "/bandit event spawn" can take the same words and mean the same
     /// thing by them. Both commands are asked to place something relative to a player, and a second
     /// copy of this logic is a second thing to keep in step - the marker's meaningless height, the
     /// aim transform rather than the body transform, the ground probe reaching far enough for a

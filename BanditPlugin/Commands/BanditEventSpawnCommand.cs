@@ -2,21 +2,22 @@ using System;
 using System.Collections.Generic;
 using BanditPlugin.FakePlayer;
 using Rocket.API;
-using Rocket.Unturned.Chat;
 using SDG.Unturned;
 using UnityEngine;
 
 namespace BanditPlugin.Commands
 {
     /// <summary>
-    /// "/banditevent" - buys a fight with a budget and puts it down where you are looking.
+    /// "/bandit event spawn" - buys a fight with a budget and puts it down where you are looking.
     ///
-    ///   /banditevent 200              200 points of bandits down your sightline
-    ///   /banditevent 500 marker       at your map marker instead
-    ///   /banditevent 300 400          400m out that way
-    ///   /banditevent 250 team:red     on a particular side
-    ///   /banditevent 500 seed:1234    the same 500-point event again, exactly
-    ///   /banditevent check            what the configuration would let it draw, and what is wrong with it
+    ///   /bandit event spawn 200              200 points of bandits down your sightline
+    ///   /bandit event spawn 500 marker       at your map marker instead
+    ///   /bandit event spawn 300 400          400m out that way
+    ///   /bandit event spawn 250 team:red     on a particular side
+    ///   /bandit event spawn 500 seed:1234    the same 500-point event again, exactly
+    ///
+    /// "/bandit info event" prices what the configuration would let it draw, and says what is
+    /// wrong with it.
     ///
     /// The number is a cost, not a difficulty level. Everything that can be spawned carries a price
     /// - a rifleman is the unit, and everything else is quoted against him - so the budget is spent
@@ -31,15 +32,8 @@ namespace BanditPlugin.Commands
     /// so a big event brings marksmen and armour rather than a great many riflemen. If you want one
     /// event back, take its seed out of the reply and hand it to seed:.
     /// </summary>
-    public class CommandBanditEvent : IRocketCommand
+    public static class BanditEventSpawnCommand
     {
-        public AllowedCaller AllowedCaller => AllowedCaller.Player;
-        public string Name => "banditevent";
-        public string Help => "Spawns a random event of a given points cost - squads and crewed vehicles.";
-        public string Syntax => "<cost> [<metres>|marker] [team:<team>] [seed:<n>]";
-        public List<string> Aliases => new List<string> { "event", "bevent" };
-        public List<string> Permissions => new List<string> { "bandit.spawn" };
-
         /// <summary>
         /// How far to the side of a vehicle its crew is spawned, and how far apart from each other.
         /// Clear of the hull, so nobody spawns inside it, and inside the driver's own search radius.
@@ -49,34 +43,17 @@ namespace BanditPlugin.Commands
         /// <summary>Things placed per ring around the event's centre before starting another.</summary>
         private const int PlacementsPerRing = 6;
 
-        public void Execute(IRocketPlayer caller, string[] command)
+        public static void Execute(IRocketPlayer caller, string[] command)
         {
             BanditConfiguration config = BanditPlugin.Instance.Configuration.Instance;
 
+            if (BanditCommand.RequirePlayer(caller, "Spawning an event") == null)
+            {
+                return;
+            }
+
             command = BanditTeams.ExtractTeamArgument(command, out string requestedTeam);
             command = ExtractSeedArgument(command, out int? requestedSeed);
-
-            if (command.Length > 0 && IsCheckRequest(command[0]))
-            {
-                BanditEventCheck.Reply(caller, config);
-                return;
-            }
-
-            // The two sub-commands. Both are "/banditevent" rather than commands of their own
-            // because a convoy is an event - it is drawn against the same budget, out of the same
-            // kits, squads and vehicles - and its route is the one thing that has to be set up
-            // before one can be run.
-            if (command.Length > 0 && IsWaypointRequest(command[0]))
-            {
-                BanditConvoyCommands.Waypoints(caller, Rest(command));
-                return;
-            }
-
-            if (command.Length > 0 && command[0].Equals("convoy", StringComparison.OrdinalIgnoreCase))
-            {
-                BanditConvoyCommands.Convoy(caller, Rest(command), requestedTeam, requestedSeed);
-                return;
-            }
 
             if (command.Length == 0 || !float.TryParse(command[0], out float budget) || budget <= 0f)
             {
@@ -90,7 +67,7 @@ namespace BanditPlugin.Commands
 
             if (team == null && !string.IsNullOrEmpty(requestedTeam))
             {
-                UnturnedChat.Say(caller, $"No team called '{requestedTeam}'. Teams: "
+                BanditCommand.Reply(caller, $"No team called '{requestedTeam}'. Teams: "
                     + $"{string.Join(", ", BanditTeams.Names(config).ToArray())}.", Color.red);
                 return;
             }
@@ -105,7 +82,7 @@ namespace BanditPlugin.Commands
             int banditCap = Mathf.Max(0, config.EventMaxBandits);
             if (banditCap < 1)
             {
-                UnturnedChat.Say(caller, $"EventMaxBandits is {config.EventMaxBandits} - "
+                BanditCommand.Reply(caller, $"EventMaxBandits is {config.EventMaxBandits} - "
                     + "no bandits can be spawned until it is raised.", Color.red);
                 return;
             }
@@ -113,18 +90,19 @@ namespace BanditPlugin.Commands
             int seed = requestedSeed ?? Environment.TickCount;
             BanditEventPlan plan = BanditEventDraw.Draw(config, budget, seed, banditCap);
 
-            // Where the whole event goes. The same words /squadspawn takes, meaning the same things,
+            // Where the whole event goes. The same words squad spawn takes, meaning the same things,
             // because they run through the same resolver - see BanditPlacement.
             string placement = command.Length > 1 ? command[1] : null;
             if (!BanditPlacement.TryResolve(caller, placement, config.SquadSpawnDistance,
                 out BanditPlacement.Result placed, out string placementError))
             {
-                UnturnedChat.Say(caller, placementError, Color.red);
+                BanditCommand.Reply(caller, placementError, Color.red);
                 return;
             }
 
             BanditEvent banditEvent = BanditEvent.Create(budget);
             Spawn(config, plan, banditEvent, team, placed);
+            BanditTargets.Remember(BanditTarget.Of(banditEvent));
 
             Reply(caller, config, plan, banditEvent, placed, team);
         }
@@ -133,7 +111,7 @@ namespace BanditPlugin.Commands
         /// Puts the plan on the ground: each squad and each vehicle at its own place around the
         /// centre, and the leftover men alongside the last squad.
         /// </summary>
-        private static void Spawn(BanditConfiguration config, BanditEventPlan plan, BanditEvent banditEvent,
+        internal static void Spawn(BanditConfiguration config, BanditEventPlan plan, BanditEvent banditEvent,
             BanditTeam team, BanditPlacement.Result placed)
         {
             int placement = 0;
@@ -231,12 +209,13 @@ namespace BanditPlugin.Commands
             if (vehicle == null)
             {
                 Rocket.Core.Logging.Logger.LogWarning($"[Bandit] Event {banditEvent.Id}: could not spawn "
-                    + $"'{type.Name}' - {vehicleError}. Check its Vehicle setting with /banditevent check.");
+                    + $"'{type.Name}' - {vehicleError}. Check its Vehicle setting with /bandit info event.");
                 return null;
             }
 
             BanditEvent.Ride ride = new BanditEvent.Ride
             {
+                Event = banditEvent,
                 Vehicle = vehicle,
                 TypeName = type.Name,
                 DriveAtCaller = type.DriveAtCaller,
@@ -393,32 +372,54 @@ namespace BanditPlugin.Commands
                 bought.Add($"+{plan.Loose.Count} loose");
             }
 
-            UnturnedChat.Say(caller, $"Event {banditEvent.Id}: {plan.Spent:0} of {plan.Budget:0} pts, "
+            BanditCommand.Reply(caller, $"Event {banditEvent.Id}: {plan.Spent:0} of {plan.Budget:0} pts, "
                 + $"{spawned} bandit(s), {banditEvent.Rides.Count} vehicle(s), {placed.Range:0}m "
                 + (placed.UsedMarker ? "at your marker" : "that way")
                 + (team != null ? $", team {team.Label}" : ", no team") + ".", Color.green);
 
-            UnturnedChat.Say(caller, $"  Drew: {(bought.Count > 0 ? string.Join(", ", bought.ToArray()) : "nothing")}. "
-                + $"Seed {plan.Seed} - /banditevent {plan.Budget:0} seed:{plan.Seed} runs it again.", Color.grey);
+            BanditCommand.Reply(caller, $"  Drew: {(bought.Count > 0 ? string.Join(", ", bought.ToArray()) : "nothing")}. "
+                + $"Seed {plan.Seed} - /bandit event spawn {plan.Budget:0} seed:{plan.Seed} runs it again.", Color.grey);
+
+            BanditCommand.Reply(caller, $"  {DescribeContents(banditEvent)}. Orders go to the whole event; "
+                + "/bandit list shows the numbers.", Color.grey);
 
             if (plan.Spent > plan.Budget)
             {
                 // The floor deliberately overspends rather than reporting an empty event, and
                 // "12 of 5 pts" reads as arithmetic gone wrong unless it says so.
-                UnturnedChat.Say(caller, $"{plan.Budget:0} pts buys nothing at these prices - "
+                BanditCommand.Reply(caller, $"{plan.Budget:0} pts buys nothing at these prices - "
                     + "spawned one bandit as the minimum.", Color.grey);
             }
             else if (plan.LimitedByBanditCap)
             {
-                UnturnedChat.Say(caller, $"Stopped at the bandit ceiling of {config.EventMaxBandits}, "
+                BanditCommand.Reply(caller, $"Stopped at the bandit ceiling of {config.EventMaxBandits}, "
                     + $"not the budget - {plan.Unspent:0} pts unspent. Raise EventMaxBandits to spend it.",
                     Color.yellow);
             }
             else if (plan.Unspent >= SmallestCost(config) && plan.Unspent > 0f)
             {
-                UnturnedChat.Say(caller, $"{plan.Unspent:0} pts unspent - nothing left was both affordable "
-                    + "and allowed at this size. /banditevent check shows the floors.", Color.grey);
+                BanditCommand.Reply(caller, $"{plan.Unspent:0} pts unspent - nothing left was both affordable "
+                    + "and allowed at this size. /bandit info event shows the floors.", Color.grey);
             }
+        }
+
+        /// <summary>The squads and vehicles in an event, by the numbers orders take.</summary>
+        internal static string DescribeContents(BanditEvent banditEvent)
+        {
+            List<string> squads = new List<string>();
+            foreach (BanditSquad squad in banditEvent.Squads)
+            {
+                squads.Add($"{squad.Id} {squad.TypeName}");
+            }
+
+            List<string> vehicles = new List<string>();
+            foreach (BanditEvent.Ride ride in banditEvent.Rides)
+            {
+                vehicles.Add($"{ride.Id} {ride.TypeName}");
+            }
+
+            return $"Squads: {(squads.Count > 0 ? string.Join(", ", squads.ToArray()) : "none")}; "
+                + $"vehicles: {(vehicles.Count > 0 ? string.Join(", ", vehicles.ToArray()) : "none")}";
         }
 
         /// <summary>The cheapest thing the configuration can buy, for deciding whether leftover
@@ -446,7 +447,7 @@ namespace BanditPlugin.Commands
         /// everything else this command takes is positional and a bare number could not be told from
         /// the budget or the distance.
         /// </summary>
-        private static string[] ExtractSeedArgument(string[] command, out int? seed)
+        internal static string[] ExtractSeedArgument(string[] command, out int? seed)
         {
             seed = null;
             if (command == null || command.Length == 0)
@@ -472,41 +473,13 @@ namespace BanditPlugin.Commands
             return remaining.ToArray();
         }
 
-        private static bool IsWaypointRequest(string argument)
-        {
-            return argument.Equals("wp", StringComparison.OrdinalIgnoreCase)
-                || argument.Equals("waypoint", StringComparison.OrdinalIgnoreCase)
-                || argument.Equals("waypoints", StringComparison.OrdinalIgnoreCase);
-        }
-
-        /// <summary>Everything after the sub-command word.</summary>
-        private static string[] Rest(string[] command)
-        {
-            if (command.Length < 2)
-            {
-                return new string[0];
-            }
-
-            string[] rest = new string[command.Length - 1];
-            Array.Copy(command, 1, rest, 0, rest.Length);
-            return rest;
-        }
-
-        private static bool IsCheckRequest(string argument)
-        {
-            return argument.Equals("check", StringComparison.OrdinalIgnoreCase)
-                || argument.Equals("validate", StringComparison.OrdinalIgnoreCase)
-                || argument.Equals("list", StringComparison.OrdinalIgnoreCase);
-        }
-
         private static void ReplyUsage(IRocketPlayer caller, BanditConfiguration config)
         {
-            UnturnedChat.Say(caller, "Usage: /banditevent <cost>  |  /banditevent <cost> <metres>  |  "
-                + "/banditevent <cost> marker  |  /banditevent <cost> team:<team> seed:<n>  |  "
-                + "/banditevent check  |  /banditevent wp  |  /banditevent convoy <cost>.", Color.yellow);
-            UnturnedChat.Say(caller, "The number is a points budget, not a difficulty. "
+            BanditCommand.Reply(caller, "Usage: /bandit event spawn <cost> [<metres>|marker] [team:<team>] [seed:<n>].",
+                Color.yellow);
+            BanditCommand.Reply(caller, "The number is a points budget, not a difficulty. "
                 + $"A '{config.DefaultKit}' costs {BanditConfiguration.CostOf(config.FindKit(config.DefaultKit)):0}; "
-                + "/banditevent check prices everything.", Color.grey);
+                + "/bandit info event prices everything.", Color.grey);
         }
     }
 }

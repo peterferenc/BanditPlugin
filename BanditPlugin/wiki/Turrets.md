@@ -39,7 +39,7 @@ frame is what the round will actually follow and is what gets aimed.
   bandit's head *inside* its own armour. The muzzle now comes from the seat's turret aim transform
   rather than that head.
 
-Firing respects the same `/bandit shoot start|stop` standing order as on foot - so with
+Firing respects the same `/bandit shoot on|off` standing order as on foot - so with
 `HoldFireByDefault` on, a fresh gunner tracks but holds its fire until told otherwise - and it will
 not shoot with one of its own within 1.5m of the firing line.
 
@@ -62,7 +62,7 @@ something it can never remove. A vehicle with our own side aboard doesn't qualif
 Vehicle turrets do this **unconditionally** - a tank has no business waiting politely for someone to
 step out from behind a sapling. On foot it is per-kit via `DestroysCover`, off by default: a
 rifleman putting rounds into a trunk achieves nothing but noise, so this is for grenadiers and
-anything firing explosives. `/banditstatus` reports `clearing cover`.
+anything firing explosives. `/bandit debug status` reports `clearing cover`.
 
 ## Reloads are served, not skipped
 
@@ -75,7 +75,7 @@ The magazine is still refilled - a bot has no client to play a reload animation 
 gun's own `Reload_Time` has elapsed, which is the same figure vanilla measures its own reload
 against (the animation length only wins where an animation exists, which on a dedicated server it
 never does; a gun that declares none gets 2.5s). The bandit holds its fire for the duration instead
-of dry-firing through it, on foot and in a turret alike, and `/banditstatus` reports
+of dry-firing through it, on foot and in a turret alike, and `/bandit debug status` reports
 `reloading (4.2s)`.
 
 Ground vehicles only for now. Boats and aircraft are refused with a reason rather than half-driven:

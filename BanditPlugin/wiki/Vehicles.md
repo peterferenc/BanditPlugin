@@ -1,7 +1,7 @@
 # Vehicles
 
-`/banditv drive` seats the last spawned bandit in the driver seat of the nearest vehicle within
-50m and holds it there. `/banditv exit` gets it out.
+`/bandit seat driver` seats the last spawned bandit in the driver seat of the nearest vehicle within
+50m and holds it there. `/bandit seat exit` gets it out.
 
 **The driver is the physics.** A server never simulates a driven vehicle: `PlayerInput` branches on
 the packet type, and a `DrivingPlayerInputPacket` carries a position and a rotation where the
@@ -20,8 +20,8 @@ A driver's stance is `DRIVING` and only a `DrivingPlayerInputPacket` reaches
 `InteractableVehicle.simulate`. Every other seat's stance is `SITTING`, and it is the **walking**
 packet's `SITTING` branch that calls `PlayerMovement.ServerUpdateTurretAim()` - the one thing that
 replicates where a gunner is pointing. Send a driving packet from a turret seat and the turret never
-moves for anyone watching. So `/banditv gunner` sends walking packets carrying nothing but a look
-angle, and `/banditv drive` sends driving packets carrying a pose.
+moves for anyone watching. So `/bandit seat gunner` sends walking packets carrying nothing but a look
+angle, and `/bandit seat driver` sends driving packets carrying a pose.
 
 Those look angles are **seat-local**. `PlayerLook` assigns yaw to the seat's own local rotation and
 clamps it - a driver to ±160°, a turret seat to the asset's `yawMin`/`yawMax` and
@@ -33,7 +33,7 @@ broken tracking.
 
 ## Driving somewhere, and not fitting
 
-`/banditvgoto` routes with the same A* the bandits walk on, then does something the navmesh cannot
+`/bandit drive` routes with the same A* the bandits walk on, then does something the navmesh cannot
 help with. That mesh was baked for a walking zombie; it says nothing about whether a 3m-wide truck
 fits through a gap it will happily route a person through. So before any heading is driven, a plate
 the width **and height** of the vehicle is swept along it (`Physics.BoxCast`, self-hits filtered),
@@ -59,7 +59,7 @@ pressed against something reported every direction as clear and kept pushing; th
 reverse, and the reverse sweep is the one place overlap is still forgiven.
 
 When nothing in the fan fits, the vehicle **stops** rather than grinding into the gap, and
-`/banditstatus` reports `blocked 40m out`. That is a real outcome, not a failure: the vehicle is the
+`/bandit debug status` reports `blocked 40m out`. That is a real outcome, not a failure: the vehicle is the
 size it is, and a bandit that gets as close as it can and says so beats one wedged in a doorway
 still pushing.
 
@@ -106,14 +106,14 @@ through its own squad. **The bandit moves instead.**
 
 While driving, any squadmate inside the lane - the vehicle's own width plus a margin, from its nose
 to about two seconds' driving ahead - is given `BanditBrain.OrderEvade` toward the nearer side. That
-order outranks everything: cover, patrol, the fight it is in, a `/banditgoto`, even `MovementEnabled`
+order outranks everything: cover, patrol, the fight it is in, a `/bandit goto`, even `MovementEnabled`
 being off. A bandit lying prone in cover stands up and sprints out of the lane, then goes back to
 what it was doing about a second later, because the order is short and re-issued every packet only
 while it is still in the way. Squadmates riding in a vehicle are skipped, and so is anyone more than
 3m above or below - a bandit on a roof over the lane is in no danger.
 
 Two loose bandits both have a null squad, which puts them in the same "ours" pool, so this works when
-testing with `/bandit` as well as with `/squadspawn`.
+testing with `/bandit spawn` as well as with `/bandit squad spawn`.
 
 ## The footprint has to be measured in local space
 

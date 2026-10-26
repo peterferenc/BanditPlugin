@@ -51,7 +51,7 @@ namespace BanditPlugin
         public BanditLoadout Loadout = new BanditLoadout();
 
         /// <summary>
-        /// What one of these is worth when "/banditevent &lt;cost&gt;" is spending its budget, and the
+        /// What one of these is worth when "/bandit event spawn &lt;cost&gt;" is spending its budget, and the
         /// figure every squad's own cost is summed from.
         ///
         /// The scale is set by whatever you make the rifleman: it is the ordinary soldier in every
@@ -124,7 +124,7 @@ namespace BanditPlugin
         /// </summary>
         public bool BurstFire;
 
-        /// <summary>Spawn this class holding fire, until /bandit shoot start.</summary>
+        /// <summary>Spawn this class holding fire, until /bandit shoot on.</summary>
         public bool HoldFire = true;
 
         /// <summary>Spawn this class already looking for cover when it is exposed.</summary>

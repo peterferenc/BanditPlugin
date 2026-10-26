@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using SDG.Unturned;
 using UnityEngine;
@@ -24,6 +25,13 @@ namespace BanditPlugin.Navigation
         public Vector3 PeekPosition;
 
         public float Score;
+
+        /// <summary>
+        /// Whether the spot still hides the bandit a hand's breadth either side of it. A spot
+        /// without that margin - behind a pole or a trunk - only works stood on exactly, so it is
+        /// walked to more precisely. Set on the chosen spot only.
+        /// </summary>
+        public bool HasMargin;
     }
 
     /// <summary>What happened to one candidate spot during a search.</summary>
@@ -37,10 +45,19 @@ namespace BanditPlugin.Navigation
         StillVisible,
 
         /// <summary>A squadmate got there first, or is close enough that this would bunch them up.</summary>
-        TakenBySquadmate
+        TakenBySquadmate,
+
+        /// <summary>A cover slot on the threat's side of its object - in front of the cover, not behind it.</summary>
+        FacesThreat,
+
+        /// <summary>Getting there means running toward the threat, or across its front.</summary>
+        TowardThreat,
+
+        /// <summary>Hidden from where the threat is, but not from where it is heading.</summary>
+        ExposedSoon
     }
 
-    /// <summary>One candidate and its verdict, for /banditcover to draw and log.</summary>
+    /// <summary>One candidate and its verdict, for /bandit debug cover to draw and log.</summary>
     public struct BanditCoverCandidateReport
     {
         public Vector3 Position;
@@ -49,7 +66,7 @@ namespace BanditPlugin.Navigation
 
     /// <summary>
     /// Why a cover search came out the way it did. A failed search is otherwise invisible - the
-    /// bot just stands there and nothing is logged, because nothing went wrong - so /banditcover
+    /// bot just stands there and nothing is logged, because nothing went wrong - so /bandit debug cover
     /// reports these counts and turns "cover doesn't work" into a specific rejected test.
     /// </summary>
     public struct BanditCoverSearchStats
@@ -66,6 +83,24 @@ namespace BanditPlugin.Navigation
 
         public int Viable;
 
+        /// <summary>Of the candidates, how many were cover slots - see BanditCoverSlots.</summary>
+        public int Slots;
+        public int RejectedFacesThreat;
+        public int RejectedTowardThreat;
+        public int RejectedExposedSoon;
+
+        /// <summary>Candidates the budget ran out before - ranked too low to be worth the raycasts.</summary>
+        public int NotEvaluated;
+
+        /// <summary>Barricades in range - placed cover, the kind a test builds - and what became of them.</summary>
+        public int Barricades;
+
+        /// <summary>Barricades whose probe ray from the threat met nothing, so they offered no spot.</summary>
+        public int BarricadeProbeMissed;
+
+        /// <summary>Barricades the ray met, whose stepping back never got off the top of cover.</summary>
+        public int BarricadeNoGroundBehind;
+
         /// <summary>
         /// True when the overlap query filled its collider buffer, i.e. there were more solid
         /// things within the search radius than the search could look at. Worth surfacing rather
@@ -80,7 +115,9 @@ namespace BanditPlugin.Navigation
             return $"{Candidates} candidates: {RejectedNoGround} no ground, " +
                    $"{RejectedTooCloseToThreat} too close to threat, {RejectedNoStandingRoom} no room, " +
                    $"{RejectedNotCover} still visible, {RejectedNotBetter} not better than here, " +
-                   $"{RejectedTakenBySquadmate} taken by squadmates, {Viable} viable"
+                   $"{RejectedTakenBySquadmate} taken by squadmates, {RejectedFacesThreat} facing the threat, " +
+                   $"{RejectedTowardThreat} toward the threat, {RejectedExposedSoon} exposed soon, " +
+                   $"{NotEvaluated} not evaluated, {Viable} viable ({Slots} of the candidates were slots)"
                    + (ColliderBufferFull ? " (collider buffer full - reduce CoverSearchRadius)" : string.Empty);
         }
     }
@@ -98,18 +135,16 @@ namespace BanditPlugin.Navigation
     /// Every survivor is then scored on the same two raycasts vanilla sentries use for visibility,
     /// so "in cover" here means exactly what "can't be shot" means everywhere else in the plugin.
     /// </summary>
-    public static class BanditCoverFinder
+    public static partial class BanditCoverFinder
     {
         /// <summary>
         /// Eye height used for the peek test. Unlike the body samples this really is one point:
         /// peeking is about whether the bot's *aim origin* can see the target, and that is a
-        /// single place - the same one its bullets leave from.
-        ///
-        /// BanditGeometry.VisibilityEyeHeight rather than StandingEyeHeight, because this is a
-        /// height assumed over a ground sample rather than one read off a real player - and the
-        /// brain resolves its threat eye the same way, so the two agree.
+        /// single place - the same one its bullets leave from: vanilla's standing look height
+        /// (PlayerLook.HEIGHT_LOOK_STAND), which is also where a bandit standing up out of crouch
+        /// cover shoots from.
         /// </summary>
-        private const float PeekEyeHeight = VisibilityEyeHeight;
+        private const float PeekEyeHeight = StandingEyeHeight;
 
         /// <summary>
         /// Half the shoulder width. The body samples are spread this far either side of centre,
@@ -117,11 +152,24 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private const float ShoulderHalfWidth = 0.22f;
 
-        /// <summary>Heights sampled down the body when standing: eye, chest, waist, knees.</summary>
-        private static readonly float[] StandingSampleHeights = { 1.65f, 1.35f, 1.0f, 0.55f };
+        /// <summary>
+        /// Heights sampled down the body when standing: the top of the head, chest, waist, knees.
+        ///
+        /// The top sample is the head, not somewhere near it. Vanilla puts a standing player's eye
+        /// at 1.75m (PlayerLook.HEIGHT_LOOK_STAND) and the head goes on above that; these used to
+        /// stop at 1.65, so a wall a little short of eye level passed as standing cover with the
+        /// bandit's whole head showing over it - and the enemy's line of sight, which is taken eye
+        /// to eye, saw it every time.
+        /// </summary>
+        private static readonly float[] StandingSampleHeights = { 1.85f, 1.35f, 1.0f, 0.55f };
 
-        /// <summary>The same, crouched - the whole body is inside 1.2m (PlayerMovement.HEIGHT_CROUCH).</summary>
-        private static readonly float[] CrouchSampleHeights = { 0.95f, 0.8f, 0.6f, 0.3f };
+        /// <summary>
+        /// The same, crouched. A crouching eye is at 1.2m (PlayerLook.HEIGHT_LOOK_CROUCH), so the
+        /// head reaches about 1.3. These used to top out at 0.95, which is why a single sandbag -
+        /// 1.07m - was taken as crouch cover by bandits whose heads were plainly above it. It takes
+        /// two sandbags to hide a crouching man.
+        /// </summary>
+        private static readonly float[] CrouchSampleHeights = { 1.3f, 0.95f, 0.6f, 0.3f };
 
         /// <summary>Offsets tried when nudging a chosen spot deeper into cover, nearest first.</summary>
         private static readonly float[] RefinementDistances = { 0.4f, 0.8f, 1.2f };
@@ -135,6 +183,15 @@ namespace BanditPlugin.Navigation
 
         /// <summary>How far to the side a "peek" step is.</summary>
         private const float PeekOffset = 0.9f;
+
+        /// <summary>
+        /// Further steps tried, nearest first, when the short one is still behind the cover. Only
+        /// for cover that hides the bandit standing - crouch cover peeks by standing up. A tree
+        /// trunk is cleared in under a metre, but the middle of a wall is not: behind a sandbag
+        /// wall seven metres long the 0.9m step was still in its shadow, the spot was marked "no
+        /// peek", and the bandit sat out the fight in perfect, useless cover.
+        /// </summary>
+        private static readonly float[] WidePeekOffsets = { 1.5f, 2.25f, 3f, 3.75f };
 
         /// <summary>Candidates rounded onto a grid this size are treated as the same spot.</summary>
         private const float DedupeGridSize = 1.5f;
@@ -156,7 +213,34 @@ namespace BanditPlugin.Navigation
         /// </summary>
         private static readonly Collider[] ColliderBuffer = new Collider[128];
         private static readonly HashSet<long> SeenCells = new HashSet<long>();
-        private static readonly List<Vector3> Candidates = new List<Vector3>();
+        private static readonly List<Candidate> Candidates = new List<Candidate>();
+
+        /// <summary>One place the search might send a bandit, before any raycast has been spent on it.</summary>
+        private struct Candidate
+        {
+            public Vector3 Position;
+
+            /// <summary>A cover slot, with the facing of the surface it stands against.</summary>
+            public bool IsSlot;
+            public Vector3 Normal;
+
+            /// <summary>The score as far as it can be known without a raycast; sets the order they are tried in.</summary>
+            public float CheapScore;
+        }
+
+        private static readonly Comparison<Candidate> ByCheapScore = (a, b) => b.CheapScore.CompareTo(a.CheapScore);
+
+        /// <summary>
+        /// The raycast budget for one search. Candidates are tried best-first by their cheap score,
+        /// each with a quick early-out visibility test, and only the ones that pass go on to the
+        /// full evaluation - peek positions and all. With slots round every object in range there
+        /// can be hundreds of candidates, and the old way of fully evaluating every one would cost
+        /// tens of thousands of rays. Crysis 2's tactical point system and Mafia III both work in
+        /// this order: cheap filters, then a sort, then raycasts from the top down.
+        /// </summary>
+        private const int QuickCheckBudget = 80;
+        private const int FullEvaluationBudget = 12;
+        private const int EnoughViable = 5;
 
         /// <summary>
         /// Looks for a better place to be than where the bot currently is.
@@ -202,7 +286,7 @@ namespace BanditPlugin.Navigation
 
         /// <inheritdoc cref="TryFindCover(Vector3,Vector3,float,int,float,float,bool,out BanditCoverSpot)"/>
         /// <param name="reports">
-        /// Optional per-candidate verdicts, for /banditcover to draw in the world. Filled only
+        /// Optional per-candidate verdicts, for /bandit debug cover to draw in the world. Filled only
         /// when non-null, so the search this runs for a live bot allocates nothing extra.
         /// </param>
         public static bool TryFindCover(
@@ -230,6 +314,12 @@ namespace BanditPlugin.Navigation
         /// Null or an empty list restores the plain single-bandit search.
         /// </param>
         /// <param name="minSeparation">Metres of clearance to keep from each occupied spot.</param>
+        /// <param name="predictedEye">
+        /// Where the threat's eye will be shortly, if it is moving. A spot has to hide the bandit
+        /// from there as well as from where the threat is now, so cover is chosen ahead of a
+        /// threat walking round it rather than given up after it has. Null, or a point within a
+        /// metre of <paramref name="threatEye"/>, when the threat is standing still.
+        /// </param>
         public static bool TryFindCover(
             Vector3 selfPosition,
             Vector3 threatEye,
@@ -242,12 +332,19 @@ namespace BanditPlugin.Navigation
             out BanditCoverSearchStats stats,
             List<BanditCoverCandidateReport> reports,
             IList<Vector3> occupiedSpots,
-            float minSeparation)
+            float minSeparation,
+            float maxAdvance = float.PositiveInfinity,
+            Vector3? predictedEye = null)
         {
             best = default;
             stats = default;
             reports?.Clear();
             bool found = false;
+            bool predicting = predictedEye.HasValue && FlatDistance(predictedEye.Value, threatEye) > 1f;
+
+            // How near the threat a candidate may be: no closer than maxAdvance in from where the
+            // bandit stands now. See BanditConfiguration.CoverMaxAdvance.
+            float closestAllowed = FlatDistance(selfPosition, threatEye) - maxAdvance;
 
             // The bar to beat. If the bot is already in cover this scores well and most candidates
             // are rejected; if it is standing in the open this evaluates to nothing and anything
@@ -256,50 +353,125 @@ namespace BanditPlugin.Navigation
             // Held to the separation rule as well, so a bandit whose mate has since claimed the
             // spot it is standing on stops treating that spot as good enough and goes elsewhere -
             // otherwise the first one there would keep everyone else's search from ever winning.
+            // And to the prediction: where the bandit stands is no bar to beat if the threat is
+            // about to see round it.
             float incumbentScore = float.MinValue;
+            bool bestIsIncumbent = false;
             if (!IsTaken(selfPosition, occupiedSpots, minSeparation)
                 && TryEvaluate(selfPosition, selfPosition, threatEye, minimumThreatDistance,
-                    preferredThreatDistance, preferHidden, out BanditCoverSpot incumbent, ref stats, out _))
+                    preferredThreatDistance, preferHidden, out BanditCoverSpot incumbent, ref stats, out _)
+                && !(predicting && IsAnyOfBodyVisible(predictedEye.Value, incumbent.Position)))
             {
                 incumbentScore = incumbent.Score;
                 best = incumbent;
                 found = true;
+                bestIsIncumbent = true;
             }
 
-            stats.ColliderBufferFull = CollectCandidates(selfPosition, threatEye, searchRadius, ringSamples);
+            stats.ColliderBufferFull = CollectCandidates(selfPosition, threatEye, searchRadius, ringSamples, ref stats);
             stats.Candidates = Candidates.Count;
 
+            // The cheap pass: everything that can be decided without a raycast, and a provisional
+            // score for the rest - the distance and range terms of the real score, which are most
+            // of what separates one hiding place from another.
+            Ranked.Clear();
             for (int i = 0; i < Candidates.Count; i++)
             {
+                Candidate candidate = Candidates[i];
+                BanditCoverOutcome? rejected = null;
+
                 // Before the evaluation rather than after: this test is two subtractions against a
                 // handful of claims, and the one it skips ends in a dozen raycasts.
-                if (IsTaken(Candidates[i], occupiedSpots, minSeparation))
+                if (IsTaken(candidate.Position, occupiedSpots, minSeparation))
                 {
                     stats.RejectedTakenBySquadmate++;
-                    reports?.Add(new BanditCoverCandidateReport
-                    {
-                        Position = Candidates[i],
-                        Outcome = BanditCoverOutcome.TakenBySquadmate
-                    });
+                    rejected = BanditCoverOutcome.TakenBySquadmate;
+                }
+                else if (FlatDistance(candidate.Position, threatEye) < closestAllowed)
+                {
+                    stats.RejectedTooCloseToThreat++;
+                    rejected = BanditCoverOutcome.TooCloseToThreat;
+                }
+                else if (candidate.IsSlot && !SlotFacesAway(new CoverSlot { Position = candidate.Position, Normal = candidate.Normal }, threatEye))
+                {
+                    stats.RejectedFacesThreat++;
+                    rejected = BanditCoverOutcome.FacesThreat;
+                }
+                else if (RunsPastThreat(selfPosition, candidate.Position, threatEye))
+                {
+                    stats.RejectedTowardThreat++;
+                    rejected = BanditCoverOutcome.TowardThreat;
+                }
+
+                if (rejected.HasValue)
+                {
+                    reports?.Add(new BanditCoverCandidateReport { Position = candidate.Position, Outcome = rejected.Value });
                     continue;
                 }
 
-                bool viable = TryEvaluate(Candidates[i], selfPosition, threatEye, minimumThreatDistance,
+                candidate.CheapScore = -FlatDistance(selfPosition, candidate.Position) * 2f
+                    - Mathf.Abs(FlatDistance(candidate.Position, threatEye) - preferredThreatDistance) * 0.5f
+                    + Mathf.Max(0f, 8f - DistanceFromLine(candidate.Position, selfPosition, threatEye));
+                Ranked.Add(candidate);
+            }
+
+            Ranked.Sort(ByCheapScore);
+
+            // The expensive pass, best first: a quick early-out silhouette test, from where the
+            // threat is and from where it is heading, then the full evaluation on what survives.
+            int quickChecks = 0;
+            int fullEvaluations = 0;
+            int viable = 0;
+            for (int i = 0; i < Ranked.Count; i++)
+            {
+                if (quickChecks >= QuickCheckBudget || fullEvaluations >= FullEvaluationBudget || viable >= EnoughViable)
+                {
+                    stats.NotEvaluated = Ranked.Count - i;
+                    break;
+                }
+
+                Vector3 position = Ranked[i].Position;
+                quickChecks++;
+
+                if (!TrySnapToGround(position, out Vector3 ground))
+                {
+                    stats.RejectedNoGround++;
+                    reports?.Add(new BanditCoverCandidateReport { Position = position, Outcome = BanditCoverOutcome.NoGround });
+                    continue;
+                }
+
+                if (IsAnyOfBodyVisible(threatEye, ground))
+                {
+                    stats.RejectedNotCover++;
+                    reports?.Add(new BanditCoverCandidateReport { Position = ground, Outcome = BanditCoverOutcome.StillVisible });
+                    continue;
+                }
+
+                if (predicting && IsAnyOfBodyVisible(predictedEye.Value, ground))
+                {
+                    stats.RejectedExposedSoon++;
+                    reports?.Add(new BanditCoverCandidateReport { Position = ground, Outcome = BanditCoverOutcome.ExposedSoon });
+                    continue;
+                }
+
+                fullEvaluations++;
+                bool isViable = TryEvaluate(ground, selfPosition, threatEye, minimumThreatDistance,
                     preferredThreatDistance, preferHidden, out BanditCoverSpot spot, ref stats,
                     out BanditCoverOutcome outcome);
 
                 reports?.Add(new BanditCoverCandidateReport
                 {
-                    Position = viable ? spot.Position : Candidates[i],
+                    Position = isViable ? spot.Position : ground,
                     Outcome = outcome
                 });
 
-                if (!viable)
+                if (!isViable)
                 {
                     continue;
                 }
 
                 stats.Viable++;
+                viable++;
 
                 // Margin, not just ">": swapping cover costs a walk across open ground, so it has
                 // to be a clear improvement to be worth it.
@@ -313,6 +485,7 @@ namespace BanditPlugin.Navigation
                 {
                     best = spot;
                     found = true;
+                    bestIsIncumbent = false;
                 }
             }
 
@@ -323,13 +496,46 @@ namespace BanditPlugin.Navigation
 
             // Tighten the winner before committing to it. Scoring picks the best of what the
             // candidate generator happened to produce, and "best" is not the same as "actually
-            // hidden" - the generator stands the bot a fixed distance behind whatever the probe
-            // ray hit, which is a guess at where the shadow of that object is.
+            // hidden" - the generator stands the bot a fixed distance off whatever it found, which
+            // is a guess at where the shadow of that object is.
             RefineSpot(ref best, selfPosition, threatEye, minimumThreatDistance,
                 preferredThreatDistance, preferHidden);
 
-            // "The best spot is the one I'm already standing on" is not a move order.
-            return (best.Position - selfPosition).sqrMagnitude > 1f;
+            best.HasMargin = best.RequiresCrouch
+                ? IsBodyHidden(threatEye, best.Position, crouched: true, out _)
+                : HasMargin(best.Position, threatEye);
+
+            // "The best spot is the one I'm already standing on" is not a move order. A candidate
+            // a few tenths away is, though - judging that by distance alone left a bandit standing
+            // 0.3m off a spot that hid it, visible, refusing to step onto it.
+            return !bestIsIncumbent && (best.Position - selfPosition).sqrMagnitude > 0.01f;
+        }
+
+        private static readonly List<Candidate> Ranked = new List<Candidate>();
+
+        /// <summary>
+        /// Whether walking straight from the bandit to a spot would take it toward the threat or
+        /// across its front - closer to the threat on the way than at either end, by a margin.
+        /// The Source engine's cover search never expands a node nearer the threat than it is
+        /// itself, S.T.A.L.K.E.R. rejects cover with the enemy "on the way", and Crysis drops any
+        /// point the enemy reaches first: cover you have to run past the gun to reach is not cover.
+        /// </summary>
+        private static bool RunsPastThreat(Vector3 selfPosition, Vector3 spot, Vector3 threatEye)
+        {
+            float onTheWay = DistanceFromLine(threatEye, selfPosition, spot);
+            float ends = Mathf.Min(FlatDistance(selfPosition, threatEye), FlatDistance(spot, threatEye));
+            return onTheWay < ends - RunsPastThreatMarginMetres;
+        }
+
+        private const float RunsPastThreatMarginMetres = 2f;
+
+        /// <summary>
+        /// Whether a crouching body at a spot is hidden from a threat - the early-out form of the
+        /// silhouette test, for the brain's frequent checks on the spot it already holds.
+        /// </summary>
+        public static bool IsHiddenFrom(Vector3 ground, Vector3 threatEye)
+        {
+            return !IsAnyOfBodyVisible(threatEye, ground);
         }
 
         /// <summary>
@@ -373,6 +579,28 @@ namespace BanditPlugin.Navigation
         }
 
         /// <summary>
+        /// Whether a bandit in this cover still has a shot at the threat from it: standing up, for
+        /// cover that only hides a crouch, or stepping out to its peek position for cover that hides
+        /// it standing. The same eye-height ray the search used to decide the spot could peek.
+        /// A spot chosen with no firing angle at all - pure hiding, for a hurt bandit - has none to
+        /// lose and always answers true.
+        /// </summary>
+        public static bool CanFireFrom(BanditCoverSpot spot, Vector3 threatEye)
+        {
+            if (spot.RequiresCrouch)
+            {
+                return IsVisible(threatEye, spot.Position + Vector3.up * PeekEyeHeight);
+            }
+
+            if (spot.CanPeek)
+            {
+                return IsVisible(threatEye, spot.PeekPosition + Vector3.up * PeekEyeHeight);
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Nudges a chosen spot until the whole body is hidden, or gives up and keeps the best it
         /// managed.
         ///
@@ -395,9 +623,18 @@ namespace BanditPlugin.Navigation
             float preferredThreatDistance,
             bool preferHidden)
         {
-            // Already hidden standing up - nothing to fix, and the peek cycle handles the rest.
+            // Hidden standing up. What can still be wrong is the margin: a spot that only hides a
+            // body standing exactly on it is not one a bandit can use, because it never stands
+            // exactly on it - it arrives a few tenths off, sways, steps back from a peek - and the
+            // once-a-second check then finds it visible and throws the cover away.
             if (!spot.RequiresCrouch)
             {
+                if (!HasMargin(spot.Position, threatEye))
+                {
+                    TryFindMargin(ref spot, selfPosition, threatEye, minimumThreatDistance,
+                        preferredThreatDistance, preferHidden);
+                }
+
                 return;
             }
 
@@ -523,7 +760,8 @@ namespace BanditPlugin.Navigation
         }
 
         /// <summary>Returns true when the collider buffer filled, i.e. results were dropped.</summary>
-        private static bool CollectCandidates(Vector3 selfPosition, Vector3 threatEye, float searchRadius, int ringSamples)
+        private static bool CollectCandidates(Vector3 selfPosition, Vector3 threatEye, float searchRadius, int ringSamples,
+            ref BanditCoverSearchStats stats)
         {
             Candidates.Clear();
             SeenCells.Clear();
@@ -558,6 +796,23 @@ namespace BanditPlugin.Navigation
                 // tree's bounds are its canopy, three to five metres across, so the spot landed
                 // that far behind a trunk 0.3m wide, where the trunk stops occluding anything.
                 // Every tree then failed the "still visible crouched" test and was thrown away.
+                bool barricade = IsBarricade(collider);
+                if (barricade)
+                {
+                    stats.Barricades++;
+                }
+
+                // Every slot round the object, whichever side the threat is on - which side hides
+                // is the search's question, answered per slot. See BanditCoverSlots.
+                foreach (CoverSlot slot in SlotsOf(collider))
+                {
+                    if (FlatDistance(slot.Position, selfPosition) <= searchRadius)
+                    {
+                        Candidates.Add(new Candidate { Position = slot.Position, IsSlot = true, Normal = slot.Normal });
+                        stats.Slots++;
+                    }
+                }
+
                 Vector3 aimPoint = new Vector3(
                     bounds.center.x,
                     Mathf.Min(bounds.min.y + 1f, bounds.max.y - 0.05f),
@@ -576,6 +831,11 @@ namespace BanditPlugin.Navigation
                 if (!Physics.Raycast(threatEye, lineOfFire, out RaycastHit occluder, landmarkDistance + 2f,
                         RayMasks.BLOCK_COLLISION, QueryTriggerInteraction.Ignore))
                 {
+                    if (barricade)
+                    {
+                        stats.BarricadeProbeMissed++;
+                    }
+
                     continue; // nothing solid between the threat and this landmark
                 }
 
@@ -586,7 +846,55 @@ namespace BanditPlugin.Navigation
                 }
                 behind.Normalize();
 
-                AddCandidate(occluder.point + behind * (PlayerStance.RADIUS + 0.5f), occluder.point.y);
+                // Just behind the face the threat sees - but "just behind" has to be measured
+                // against how deep the thing is. A fixed step back puts the spot on top of anything
+                // deeper than a metre: a sandbag is an arc nearly two metres front to back, and a
+                // bandit standing on it is the most visible thing on the field. So step further
+                // back until the ground under the spot is ground, not the cover itself.
+                //
+                // And once it has had to step over cover, further still, to the first spot that
+                // fits a body and hides it. A wall seen end-on is the case: past the near end the
+                // steps find pockets of ground between the sandbags too tight to stand in, then
+                // the tapered far end, which hides a head but not shoulders - and the shadow that
+                // does hide a body starts a few metres beyond it. Stopping at the first ground
+                // offered only those, and the wall was thrown away from the one angle a bandit
+                // most needs to move round it. Cover that never had to be stepped over keeps the
+                // first spot, so a pole costs no more than it did; the faces of an object the probe
+                // does not point at come from its slots.
+                Vector3? fallback = null;
+                bool steppedOverCover = false;
+                for (int step = 0; step < CoverDepthSteps; step++)
+                {
+                    Vector3 spot = occluder.point + behind * (PlayerStance.RADIUS + 0.5f + step * CoverDepthStepMetres);
+                    if (IsOnTopOfCover(spot))
+                    {
+                        steppedOverCover = true;
+                        continue;
+                    }
+
+                    if (!steppedOverCover)
+                    {
+                        fallback = spot;
+                        break;
+                    }
+
+                    fallback = fallback ?? spot;
+                    if (TrySnapToGround(spot, out Vector3 ground) && HasStandingRoom(ground)
+                        && !IsAnyOfBodyVisible(threatEye, ground))
+                    {
+                        fallback = spot;
+                        break;
+                    }
+                }
+
+                if (fallback.HasValue)
+                {
+                    AddCandidate(fallback.Value, occluder.point.y);
+                }
+                else if (barricade)
+                {
+                    stats.BarricadeNoGroundBehind++;
+                }
             }
 
             for (int i = 0; i < ringSamples; i++)
@@ -611,7 +919,7 @@ namespace BanditPlugin.Navigation
                 return;
             }
 
-            Candidates.Add(point);
+            Candidates.Add(new Candidate { Position = point });
         }
 
         private static bool TryEvaluate(
@@ -665,18 +973,23 @@ namespace BanditPlugin.Navigation
             Vector3 lateral = Vector3.Cross(Vector3.up, toThreat);
             bool canPeek = false;
             Vector3 peekPosition = ground;
-            for (int sign = -1; sign <= 1; sign += 2)
+            int offsets = exposedWhenStanding ? 1 : 1 + WidePeekOffsets.Length;
+            for (int o = 0; o < offsets && !canPeek; o++)
             {
-                Vector3 peek = ground + lateral * (PeekOffset * sign);
-                if (!TrySnapToGround(peek, out Vector3 peekGround) || !HasStandingRoom(peekGround))
+                float offset = o == 0 ? PeekOffset : WidePeekOffsets[o - 1];
+                for (int sign = -1; sign <= 1; sign += 2)
                 {
-                    continue;
-                }
-                if (IsVisible(threatEye, peekGround + Vector3.up * PeekEyeHeight))
-                {
-                    canPeek = true;
-                    peekPosition = peekGround;
-                    break;
+                    Vector3 peek = ground + lateral * (offset * sign);
+                    if (!TrySnapToGround(peek, out Vector3 peekGround) || !HasStandingRoom(peekGround))
+                    {
+                        continue;
+                    }
+                    if (IsVisible(threatEye, peekGround + Vector3.up * PeekEyeHeight))
+                    {
+                        canPeek = true;
+                        peekPosition = peekGround;
+                        break;
+                    }
                 }
             }
 
@@ -725,10 +1038,106 @@ namespace BanditPlugin.Navigation
                     RayMasks.BLOCK_COLLISION | RayMasks.GROUND2, QueryTriggerInteraction.Ignore))
             {
                 ground = hit.point;
-                return true;
+
+                // The top of a barricade is not somewhere to take cover - it is the cover, and
+                // standing on it puts the bandit above it in full view.
+                return !IsBarricade(hit.collider);
             }
 
             ground = candidate;
+            return false;
+        }
+
+        /// <summary>How far either side of a standing spot the body must also be hidden.</summary>
+        private const float CoverMarginMetres = 0.35f;
+
+        /// <summary>Whether a standing body is hidden at a spot and a hand's breadth either side of it.</summary>
+        private static bool HasMargin(Vector3 ground, Vector3 threatEye)
+        {
+            Vector3 toThreat = Flatten(threatEye - ground);
+            Vector3 lateral = toThreat.sqrMagnitude > 0.0001f
+                ? Vector3.Cross(Vector3.up, toThreat.normalized) * CoverMarginMetres
+                : Vector3.right * CoverMarginMetres;
+
+            return IsBodyHidden(threatEye, ground + lateral, crouched: false, out _)
+                && IsBodyHidden(threatEye, ground - lateral, crouched: false, out _);
+        }
+
+        /// <summary>
+        /// Moves a standing spot to the nearest one around it that keeps its margin - deeper into
+        /// the shadow first, then along the cover - without giving up a peek it had. Leaves it
+        /// where it was if nothing nearby does better.
+        /// </summary>
+        private static void TryFindMargin(ref BanditCoverSpot spot, Vector3 selfPosition, Vector3 threatEye,
+            float minimumThreatDistance, float preferredThreatDistance, bool preferHidden)
+        {
+            Vector3 toThreat = Flatten(threatEye - spot.Position);
+            if (toThreat.sqrMagnitude < 0.0001f)
+            {
+                return;
+            }
+
+            toThreat.Normalize();
+            Vector3 away = -toThreat;
+            Vector3 lateral = Vector3.Cross(Vector3.up, toThreat);
+            Vector3[] directions = { away, (away + lateral).normalized, (away - lateral).normalized, lateral, -lateral };
+
+            BanditCoverSearchStats scratch = default;
+            foreach (float distance in RefinementDistances)
+            {
+                foreach (Vector3 direction in directions)
+                {
+                    if (!TryEvaluate(spot.Position + direction * distance, selfPosition, threatEye,
+                            minimumThreatDistance, preferredThreatDistance, preferHidden,
+                            out BanditCoverSpot candidate, ref scratch, out _))
+                    {
+                        continue;
+                    }
+
+                    if (candidate.RequiresCrouch || (spot.CanPeek && !candidate.CanPeek))
+                    {
+                        continue;
+                    }
+
+                    if (HasMargin(candidate.Position, threatEye))
+                    {
+                        spot = candidate;
+                        return;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// How many times, and how far each time, a candidate is stepped back off the top of a
+        /// deep piece of cover. Enough to get behind something ten metres deep - which a wall is,
+        /// seen end-on: the probe hits the near end, and the only shadow is past the far one.
+        /// Three metres was enough for a sandbag seen from the front and left a 3-wide wall seen
+        /// along its length with no candidate at all. Stepping stops at the first patch of real
+        /// ground, so thin cover costs no more than it did.
+        /// </summary>
+        private const int CoverDepthSteps = 20;
+        private const float CoverDepthStepMetres = 0.5f;
+
+        /// <summary>Whether the ground under a point is the top of a barricade rather than ground.</summary>
+        private static bool IsOnTopOfCover(Vector3 point)
+        {
+            return Physics.Raycast(point + Vector3.up * 3f, Vector3.down, out RaycastHit hit, 12f,
+                    RayMasks.BLOCK_COLLISION | RayMasks.GROUND2, QueryTriggerInteraction.Ignore)
+                && IsBarricade(hit.collider);
+        }
+
+        /// <summary>Whether a collider belongs to a placed barricade - its root carries the tag.</summary>
+        private static bool IsBarricade(Collider collider)
+        {
+            for (Transform t = collider != null ? collider.transform : null; t != null; t = t.parent)
+            {
+                if (t.CompareTag("Barricade"))
+                {
+                    return true;
+                }
+            }
+
             return false;
         }
 
@@ -793,6 +1202,32 @@ namespace BanditPlugin.Navigation
         }
 
         /// <summary>
+        /// <see cref="IsBodyHidden"/> for a crouching body, inverted, stopping at the first sample
+        /// that shows - so a spot in the open costs one ray rather than twelve. For the candidate
+        /// generator, which may try many spots per piece of cover.
+        /// </summary>
+        private static bool IsAnyOfBodyVisible(Vector3 threatEye, Vector3 ground)
+        {
+            Vector3 toThreat = Flatten(threatEye - ground);
+            Vector3 lateral = toThreat.sqrMagnitude > 0.0001f
+                ? Vector3.Cross(Vector3.up, toThreat.normalized) * ShoulderHalfWidth
+                : Vector3.right * ShoulderHalfWidth;
+
+            foreach (float height in CrouchSampleHeights)
+            {
+                Vector3 centre = ground + Vector3.up * height;
+                if (IsVisible(threatEye, centre)
+                    || IsVisible(threatEye, centre + lateral)
+                    || IsVisible(threatEye, centre - lateral))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// One ray, BLOCK_SENTRY - the same mask BanditBotController uses for its own line of
         /// sight, so "cover" here means the same thing as "can't shoot me" there.
         /// </summary>
@@ -807,6 +1242,19 @@ namespace BanditPlugin.Navigation
 
             return !Physics.Raycast(new Ray(from, delta / distance), distance - 0.025f,
                 RayMasks.BLOCK_SENTRY, QueryTriggerInteraction.Ignore);
+        }
+
+        /// <summary>
+        /// Whether a body fits at a point and is hidden there from a threat - the ground, room and
+        /// silhouette tests a candidate has to pass, without the scoring. For tests that sweep an
+        /// area to learn whether any hiding spot exists, independently of what the candidate
+        /// generator happened to offer.
+        /// </summary>
+        public static bool IsHidingSpot(Vector3 point, Vector3 threatEye, bool crouched, out Vector3 ground)
+        {
+            return TrySnapToGround(point, out ground)
+                && HasStandingRoom(ground)
+                && IsBodyHidden(threatEye, ground, crouched, out _);
         }
 
         /// <summary>Distance from a point to the segment between two others, on the XZ plane.</summary>

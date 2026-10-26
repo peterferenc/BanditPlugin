@@ -10,11 +10,14 @@ namespace BanditPlugin
         public static BanditPlugin Instance { get; private set; }
 
         /// <summary>
-        /// Server frame timing, read by /banditperf. Runs from load rather than being switched on,
+        /// Server frame timing, read by /bandit debug perf. Runs from load rather than being switched on,
         /// because it costs one float a frame and because the measurement that matters is a
         /// before-and-after - which needs the "before" to have been recorded already.
         /// </summary>
         public BanditPerfMonitor Perf { get; private set; }
+
+        /// <summary>The end-to-end test runner behind /bandit test, and BANDIT_TEST's unattended runs.</summary>
+        public Testing.BanditTestRunner Tests { get; private set; }
 
         protected override void Load()
         {
@@ -22,12 +25,13 @@ namespace BanditPlugin
             BackfillEmptyCollections();
 
             Perf = gameObject.AddComponent<BanditPerfMonitor>();
+            Tests = gameObject.AddComponent<Testing.BanditTestRunner>();
 
             // Before anything can be spawned, so there is never a window where a bandit is
             // connected and still counting against the server's capacity.
             BanditSlotPatches.Apply();
 
-            // Create the group behind every team up front, so "/banditteam join red" works before
+            // Create the group behind every team up front, so "/bandit team join red" works before
             // any bandit has been spawned onto red. Lookups create one on demand as well - this is
             // only so a team exists as soon as the server does.
             BanditTeams.Ensure(Configuration.Instance);
@@ -35,23 +39,14 @@ namespace BanditPlugin
             // Everything an event draws is priced and gated in the configuration file, so a typo in
             // it does not produce an error - it produces a thin event nobody can explain. The
             // structural half of the check runs here; the half that needs a map loaded is
-            // /banditevent check.
+            // /bandit info event.
             BanditEventCheck.LogProblems(Configuration.Instance);
 
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
-            Logger.Log("[Bandit] Loaded. /banditevent <cost> buys a whole fight - squads and crewed "
-                + "vehicles drawn against a points budget, /banditevent check prices everything; "
-                + "/banditevent wp records a convoy route and /banditevent convoy <cost> sends a "
-                + "column of vehicles along it, /banditroads reports the road graph it drives on; "
-                + "/squadspawn <type> puts a whole squad down fighting - "
-                + "/squadspawn squads lists the types, and team:<team> puts one on a side; "
-                + "/banditteam join <team> puts you on one, and bandits on it stop shooting at you; "
-                + "/bandit spawns one - it just stands until ordered. "
-                + "/bandit shoot|cover|peek start|stop are the standing orders; /banditgoto sends one somewhere, "
-                + "/banditpatrol sets it walking a route, /banditprone lies one down, "
-                + "/banditv drive|gunner|exit puts one in the nearest vehicle and /banditvgoto drives it, "
-                + "/banditstatus reports what each is doing, "
-                + "/banditperf reports what the server frames are costing.");
+            Logger.Log("[Bandit] Loaded. Everything is under /bandit - /bandit help lists it: "
+                + "spawn, squad spawn, event spawn, convoy spawn and vehicle spawn put bandits down; "
+                + "/bandit [target] shoot|cover|peek|patrol on|off, stance, goto, drive and seat give orders, "
+                + "to the last thing spawned unless a target is named; /bandit list shows the numbers.");
         }
 
         /// <summary>
@@ -119,11 +114,18 @@ namespace BanditPlugin
 
             // AddComponent'd onto a GameObject that outlives the plugin, so a reload would otherwise
             // leave the old monitor ticking beside the new one - two components recording the same
-            // frames, and the /banditperf that finds one of them reporting half the story.
+            // frames, and the /bandit debug perf that finds one of them reporting half the story.
             if (Perf != null)
             {
                 Destroy(Perf);
                 Perf = null;
+            }
+
+            // Same reason; and a run in progress would be left with nobody to clean up its bandits.
+            if (Tests != null)
+            {
+                Destroy(Tests);
+                Tests = null;
             }
 
             // Harmony patches outlive the assembly they were declared in, so a reload without this

@@ -420,7 +420,7 @@ namespace BanditPlugin.FakePlayer
         public bool IsDriver => IsSeated && _self.movement.getSeat() == DriverSeat;
 
         /// <summary>
-        /// Keep the seat pointed at the nearest player. Set by /banditv gunner, and cleared when the
+        /// Keep the seat pointed at the nearest player. Set by /bandit seat gunner, and cleared when the
         /// bandit gets out. Harmless in a seat with no turret - the bandit just turns its head.
         /// </summary>
         public bool TrackNearestPlayer { get; set; }
@@ -1381,7 +1381,7 @@ namespace BanditPlugin.FakePlayer
                 + (_navigator.RefusedReason != null ? $" refused={_navigator.RefusedReason}" : string.Empty)
                 + (_navigator.Overlapping != null ? $" inside={_navigator.Overlapping}" : string.Empty));
 
-            // Only so /banditv status reports the speed it is really doing rather than nothing.
+            // Only so /bandit debug status reports the speed it is really doing rather than nothing.
             _speed = Mathf.Abs(forwardVelocity);
             _reversing = reverse;
         }
@@ -1946,7 +1946,7 @@ namespace BanditPlugin.FakePlayer
                 // because a driver that swerves for its own section and flattens the section next
                 // to it is not steering around friends, it is steering around five of them. Two
                 // bandits spawned loose are on the same team as well as in the same null squad,
-                // which is what you want when testing with /bandit rather than /squadspawn.
+                // which is what you want when testing with /bandit spawn rather than /bandit squad spawn.
                 //
                 // An enemy team's bandit is deliberately not in this pool. It gets run over.
                 if (other.Squad != _controller.Squad
@@ -2205,8 +2205,8 @@ namespace BanditPlugin.FakePlayer
             direction = Vector3.forward;
             aimPoint = Vector3.zero;
 
-            // The same standing order the bandit fights under on foot, so /banditstop and
-            // /banditshoot mean what they say from a seat too - and a freshly spawned bandit holds
+            // The same standing order the bandit fights under on foot, so /bandit shoot on|off
+            // means what it says from a seat too - and a freshly spawned bandit holds
             // its fire in a turret exactly as it does on the ground.
             if (vehicle == null || _controller == null || _controller.HoldFire || !TrackNearestPlayer)
             {
@@ -2487,7 +2487,7 @@ namespace BanditPlugin.FakePlayer
             _footprintMeasuredFor = vehicle;
         }
 
-        /// <summary>Where the bandit is sitting and what it is doing there, for /banditstatus.</summary>
+        /// <summary>Where the bandit is sitting and what it is doing there, for /bandit debug status.</summary>
         public string Describe()
         {
             InteractableVehicle vehicle = Vehicle;

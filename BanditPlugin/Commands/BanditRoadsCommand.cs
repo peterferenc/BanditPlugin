@@ -9,7 +9,7 @@ using UnityEngine;
 namespace BanditPlugin.Commands
 {
     /// <summary>
-    /// "/banditroads" - what the road graph thinks this map looks like, and whether it can get from
+    /// "/bandit debug roads" - what the road graph thinks this map looks like, and whether it can get from
     /// here to there.
     ///
     /// A convoy that drives somewhere strange is nearly always a routing answer rather than a
@@ -18,7 +18,7 @@ namespace BanditPlugin.Commands
     /// what a route to your map marker actually costs. Run it once on a new map before wondering
     /// why a convoy took the scenic route.
     /// </summary>
-    public class CommandBanditRoads : IRocketCommand
+    public static class BanditRoadsCommand
     {
         /// <summary>
         /// Paints the road graph on the ground around you.
@@ -110,26 +110,19 @@ namespace BanditPlugin.Commands
         /// </summary>
         private const float SnapDistanceMetres = 80f;
 
-        public AllowedCaller AllowedCaller => AllowedCaller.Player;
-        public string Name => "banditroads";
-        public string Help => "Reports the road graph, and routes from you to your map marker.";
-        public string Syntax => "[route|show [radius] [seconds]|clear]";
-        public List<string> Aliases => new List<string> { "broads" };
-        public List<string> Permissions => new List<string> { "bandit.spawn" };
 
-        public void Execute(IRocketPlayer caller, string[] command)
+        public static void Execute(IRocketPlayer caller, string[] command)
         {
-            Player player = ((UnturnedPlayer)caller).Player;
+            UnturnedPlayer callerPlayer = BanditCommand.RequirePlayer(caller, "debug roads");
+            if (callerPlayer == null)
+            {
+                return;
+            }
+
+            Player player = callerPlayer.Player;
             Vector3 position = player.transform.position;
 
             BanditRoadGraph.EnsureBuilt();
-
-            if (command.Length > 0 && command[0].Equals("clear", System.StringComparison.OrdinalIgnoreCase))
-            {
-                BanditRouteDebug.Clear();
-                UnturnedChat.Say(caller, "Road markers cleared.", Color.green);
-                return;
-            }
 
             if (command.Length > 0 && command[0].Equals("show", System.StringComparison.OrdinalIgnoreCase))
             {
@@ -179,7 +172,7 @@ namespace BanditPlugin.Commands
             bool wantsRoute = command.Length > 0 && command[0].ToLowerInvariant() == "route";
             if (!wantsRoute)
             {
-                UnturnedChat.Say(caller, "Place a map marker and run \"/banditroads route\" to test a route.", Color.gray);
+                UnturnedChat.Say(caller, "Place a map marker and run \"/bandit debug roads route\" to test a route.", Color.gray);
                 return;
             }
 

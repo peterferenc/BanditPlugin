@@ -1066,7 +1066,7 @@ namespace BanditPlugin.Navigation
         /// <summary>
         /// The wanted heading if the vehicle fits through it, otherwise the nearest one in the fan
         /// that it does. Zero when nothing does - which stops the vehicle rather than shoving it
-        /// into the gap, and is what /banditvgoto reports as "it doesn't fit".
+        /// into the gap, and is what /bandit drive reports as "it doesn't fit".
         /// </summary>
         private Vector3 ChooseClearHeading(InteractableVehicle vehicle, BanditVehicleFootprint footprint, Vector3 desired)
         {

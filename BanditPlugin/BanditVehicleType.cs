@@ -38,7 +38,7 @@ namespace BanditPlugin
     public class BanditVehicleType
     {
         /// <summary>
-        /// What "/banditv &lt;name&gt;" matches and what the event reports, case-insensitively.
+        /// What "/bandit vehicle spawn &lt;name&gt;" matches and what the event reports, case-insensitively.
         /// Purely a label for this entry - it has nothing to do with the vehicle's own name.
         /// </summary>
         public string Name = string.Empty;

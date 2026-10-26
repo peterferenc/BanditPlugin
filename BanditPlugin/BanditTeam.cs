@@ -12,12 +12,12 @@ namespace BanditPlugin
     /// one another at all. See <see cref="BanditTeams"/> for how a name becomes a group.
     ///
     /// Which means "teams" is a server feature rather than a bandit one: a player types
-    /// "/banditteam join red" and is on the same side as every red bandit, with no bot involved.
+    /// "/bandit team join red" and is on the same side as every red bandit, with no bot involved.
     /// </summary>
     public class BanditTeam
     {
         /// <summary>
-        /// What "/banditteam join &lt;name&gt;" and "team:&lt;name&gt;" match, case-insensitively.
+        /// What "/bandit team join &lt;name&gt;" and "team:&lt;name&gt;" match, case-insensitively.
         /// Also what the group ID is derived from, so renaming a team makes a different group and
         /// leaves anyone who joined the old one behind on it.
         /// </summary>
@@ -47,7 +47,7 @@ namespace BanditPlugin
         /// behaving exactly as it did: one side of bandits, hostile to everyone not on it.
         ///
         /// "red" and "blue" exist to be spawned against each other -
-        /// "/squadspawn rifle team:red" then "/squadspawn rifle team:blue" is a fight you can
+        /// "/bandit squad spawn rifle team:red" then "/bandit squad spawn rifle team:blue" is a fight you can
         /// stand and watch.
         /// </summary>
         public static List<BanditTeam> BuildDefaults()

@@ -21,7 +21,7 @@
 | `AllowSprint` / `AllowJumping` | `true` | Vanilla still gates sprint on stamina and aiming. |
 | `AdvanceOnTarget` | `false` | Walk toward a target further away than `PreferredEngagementRange`. A chase behaviour - off by default, and only applies when the bot has no order or patrol. |
 | `InvestigateEnabled` | `false` | After losing contact, go and look at the last known position. Also off by default: it makes the bot leave its post. |
-| `DespawnSecondsAfterDeath` | `5` | How long a killed bandit lies there before removal. Negative leaves the body for `/banditclear`. |
+| `DespawnSecondsAfterDeath` | `5` | How long a killed bandit lies there before removal. Negative leaves the body for `/bandit clear all`. |
 | `PreferredEngagementRange` | `25` | Range the bot fights at, and scores cover against. |
 | `CoverEnabled` | `true` | Seek cover when seen or shot at. |
 | `CoverSearchRadius` | `18` | Radius searched for cover. |

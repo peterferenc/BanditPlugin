@@ -5,9 +5,9 @@ namespace BanditPlugin
     /// <summary>
     /// One kind of squad: who is in it, and how the group as a whole fights.
     ///
-    /// This is to "/squadspawn" what <see cref="BanditKit"/> is to "/bandit" - a named thing you can
-    /// put on the ground without stating any of its details, so "/squadspawn sniper" and
-    /// "/squadspawn rifle" produce two squads that behave differently under one configuration.
+    /// This is to "/bandit squad spawn" what <see cref="BanditKit"/> is to "/bandit spawn" - a named thing you can
+    /// put on the ground without stating any of its details, so "/bandit squad spawn sniper" and
+    /// "/bandit squad spawn rifle" produce two squads that behave differently under one configuration.
     ///
     /// The split between the two is deliberate and it is the whole reason this class is short: what
     /// a man carries and how far he shoots is a property of his class, not of the squad he happens
@@ -28,7 +28,7 @@ namespace BanditPlugin
     /// Everything is resolved into a <see cref="BanditSquadProfile"/> once, when the squad is
     /// spawned. Editing a type affects the next squad, not the one already in the field.
     ///
-    /// There is deliberately no Cost field here. What a squad is worth to "/banditevent" is the sum
+    /// There is deliberately no Cost field here. What a squad is worth to "/bandit event spawn" is the sum
     /// of its members' kit costs, worked out by <see cref="BanditConfiguration.SquadCost"/> - so
     /// adding a marksman to a type makes it dearer on its own, and a price cannot drift out of step
     /// with the men it is meant to describe. What the type *does* state is the two things that
@@ -37,7 +37,7 @@ namespace BanditPlugin
     public class BanditSquadType
     {
         /// <summary>
-        /// What "/squadspawn &lt;name&gt;" matches, case-insensitively.
+        /// What "/bandit squad spawn &lt;name&gt;" matches, case-insensitively.
         /// </summary>
         public string Name = string.Empty;
 
@@ -56,13 +56,13 @@ namespace BanditPlugin
         ///
         /// This is how you build a standing enemy of your own: a squad type on team "blue" is a
         /// squad that fights the red bandits wherever the two of them meet, without anyone having
-        /// to name a team on the command line. "/squadspawn &lt;type&gt; team:&lt;name&gt;" overrides
+        /// to name a team on the command line. "/bandit squad spawn &lt;type&gt; team:&lt;name&gt;" overrides
         /// it for one spawn.
         /// </summary>
         public string Team = string.Empty;
 
         /// <summary>
-        /// The smallest "/banditevent &lt;cost&gt;" budget this type may be drawn into.
+        /// The smallest "/bandit event spawn &lt;cost&gt;" budget this type may be drawn into.
         ///
         /// Deliberately *not* the same thing as what it costs. A sniper pair is affordable long
         /// before it is appropriate: two marksmen and a rifleman price out at 62, but an event
@@ -76,7 +76,7 @@ namespace BanditPlugin
 
         /// <summary>
         /// How often this type is drawn relative to the other eligible ones. 1 is ordinary, 0 keeps
-        /// it out of events while leaving "/squadspawn &lt;name&gt;" working.
+        /// it out of events while leaving "/bandit squad spawn &lt;name&gt;" working.
         /// </summary>
         public float Weight = 1f;
 
@@ -84,7 +84,7 @@ namespace BanditPlugin
         public float Spacing = -1f;
 
         /// <summary>
-        /// How far off "/squadspawn" puts this squad when you do not name a distance.
+        /// How far off "/bandit squad spawn" puts this squad when you do not name a distance.
         ///
         /// Worth setting per type rather than leaving global, because the point of the default is to
         /// be past the squad's own eyes: you walk in on them and get to watch the moment they
@@ -118,7 +118,7 @@ namespace BanditPlugin
         /// Spawn this squad weapons free and under its classes' standing orders, rather than inert.
         ///
         /// On for every default type: a squad exists to be watched fighting, and one that has to be
-        /// switched on a command at a time is not a squad - that is what "/bandit" is for.
+        /// switched on a command at a time is not a squad - that is what "/bandit spawn" is for.
         /// </summary>
         public bool WeaponsFree = true;
 
@@ -131,7 +131,7 @@ namespace BanditPlugin
         {
             return new List<BanditSquadType>
             {
-                // One of each class - the squad "/squadspawn" always put down, kept as the default
+                // One of each class - the squad "/bandit squad spawn" always put down, kept as the default
                 // because it is the only one that shows all four behaviours in the same fight: the
                 // gunner suppressing, the marksman reaching, the breacher closing and the riflemen
                 // working cover. Every figure inherits, so this is the global configuration exactly.

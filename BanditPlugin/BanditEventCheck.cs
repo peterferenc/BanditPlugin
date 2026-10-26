@@ -22,7 +22,7 @@ namespace BanditPlugin
     /// types, so there is no floor a bigger number cannot reach - the only genuine ceiling is on
     /// men, not on points.
     ///
-    /// So "/banditevent check" prices everything the draw can see and lists what cannot be drawn and
+    /// So "/bandit info event" prices everything the draw can see and lists what cannot be drawn and
     /// why. The structural half of the same pass runs at load and goes to the console.
     /// </summary>
     public static class BanditEventCheck
@@ -149,7 +149,7 @@ namespace BanditPlugin
             if (problems.Count > 0)
             {
                 Logger.LogWarning($"[Bandit] {problems.Count} event configuration problem(s) - "
-                    + "run /banditevent check in game for the full report, including vehicle assets.");
+                    + "run /bandit info event in game for the full report, including vehicle assets.");
             }
         }
 

@@ -63,7 +63,7 @@ namespace BanditPlugin.Navigation
 
         /// <summary>
         /// True when the bot is following an A* path, false when it is steering directly because
-        /// one end of the trip is off the navmesh. Reported by /banditstatus - which of the two is
+        /// one end of the trip is off the navmesh. Reported by /bandit debug status - which of the two is
         /// running explains most odd movement.
         /// </summary>
         public bool IsFollowingPath => _path.HasPath;

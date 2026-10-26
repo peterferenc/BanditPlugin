@@ -8,7 +8,7 @@ using UnityEngine;
 namespace BanditPlugin.Commands
 {
     /// <summary>
-    /// "/banditnavlog on|off" - the running commentary from every driving bandit.
+    /// "/bandit debug navlog on|off" - the running commentary from every driving bandit.
     ///
     /// A development switch rather than a setting, and deliberately not in the configuration file:
     /// the moment you want it is the moment a vehicle is doing something inexplicable in front of
@@ -18,21 +18,15 @@ namespace BanditPlugin.Commands
     /// lines - a stall, a recovery, a refusal, a give-up - which are written whenever it is on and
     /// are the ones actually worth reading. See <see cref="BanditNavLog"/>.
     /// </summary>
-    public class CommandBanditNavLog : IRocketCommand
+    public static class BanditNavLogCommand
     {
-        public AllowedCaller AllowedCaller => AllowedCaller.Both;
-        public string Name => "banditnavlog";
-        public string Help => "Turns the vehicle navigation commentary in the server log on or off.";
-        public string Syntax => "[on|off|route [seconds]|clear]";
-        public List<string> Aliases => new List<string> { "bnavlog" };
-        public List<string> Permissions => new List<string> { "bandit.spawn" };
 
-        public void Execute(IRocketPlayer caller, string[] command)
+        public static void Execute(IRocketPlayer caller, string[] command)
         {
             if (command.Length == 0)
             {
                 Reply(caller, $"Navigation logging is {(BanditNavLog.Enabled ? "on" : "off")}. "
-                    + "/banditnavlog on|off.", Color.yellow);
+                    + "/bandit debug navlog on|off.", Color.yellow);
                 return;
             }
 
@@ -42,13 +36,6 @@ namespace BanditPlugin.Commands
                 || word.Equals("show", StringComparison.OrdinalIgnoreCase))
             {
                 ShowRoute(caller, command);
-                return;
-            }
-
-            if (word.Equals("clear", StringComparison.OrdinalIgnoreCase))
-            {
-                BanditRouteDebug.Clear();
-                Reply(caller, "Route markers cleared.", Color.green);
                 return;
             }
 
@@ -66,7 +53,7 @@ namespace BanditPlugin.Commands
             }
             else
             {
-                Reply(caller, "Usage: /banditnavlog on|off.", Color.red);
+                Reply(caller, "Usage: /bandit debug navlog on|off|route [seconds].", Color.red);
                 return;
             }
 
@@ -80,7 +67,7 @@ namespace BanditPlugin.Commands
             Reply(caller, on
                 ? "Navigation logging on - every driving bandit reports to the server log twice a "
                     + "second, and stalls, refusals and gives-up whenever they happen. "
-                    + "/banditnavlog route draws the planned route on the ground."
+                    + "/bandit debug navlog route draws the planned route on the ground."
                 : "Navigation logging off.", Color.green);
         }
 
@@ -97,8 +84,8 @@ namespace BanditPlugin.Commands
 
             if (plan == null || plan.Count == 0)
             {
-                Reply(caller, "No route has been planned yet. Send a vehicle with /banditvgoto marker, "
-                    + "/banditvgoto wp or /banditevent convoy first.", Color.yellow);
+                Reply(caller, "No route has been planned yet. Send a vehicle with 'drive marker', "
+                    + "'drive route' or /bandit convoy spawn first.", Color.yellow);
                 return;
             }
 
