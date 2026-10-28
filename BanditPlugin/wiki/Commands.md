@@ -3,7 +3,9 @@
 Everything is one command, `/bandit`, followed by what to do. Spawning, orders, routes and
 diagnostics take the `bandit.spawn` permission; `/bandit team ...` takes `bandit.team`. Grant
 both in `Rocket/Permissions.config.xml`. `/bandit help` lists the commands in game, and
-`/bandit help spawn|orders|targets|route|team|debug|test|clear` gives the details.
+`/bandit help spawn|orders|targets|route|team|debug|test|clear` gives the details. Coming from
+1.0, where every command had its own name? [Upgrading from 1.0](Upgrading-from-1.0) maps each
+old command to its new form.
 
 ```
 /bandit spawn | squad spawn | event spawn | convoy spawn | vehicle spawn

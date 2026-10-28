@@ -5,6 +5,7 @@
 **Using it**
 
 - [Commands](Commands)
+- [Upgrading from 1.0](Upgrading-from-1.0)
 - [Configuration](Configuration)
 - [Points & cost](Points-and-Cost)
 - [Build & install](Build-and-Install)

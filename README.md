@@ -106,7 +106,8 @@ the client-side exit timer.
 The **[wiki](https://github.com/peterferenc/BanditPlugin/wiki)** is the detailed documentation -
 every command, every configuration key, and how each subsystem actually works:
 
-- [Commands](https://github.com/peterferenc/BanditPlugin/wiki/Commands)
+- [Commands](https://github.com/peterferenc/BanditPlugin/wiki/Commands) ·
+  [Upgrading from 1.0](https://github.com/peterferenc/BanditPlugin/wiki/Upgrading-from-1.0) - old commands to new
 - [Configuration](https://github.com/peterferenc/BanditPlugin/wiki/Configuration)
 - [Points & cost](https://github.com/peterferenc/BanditPlugin/wiki/Points-and-Cost)
 - [Build & install](https://github.com/peterferenc/BanditPlugin/wiki/Build-and-Install)
